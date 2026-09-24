@@ -118,11 +118,12 @@ pub fn user_hash(v: &[u8], rid: u32, hbootkey: &[u8; 16]) -> Result<UserHash, Sa
     let nt_off = le32(v, 0xa8) as usize + BASE;
     let nt_len = le32(v, 0xac) as usize;
 
-    let (nt_hash, has_hash) = if nt_len == 0 {
-        (EMPTY_NT_HASH, false)
-    } else {
-        let obf = decrypt_hash(v, nt_off, nt_len, hbootkey, rid)?;
-        (deobfuscate(&obf, rid), true)
+    let (nt_hash, has_hash) = match decrypt_hash(v, nt_off, nt_len, hbootkey, rid)? {
+        Some(obf) => (deobfuscate(&obf, rid), true),
+        // Kein Hash hinterlegt (deaktiviertes oder passwortloses Konto): das ist
+        // kein Fehler, sondern ein leeres Passwort. Die eingebauten Konten
+        // (Administrator, Gast, DefaultAccount) fallen typischerweise hierunter.
+        None => (EMPTY_NT_HASH, false),
     };
 
     Ok(UserHash {
@@ -135,13 +136,21 @@ pub fn user_hash(v: &[u8], rid: u32, hbootkey: &[u8; 16]) -> Result<UserHash, Sa
 
 /// Entschlüsselt die äussere Schicht (RC4 oder AES) der Hash-Struktur und
 /// liefert die noch DES-verschleierten 16 Bytes.
+///
+/// `Ok(None)` bedeutet: Die Struktur hat ein bekanntes Format, enthält aber
+/// keine Hash-Daten. Das ist der Normalfall bei Konten ohne gesetztes Passwort
+/// (z. B. die eingebauten Administrator-, Gast- und DefaultAccount-Konten) und
+/// wird vom Aufrufer als leeres Passwort gewertet, nicht als Fehler.
 fn decrypt_hash(
     v: &[u8],
     off: usize,
     len: usize,
     hbootkey: &[u8; 16],
     rid: u32,
-) -> Result<[u8; 16], SamError> {
+) -> Result<Option<[u8; 16]>, SamError> {
+    if len == 0 {
+        return Ok(None);
+    }
     let header = v
         .get(off..off + 4)
         .ok_or(SamError::BadV("Hash-Kopf ausserhalb"))?;
@@ -149,7 +158,7 @@ fn decrypt_hash(
     let mut obf = [0u8; 16];
 
     match revision {
-        // RC4: Struktur ist 20 Bytes, Hash bei off+4..off+20.
+        // RC4: volle Struktur ist 20 Bytes, Hash bei off+4..off+20.
         1 if len >= 20 => {
             let enc = v
                 .get(off + 4..off + 20)
@@ -157,7 +166,8 @@ fn decrypt_hash(
             let key = md5(&[&hbootkey[..16], &rid.to_le_bytes(), NTPASSWORD]);
             obf.copy_from_slice(&rc4(&key, enc));
         }
-        // AES: Salt bei off+8..off+24, Chiffrat bei off+24..off+56.
+        // AES: volle Struktur ist 56 Bytes, Salt bei off+8..off+24,
+        // Chiffrat bei off+24..off+56.
         2 if len >= 56 => {
             let iv: [u8; 16] = v
                 .get(off + 8..off + 24)
@@ -173,9 +183,12 @@ fn decrypt_hash(
             }
             obf.copy_from_slice(&dec[..16]);
         }
-        _ => return Err(SamError::BadV("unbekannte Hash-Revision oder Länge")),
+        // Bekannte Revision, aber die Struktur trägt keine Hash-Daten: leeres
+        // Passwort.
+        1 | 2 => return Ok(None),
+        _ => return Err(SamError::BadV("unbekannte Hash-Revision")),
     }
-    Ok(obf)
+    Ok(Some(obf))
 }
 
 /// Entfernt die DES-Verschleierung mit den aus der RID abgeleiteten Schlüsseln.
@@ -328,6 +341,31 @@ mod tests {
         assert_eq!(u.rid, rid);
         assert!(u.has_hash);
         assert_eq!(u.nt_hash, target);
+    }
+
+    #[test]
+    fn aes_struktur_ohne_hashdaten_ist_leeres_passwort() {
+        // Deaktivierte Konten (z. B. Administrator, Gast) tragen eine
+        // AES-Struktur mit Revision 2, aber ohne Hash-Daten (Laenge 24 statt 56).
+        const BASE: usize = 0xCC;
+        let name: Vec<u8> = "Administrator"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let nt_rel = name.len();
+        let mut v = vec![0u8; BASE + nt_rel + 24];
+        v[0x0c..0x10].copy_from_slice(&0u32.to_le_bytes());
+        v[0x10..0x14].copy_from_slice(&(name.len() as u32).to_le_bytes());
+        v[0xa8..0xac].copy_from_slice(&(nt_rel as u32).to_le_bytes());
+        v[0xac..0xb0].copy_from_slice(&24u32.to_le_bytes());
+        v[BASE..BASE + name.len()].copy_from_slice(&name);
+        let ns = BASE + nt_rel;
+        v[ns + 2] = 2; // Revision AES, aber Laenge 24 -> keine Daten
+
+        let u = user_hash(&v, 500, &[0u8; 16]).unwrap();
+        assert_eq!(u.username, "Administrator");
+        assert!(!u.has_hash);
+        assert_eq!(u.nt_hash, EMPTY_NT_HASH);
     }
 
     #[test]
