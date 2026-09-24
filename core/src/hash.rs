@@ -24,19 +24,41 @@ pub struct ImageHashes {
     pub blake3: String,
 }
 
+/// Rückmeldung über den Hash-Fortschritt: erhält die Gesamtzahl der bisher
+/// verarbeiteten Bytes. Muss `Sync` sein, da sie aus dem Hash-Thread aufgerufen
+/// wird.
+pub type Progress<'a> = &'a (dyn Fn(u64) + Sync);
+
 /// Berechnet SHA-256 und BLAKE3 über das komplette Image.
 pub fn hash_image(img: &ImageReader) -> ImageHashes {
+    hash_image_with_progress(img, None)
+}
+
+/// Wie [`hash_image`], meldet aber den Fortschritt über `progress`.
+pub fn hash_image_with_progress(img: &ImageReader, progress: Option<Progress<'_>>) -> ImageHashes {
     img.advise_sequential();
-    hash_bytes(img.as_slice())
+    hash_bytes_with_progress(img.as_slice(), progress)
 }
 
 /// Berechnet SHA-256 und BLAKE3 über `data`, blockweise und parallel.
 pub fn hash_bytes(data: &[u8]) -> ImageHashes {
+    hash_bytes_with_progress(data, None)
+}
+
+/// Wie [`hash_bytes`], meldet aber den Fortschritt über `progress`. Der
+/// Fortschritt wird vom SHA-256-Durchlauf gemeldet, der in aller Regel der
+/// langsamere der beiden ist.
+pub fn hash_bytes_with_progress(data: &[u8], progress: Option<Progress<'_>>) -> ImageHashes {
     let (sha, b3) = std::thread::scope(|s| {
-        let sha = s.spawn(|| {
+        let sha = s.spawn(move || {
             let mut h = Sha256::new();
+            let mut done = 0u64;
             for chunk in data.chunks(CHUNK) {
                 h.update(chunk);
+                if let Some(p) = progress {
+                    done += chunk.len() as u64;
+                    p(done);
+                }
             }
             to_hex(&h.finalize())
         });

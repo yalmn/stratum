@@ -11,12 +11,15 @@ mod windows;
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use indicatif::{ProgressBar, ProgressStyle};
 
-use stratum_core::{hash_image, scan_partitions, FsHint, ImageReader, PartitionScheme};
+use stratum_core::{
+    hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
+};
 use stratum_search::{SearchEngine, TermTable};
 
 use report::{ImageInfo, Report, SearchReport, Tool};
@@ -66,10 +69,20 @@ fn main() -> Result<()> {
     let hashes = if cli.no_hash {
         None
     } else {
-        Some(hash_image(&img))
+        let pb = bytes_bar(img.len());
+        let cb: stratum_core::Progress = &|done| pb.set_position(done);
+        let h = hash_image_with_progress(&img, Some(cb));
+        pb.finish_and_clear();
+        eprintln!("[+] Integritäts-Hashes berechnet ({} Bytes)", img.len());
+        Some(h)
     };
 
     let partitions = scan_partitions(&img);
+    eprintln!(
+        "[+] {} Partition(en) erkannt ({:?})",
+        partitions.partitions.len(),
+        partitions.scheme
+    );
 
     // Welche Bereiche als NTFS untersucht werden: entweder genau die per
     // bdp.info benannte Partition, oder alle als NTFS erkannten aus dem Scan.
@@ -91,9 +104,20 @@ fn main() -> Result<()> {
 
     let mut windows = Vec::new();
     for (index, offset, size) in targets {
+        eprintln!("[*] Untersuche NTFS-Partition bei Offset {offset} ...");
         match windows::analyze(&img, index, offset, size) {
-            Ok(Some(w)) => windows.push(w),
-            Ok(None) => {}
+            Ok(Some(w)) => {
+                eprintln!(
+                    "[+] Windows gefunden: {} Konto(en){}",
+                    w.accounts.len(),
+                    w.computer_name
+                        .as_deref()
+                        .map(|c| format!(", Rechner {c}"))
+                        .unwrap_or_default()
+                );
+                windows.push(w);
+            }
+            Ok(None) => eprintln!("    kein Windows auf dieser Partition"),
             Err(e) => warnings.push(format!("Partition {index}: {e:#}")),
         }
     }
@@ -125,6 +149,26 @@ fn main() -> Result<()> {
     };
 
     write_report(&out, cli.out.as_deref())
+}
+
+/// Fortschrittsbalken in Bytes. Zeichnet auf stderr und blendet sich aus, wenn
+/// stderr kein Terminal ist, damit der JSON-Report auf stdout sauber bleibt.
+fn bytes_bar(len: u64) -> ProgressBar {
+    let pb = ProgressBar::new(len);
+    if let Ok(style) = ProgressStyle::with_template(
+        "  Hashing [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})",
+    ) {
+        pb.set_style(style.progress_chars("=>-"));
+    }
+    pb
+}
+
+/// Laufender Spinner für eine Phase ohne bekannte Gesamtlänge.
+fn spinner(msg: &'static str) -> ProgressBar {
+    let pb = ProgressBar::new_spinner();
+    pb.set_message(msg);
+    pb.enable_steady_tick(Duration::from_millis(120));
+    pb
 }
 
 fn run_search(img: &ImageReader, use_default: bool, paths: &[PathBuf]) -> Result<SearchReport> {
@@ -163,7 +207,10 @@ fn run_search(img: &ImageReader, use_default: bool, paths: &[PathBuf]) -> Result
         categories,
     };
     let engine = SearchEngine::new(&table);
+    let pb = spinner("Durchsuche Image nach Begriffen");
     let result = engine.run(img.as_slice(), 0);
+    pb.finish_and_clear();
+    eprintln!("[+] Keyword-Suche: {} Treffer", result.findings.len());
     Ok(SearchReport {
         table_name: table.meta.name,
         table_version: table.meta.version,
