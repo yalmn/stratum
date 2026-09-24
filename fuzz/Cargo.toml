@@ -1,0 +1,51 @@
+[package]
+name = "stratum-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+stratum-core = { path = "../core" }
+stratum-registry = { path = "../registry" }
+stratum-search = { path = "../search" }
+stratum-ntfs = { path = "../ntfs" }
+stratum-creds = { path = "../creds" }
+
+[[bin]]
+name = "partition"
+path = "fuzz_targets/partition.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hive"
+path = "fuzz_targets/hive.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "search"
+path = "fuzz_targets/search.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ntfs"
+path = "fuzz_targets/ntfs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sam"
+path = "fuzz_targets/sam.rs"
+test = false
+doc = false
+bench = false

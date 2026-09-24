@@ -1,0 +1,14 @@
+[package]
+name = "stratum-ntfs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "NTFS-Zugriff (Datei per Pfad lesen) für stratum, aufbauend auf dem ntfs-Crate"
+
+[dependencies]
+stratum-core.workspace = true
+ntfs = "0.4.0"
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "stratum-creds"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Extraktion lokaler Windows-Konten (Benutzername + NT-Hash) aus SAM und SYSTEM fuer stratum"
+
+[dependencies]
+stratum-registry.workspace = true
+thiserror.workspace = true
+serde = { workspace = true }
+md-5 = "0.11.0"
+aes = "0.9.3"
+cbc = { version = "0.2.1", features = ["block-padding"] }
+des = "0.9.0"
+
+[dev-dependencies]
+serde_json = "1.0.151"

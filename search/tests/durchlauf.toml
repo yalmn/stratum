@@ -1,0 +1,15 @@
+[meta]
+name = "Testfall"
+version = 1
+
+[[kategorie]]
+id = "zugangsdaten"
+modus = "paar"
+abstand_bytes = 64
+links = ["user", "benutzer"]
+rechts = ["pw", "passwort"]
+
+[[kategorie]]
+id = "darknet"
+begriffe = [".onion", "torrc"]
+onion_pruefung = true

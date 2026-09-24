@@ -1,0 +1,9 @@
+[package]
+name = "stratum-mmap"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Read-only Memory-Mapping für stratum (einzige unsafe-Grenze im Projekt)"
+
+[dependencies]
+memmap2.workspace = true

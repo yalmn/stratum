@@ -1,0 +1,35 @@
+# Beispiel-Begriffstabelle für stratum-search.
+#
+# Diese Datei wird pro Fall angepasst und versioniert. Name und Hash der
+# tatsächlich verwendeten Tabelle gehören in den Report, damit
+# nachvollziehbar bleibt, wonach gesucht wurde. Die deliktsbezogenen Listen
+# füllen die Ermittler; hier stehen nur wenige Beispielbegriffe.
+
+[meta]
+name = "Beispielfall"
+version = 1
+max_treffer = 100000
+
+# Zugangsdaten im Klartext: nur als Paar aus einem Benutzer- und einem
+# Passwort-Feld in geringem Abstand, das senkt die Fehltrefferzahl stark.
+[[kategorie]]
+id = "zugangsdaten"
+aktiv = true
+modus = "paar"
+abstand_bytes = 128
+links = ["user", "username", "benutzer", "benutzername", "login", "uname", "un", "usern"]
+rechts = ["pw", "pwd", "pass", "passw", "passwort", "password", "pword", "kennwort", "secret"]
+
+# Hinweise auf einen versteckten Dienst im Tor-Netz.
+[[kategorie]]
+id = "darknet"
+aktiv = true
+begriffe = [".onion", "torrc", "HiddenServiceDir", "hostname", "hs_ed25519_secret_key"]
+onion_pruefung = true
+
+# Deliktsbezogene Suchbegriffe. Inaktiv, bis die Ermittler die Liste füllen
+# und die Kategorie für den konkreten Fall freigeben.
+[[kategorie]]
+id = "delikt"
+aktiv = false
+begriffe = []

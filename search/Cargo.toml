@@ -1,0 +1,12 @@
+[package]
+name = "stratum-search"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Keyword- und Muster-Suche über Roh-Images für stratum"
+
+[dependencies]
+aho-corasick = "1.1.5"
+serde = { workspace = true }
+toml = { version = "1.1.6", default-features = false, features = ["parse", "serde"] }
+thiserror.workspace = true

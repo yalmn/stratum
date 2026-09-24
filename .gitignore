@@ -1,0 +1,8 @@
+/target
+*.swp
+*.dd
+*.img
+*.E01
+fuzz/target
+fuzz/corpus
+fuzz/artifacts

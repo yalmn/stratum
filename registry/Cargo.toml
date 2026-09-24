@@ -1,0 +1,9 @@
+[package]
+name = "stratum-registry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser für Windows-Registry-Hives (regf) für stratum"
+
+[dependencies]
+thiserror.workspace = true

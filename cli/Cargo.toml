@@ -1,0 +1,24 @@
+[package]
+name = "stratum-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Kommandozeilen-Tool von stratum: Image analysieren, JSON-Report erzeugen"
+
+[[bin]]
+name = "stratum"
+path = "src/main.rs"
+
+[dependencies]
+stratum-core.workspace = true
+stratum-registry.workspace = true
+stratum-ntfs = { path = "../ntfs" }
+stratum-search = { path = "../search" }
+stratum-creds = { path = "../creds" }
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+serde = { workspace = true }
+serde_json = "1.0.151"
+
+[dev-dependencies]
+tempfile.workspace = true
