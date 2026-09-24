@@ -18,6 +18,8 @@ pub enum TermTableError {
 pub const DEFAULT_ABSTAND: u64 = 128;
 /// Obergrenze für die Zahl der Treffer, ab der abgeschnitten wird.
 pub const DEFAULT_MAX_TREFFER: usize = 100_000;
+/// Standard-Obergrenze für die Treffer einer einzelnen Kategorie.
+pub const DEFAULT_KAT_MAX: usize = 20_000;
 
 /// Eine komplette Begriffstabelle, üblicherweise aus einer TOML-Datei.
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -86,6 +88,19 @@ pub struct Category {
     /// gemeldet.
     #[serde(default)]
     pub onion_pruefung: bool,
+    /// Nur ganze Wörter treffen: ein Begriff zählt nur, wenn er nicht in einem
+    /// längeren Wort steckt (`rat` nicht in `operator`). Standard: an.
+    #[serde(default = "default_true")]
+    pub ganzes_wort: bool,
+    /// Nur Treffer melden, die in einem zusammenhängenden Stück lesbaren Textes
+    /// liegen. Filtert Zufallstreffer in Binärdaten (z. B. Programmcode).
+    /// Standard: an.
+    #[serde(default = "default_true")]
+    pub nur_text: bool,
+    /// Obergrenze für die Treffer dieser Kategorie. Verhindert, dass eine laute
+    /// Kategorie die Suche für alle anderen abbricht.
+    #[serde(default = "default_kat_max")]
+    pub max_treffer: usize,
 }
 
 fn default_true() -> bool {
@@ -94,6 +109,10 @@ fn default_true() -> bool {
 
 fn default_abstand() -> u64 {
     DEFAULT_ABSTAND
+}
+
+fn default_kat_max() -> usize {
+    DEFAULT_KAT_MAX
 }
 
 impl TermTable {

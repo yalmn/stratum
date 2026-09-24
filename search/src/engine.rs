@@ -37,6 +37,9 @@ struct CatInfo {
     id: String,
     modus: Modus,
     abstand: u64,
+    ganzes_wort: bool,
+    nur_text: bool,
+    max_treffer: usize,
 }
 
 struct Pattern {
@@ -90,6 +93,9 @@ impl SearchEngine {
                 id: cat.id.clone(),
                 modus: cat.modus,
                 abstand: cat.abstand_bytes,
+                ganzes_wort: cat.ganzes_wort,
+                nur_text: cat.nur_text,
+                max_treffer: cat.max_treffer,
             });
             add_category(cat, cat_idx, &mut patterns, &mut raw);
         }
@@ -126,35 +132,54 @@ impl SearchEngine {
         };
 
         let mut pair_state = vec![PairState::default(); self.categories.len()];
+        // Treffer je Kategorie, damit eine laute Kategorie die Suche fuer die
+        // anderen nicht abschneidet.
+        let mut per_cat = vec![0usize; self.categories.len()];
+        let mut capped = vec![false; self.categories.len()];
 
         for m in ac.find_overlapping_iter(data) {
             if result.findings.len() >= self.max_treffer {
                 result.warnings.push(format!(
-                    "Treffergrenze {} erreicht, weitere Treffer nicht erfasst",
+                    "Gesamt-Treffergrenze {} erreicht, weitere Treffer nicht erfasst",
                     self.max_treffer
                 ));
                 break;
             }
 
             let pat = &self.patterns[m.pattern().as_usize()];
+            let cat = &self.categories[pat.cat];
             let start = m.start();
 
-            if pat.is_onion {
-                if let Some(f) = onion_finding(
-                    data,
-                    start,
-                    m.end(),
-                    base_offset,
-                    &pat.term,
-                    pat,
-                    &self.categories,
-                ) {
-                    result.findings.push(f);
+            // Kategorie-Obergrenze pruefen.
+            if per_cat[pat.cat] >= cat.max_treffer {
+                if !capped[pat.cat] {
+                    capped[pat.cat] = true;
+                    result.warnings.push(format!(
+                        "Kategorie {}: Grenze {} erreicht, weitere Treffer dieser Kategorie nicht erfasst",
+                        cat.id, cat.max_treffer
+                    ));
                 }
                 continue;
             }
 
-            let cat = &self.categories[pat.cat];
+            if pat.is_onion {
+                if let Some(f) =
+                    onion_finding(data, start, m.end(), base_offset, pat, &self.categories)
+                {
+                    result.findings.push(f);
+                    per_cat[pat.cat] += 1;
+                }
+                continue;
+            }
+
+            // Rauschfilter: nur ganze Woerter und/oder nur lesbarer Textkontext.
+            if cat.ganzes_wort && !is_word_match(data, start, m.end(), pat.enc) {
+                continue;
+            }
+            if cat.nur_text && !is_text_context(data, start, m.end(), pat.enc) {
+                continue;
+            }
+
             match cat.modus {
                 Modus::Einfach => {
                     result.findings.push(Finding {
@@ -166,18 +191,75 @@ impl SearchEngine {
                         offset: base_offset + start as u64,
                         kontext: context(data, start, m.end(), pat.enc),
                     });
+                    per_cat[pat.cat] += 1;
                 }
                 Modus::Paar => {
                     if let Some(f) =
                         pair_finding(data, pat, start, base_offset, cat, &mut pair_state[pat.cat])
                     {
                         result.findings.push(f);
+                        per_cat[pat.cat] += 1;
                     }
                 }
             }
         }
 
         result
+    }
+
+    /// Wie [`SearchEngine::run`], teilt die Daten aber in Blöcke auf und
+    /// durchsucht sie parallel (ein Kern je Block). Die Blöcke überlappen um die
+    /// Länge des längsten Begriffs, damit kein Treffer an einer Blockgrenze
+    /// verloren geht; Duplikate im Überlappungsbereich werden entfernt.
+    pub fn run_parallel(&self, data: &[u8], base_offset: u64) -> SearchResult {
+        use rayon::prelude::*;
+
+        // Grobe Blockgröße: genug, damit sich die Parallelität lohnt, aber viele
+        // Blöcke für gute Lastverteilung.
+        const BLOCK: usize = 64 * 1024 * 1024;
+        let overlap = self.max_pattern_len().max(1) - 1;
+
+        if self.ac.is_none() || data.len() <= BLOCK {
+            return self.run(data, base_offset);
+        }
+
+        // Startpositionen der Blöcke.
+        let starts: Vec<usize> = (0..data.len()).step_by(BLOCK).collect();
+        let mut parts: Vec<SearchResult> = starts
+            .par_iter()
+            .map(|&s| {
+                let end = (s + BLOCK + overlap).min(data.len());
+                let mut r = self.run(&data[s..end], base_offset + s as u64);
+                // Treffer, die vollständig im Überlappungsbereich liegen, werden
+                // vom nächsten Block erneut gefunden; hier verwerfen (ausser im
+                // letzten Block).
+                if end < data.len() {
+                    let grenze = base_offset + (s + BLOCK) as u64;
+                    r.findings.retain(|f| f.offset < grenze);
+                }
+                r
+            })
+            .collect();
+
+        let mut out = SearchResult::default();
+        for mut p in parts.drain(..) {
+            out.findings.append(&mut p.findings);
+            for w in p.warnings {
+                if !out.warnings.contains(&w) {
+                    out.warnings.push(w);
+                }
+            }
+        }
+        out.findings.sort_by_key(|f| f.offset);
+        out
+    }
+
+    fn max_pattern_len(&self) -> usize {
+        self.patterns
+            .iter()
+            .map(|p| p.term.len() * p.enc.width())
+            .max()
+            .unwrap_or(0)
     }
 }
 
@@ -302,7 +384,6 @@ fn onion_finding(
     start: usize,
     end: usize,
     base: u64,
-    _term: &str,
     pat: &Pattern,
     categories: &[CatInfo],
 ) -> Option<Finding> {
@@ -328,6 +409,87 @@ fn onion_finding(
 
 fn is_base32(b: u8) -> bool {
     b.is_ascii_lowercase() || (b'2'..=b'7').contains(&b)
+}
+
+/// Mindestlänge eines zusammenhängenden Textstücks, damit ein Treffer als „im
+/// Text liegend" gilt (gegen Zufallstreffer in Binärdaten).
+const MIN_TEXT_RUN: usize = 8;
+
+/// Ein Byte, das zu einem Wort gehört (Buchstabe, Ziffer, Unterstrich).
+fn is_word_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Prüft, ob der Treffer `[start, end)` ein ganzes Wort ist: an einer Kante wird
+/// nur dann eine Wortgrenze verlangt, wenn das Begriffszeichen dort selbst ein
+/// Wortzeichen ist (so bleibt z. B. `.onion` in `abc.onion` gültig).
+fn is_word_match(data: &[u8], start: usize, end: usize, enc: Encoding) -> bool {
+    match enc {
+        Encoding::Ascii => {
+            let first = data.get(start).copied().unwrap_or(0);
+            let last = data.get(end - 1).copied().unwrap_or(0);
+            let left_ok = !is_word_byte(first) || start == 0 || !is_word_byte(data[start - 1]);
+            let right_ok = !is_word_byte(last) || end >= data.len() || !is_word_byte(data[end]);
+            left_ok && right_ok
+        }
+        Encoding::Utf16Le => {
+            let unit = |o: usize| -> Option<u8> {
+                // Nur ASCII-Wortzeichen sind relevant (hohes Byte 0).
+                let hi = *data.get(o + 1)?;
+                let lo = *data.get(o)?;
+                (hi == 0).then_some(lo)
+            };
+            let first = unit(start).unwrap_or(0);
+            let last = unit(end - 2).unwrap_or(0);
+            let left_ok = !is_word_byte(first)
+                || start < 2
+                || unit(start - 2).map(is_word_byte) != Some(true);
+            let right_ok = !is_word_byte(last) || unit(end).map(is_word_byte) != Some(true);
+            left_ok && right_ok
+        }
+    }
+}
+
+/// Prüft, ob der Treffer in einem zusammenhängenden Stück lesbaren Textes liegt.
+/// Vom Treffer aus wird nach links und rechts erweitert, solange die Zeichen
+/// darstellbar sind; ist der so gefundene Textlauf lang genug, gilt der Treffer
+/// als echter Text und nicht als Zufall in Binärdaten.
+fn is_text_context(data: &[u8], start: usize, end: usize, enc: Encoding) -> bool {
+    match enc {
+        Encoding::Ascii => {
+            let mut lo = start;
+            while lo > 0 && is_text_byte(data[lo - 1]) {
+                lo -= 1;
+            }
+            let mut hi = end;
+            while hi < data.len() && is_text_byte(data[hi]) {
+                hi += 1;
+            }
+            hi - lo >= MIN_TEXT_RUN
+        }
+        Encoding::Utf16Le => {
+            let printable_unit = |o: usize| -> bool {
+                match (data.get(o), data.get(o + 1)) {
+                    (Some(&lo), Some(&hi)) => hi == 0 && is_text_byte(lo),
+                    _ => false,
+                }
+            };
+            let mut lo = start;
+            while lo >= 2 && printable_unit(lo - 2) {
+                lo -= 2;
+            }
+            let mut hi = end;
+            while printable_unit(hi) {
+                hi += 2;
+            }
+            (hi - lo) / 2 >= MIN_TEXT_RUN
+        }
+    }
+}
+
+/// Darstellbares Textbyte inklusive der üblichen Zwischenräume.
+fn is_text_byte(b: u8) -> bool {
+    (0x20..=0x7e).contains(&b) || b == b'\t' || b == b'\r' || b == b'\n'
 }
 
 /// Liefert einen lesbaren Ausschnitt um `[from, to)`. Nicht darstellbare
@@ -405,29 +567,53 @@ mod tests {
     }
 
     #[test]
-    fn überlappende_begriffe() {
+    fn ganzes_wort_filtert_teilstrings() {
+        // Standard: nur ganze Wörter. "rat" nicht in "operator".
         let e = engine(
             r#"
             [meta]
             name = "t"
             [[kategorie]]
             id = "k"
+            nur_text = false
+            begriffe = ["rat", "user"]
+            "#,
+        );
+        // "rat" steckt in "operator" (raus), "user" steht allein (rein).
+        let r = e.run(b"the operator and user here", 0);
+        let terms: Vec<_> = ascii_terms(&r);
+        assert!(terms.contains(&"user"), "{terms:?}");
+        assert!(!terms.contains(&"rat"), "{terms:?}");
+    }
+
+    #[test]
+    fn ohne_wortgrenze_auch_teilstrings() {
+        let e = engine(
+            r#"
+            [meta]
+            name = "t"
+            [[kategorie]]
+            id = "k"
+            ganzes_wort = false
+            nur_text = false
             begriffe = ["user", "username"]
             "#,
         );
         let r = e.run(b"username", 0);
-        // "user" liegt in "username", beide Begriffe müssen ab Offset 0 kommen.
-        let terms: Vec<_> = r
-            .findings
+        let terms = ascii_terms(&r);
+        assert!(terms.contains(&"user"), "{terms:?}");
+        assert!(terms.contains(&"username"), "{terms:?}");
+    }
+
+    fn ascii_terms(r: &SearchResult) -> Vec<&str> {
+        r.findings
             .iter()
             .filter(|f| f.kodierung == Encoding::Ascii)
             .filter_map(|f| match &f.kind {
                 FindingKind::Term { begriff } => Some(begriff.as_str()),
                 _ => None,
             })
-            .collect();
-        assert!(terms.contains(&"user"), "gefunden: {terms:?}");
-        assert!(terms.contains(&"username"), "gefunden: {terms:?}");
+            .collect()
     }
 
     #[test]
@@ -543,12 +729,82 @@ mod tests {
             max_treffer = 3
             [[kategorie]]
             id = "k"
+            ganzes_wort = false
+            nur_text = false
             begriffe = ["a"]
             "#,
         );
         let r = e.run(b"aaaaaaaa", 0);
         assert_eq!(r.findings.len(), 3);
         assert_eq!(r.warnings.len(), 1);
+    }
+
+    #[test]
+    fn kategorie_grenze_schneidet_andere_nicht_ab() {
+        let e = engine(
+            r#"
+            [meta]
+            name = "t"
+            [[kategorie]]
+            id = "laut"
+            ganzes_wort = false
+            nur_text = false
+            max_treffer = 2
+            begriffe = ["a"]
+            [[kategorie]]
+            id = "leise"
+            ganzes_wort = false
+            nur_text = false
+            begriffe = ["z"]
+            "#,
+        );
+        let r = e.run(b"aaaaaaaaaa z", 0);
+        let laut = r.findings.iter().filter(|f| f.kategorie == "laut").count();
+        let leise = r.findings.iter().filter(|f| f.kategorie == "leise").count();
+        assert_eq!(laut, 2, "laute Kategorie gedeckelt");
+        assert_eq!(leise, 1, "leise Kategorie trotzdem gefunden");
+        assert!(r.warnings.iter().any(|w| w.contains("laut")));
+    }
+
+    #[test]
+    fn nur_text_filtert_binaerrauschen() {
+        let e = engine(
+            r#"
+            [meta]
+            name = "t"
+            [[kategorie]]
+            id = "k"
+            begriffe = ["c4"]
+            "#,
+        );
+        // "c4" isoliert in Binärdaten -> unterdrückt.
+        let binaer = b"\x00\xff\x03c4\x00\xfe\x11";
+        assert!(e.run(binaer, 0).findings.is_empty());
+        // "c4" in echtem Text -> gemeldet.
+        let text = b"das modell c4 wurde erwaehnt";
+        assert_eq!(e.run(text, 0).findings.len(), 1);
+    }
+
+    #[test]
+    fn parallel_gleich_wie_seriell() {
+        let e = engine(
+            r#"
+            [meta]
+            name = "t"
+            [[kategorie]]
+            id = "k"
+            begriffe = ["geheim", "torrc"]
+            "#,
+        );
+        // Genug Daten, damit die Parallelvariante wirklich in Blöcke teilt.
+        let mut data = vec![b' '; 200 * 1024 * 1024];
+        data[100..106].copy_from_slice(b"geheim");
+        let mid = 130 * 1024 * 1024;
+        data[mid..mid + 5].copy_from_slice(b"torrc");
+        let a = e.run(&data, 0);
+        let b = e.run_parallel(&data, 0);
+        assert_eq!(a.findings, b.findings);
+        assert_eq!(b.findings.len(), 2);
     }
 
     #[test]
@@ -565,6 +821,7 @@ mod tests {
             name = "t"
             [[kategorie]]
             id = "k"
+            nur_text = false
             begriffe = ["geheim"]
             "#,
         );
