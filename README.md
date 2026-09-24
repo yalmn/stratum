@@ -63,17 +63,30 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 |---|---|
 | `<image.dd>` | entschlüsseltes Roh-Image (z. B. `merged.dd`) |
 | `-o, --out` | Zieldatei für den JSON-Report (ohne Angabe: Ausgabe auf stdout) |
-| `-k, --keywords` | Begriffstabelle (TOML) für die Keyword-Suche |
+| `-k, --keywords` | eigene Begriffstabelle (TOML), mehrfach angebbar |
+| `--no-default-keywords` | die mitgelieferte Liste nicht verwenden |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |
 | `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei grossen Images Zeit) |
 
 Beispiel:
 
 ```sh
-stratum merged.dd -o report.json -k begriffe.toml
+stratum merged.dd -o report.json --bdp bdp.info
 ```
 
 Ohne `--bdp` bestimmt stratum die NTFS-Partitionen selbst aus der Partitionstabelle. Mit `--bdp` wird genau die von ForensiCUnlock entschlüsselte Partition ausgewertet.
+
+### Keyword-Listen
+
+Eine umfangreiche Begriffsliste zu häufigen Deliktsfeldern ist fest eingebaut und läuft bei jeder Analyse mit (Kategorien wie Zugangsdaten, Darknet, Kryptowährung, Finanzbetrug, Dokumente, Cybercrime, Waffen und weitere). Die lesbare Fassung liegt unter `begriffe/strafverfolgung.toml`.
+
+Eigene, fallbezogene Begriffe kommen in eine zweite Tabelle und werden zusätzlich übergeben. Die Vorlage dafür ist `begriffe/eigene.toml`:
+
+```sh
+stratum merged.dd -o report.json --bdp bdp.info -k eigene.toml
+```
+
+Die eingebaute Liste ist ein neutraler Ausgangspunkt, kein fertiger Fallkatalog. Pro Fall lässt sich abschalten, was nicht passt (`aktiv = false`), und mit `--no-default-keywords` deaktiviert man sie ganz. Sensible oder fallbezogene Wortlisten gehören nicht in dieses Repository, sondern in die eigene Tabelle, die getrennt geführt wird. Name und Version der verwendeten Tabellen stehen im Report, damit nachvollziehbar bleibt, wonach gesucht wurde.
 
 ## Tests
 

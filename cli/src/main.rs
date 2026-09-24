@@ -32,9 +32,11 @@ struct Cli {
     #[arg(short, long)]
     out: Option<PathBuf>,
 
-    /// Begriffstabelle (TOML) für die Keyword-Suche.
+    /// Begriffstabelle(n) (TOML) für die Keyword-Suche. Mehrfach angebbar, die
+    /// Tabellen werden zusammengeführt (z. B. eine mitgelieferte und eine
+    /// eigene).
     #[arg(short, long)]
-    keywords: Option<PathBuf>,
+    keywords: Vec<PathBuf>,
 
     /// bdp.info von ForensiCUnlock: legt die zu analysierende Partition fest.
     #[arg(long)]
@@ -43,7 +45,15 @@ struct Cli {
     /// Die Integritäts-Hashes nicht berechnen (spart bei großen Images Zeit).
     #[arg(long)]
     no_hash: bool,
+
+    /// Die mitgelieferte Begriffsliste "Strafverfolgung" nicht verwenden
+    /// (dann wird nur gesucht, wenn eine eigene Tabelle mit -k angegeben ist).
+    #[arg(long)]
+    no_default_keywords: bool,
 }
+
+/// Mitgelieferte Standard-Begriffstabelle, in das Programm eingebaut.
+const DEFAULT_KEYWORDS: &str = include_str!("../../begriffe/strafverfolgung.toml");
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -88,9 +98,11 @@ fn main() -> Result<()> {
         }
     }
 
-    let search = match &cli.keywords {
-        Some(path) => Some(run_search(&img, path)?),
-        None => None,
+    let use_default = !cli.no_default_keywords;
+    let search = if !use_default && cli.keywords.is_empty() {
+        None
+    } else {
+        Some(run_search(&img, use_default, &cli.keywords)?)
     };
 
     let generated_unix = SystemTime::now()
@@ -115,8 +127,41 @@ fn main() -> Result<()> {
     write_report(&out, cli.out.as_deref())
 }
 
-fn run_search(img: &ImageReader, path: &std::path::Path) -> Result<SearchReport> {
-    let table = TermTable::load(path).context("Begriffstabelle nicht lesbar")?;
+fn run_search(img: &ImageReader, use_default: bool, paths: &[PathBuf]) -> Result<SearchReport> {
+    // Mehrere Tabellen werden zu einer zusammengeführt: alle Kategorien
+    // hintereinander, der Name aus den Quellen, die hoechste Version. Die
+    // mitgelieferte Tabelle kommt zuerst, damit eigene Kategorien folgen.
+    let mut names = Vec::new();
+    let mut version = 0;
+    let mut categories = Vec::new();
+    let mut max_treffer = usize::MAX;
+
+    if use_default {
+        let table = TermTable::from_str(DEFAULT_KEYWORDS)
+            .context("eingebaute Begriffstabelle nicht lesbar")?;
+        names.push(format!("{} (mitgeliefert)", table.meta.name));
+        version = version.max(table.meta.version);
+        max_treffer = max_treffer.min(table.meta.max_treffer);
+        categories.extend(table.categories);
+    }
+
+    for path in paths {
+        let table = TermTable::load(path)
+            .with_context(|| format!("Begriffstabelle nicht lesbar: {}", path.display()))?;
+        names.push(table.meta.name);
+        version = version.max(table.meta.version);
+        max_treffer = max_treffer.min(table.meta.max_treffer);
+        categories.extend(table.categories);
+    }
+
+    let table = TermTable {
+        meta: stratum_search::Meta {
+            name: names.join(" + "),
+            version,
+            max_treffer,
+        },
+        categories,
+    };
     let engine = SearchEngine::new(&table);
     let result = engine.run(img.as_slice(), 0);
     Ok(SearchReport {
@@ -142,4 +187,32 @@ fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DEFAULT_KEYWORDS;
+    use stratum_search::TermTable;
+
+    #[test]
+    fn eingebaute_liste_ist_gueltig() {
+        let t = TermTable::from_str(DEFAULT_KEYWORDS).expect("Default-Tabelle muss parsen");
+        assert_eq!(t.meta.name, "Strafverfolgung");
+        assert!(t.categories.len() >= 8);
+        // Die Zugangsdaten-Kategorie ist im Paar-Modus.
+        let z = t
+            .categories
+            .iter()
+            .find(|c| c.id == "zugangsdaten")
+            .unwrap();
+        assert_eq!(z.modus, stratum_search::Modus::Paar);
+        // Die sensible Kategorie ist leer und abgeschaltet.
+        let m = t
+            .categories
+            .iter()
+            .find(|c| c.id == "missbrauchsdarstellung")
+            .unwrap();
+        assert!(!m.aktiv);
+        assert!(m.begriffe.is_empty());
+    }
 }

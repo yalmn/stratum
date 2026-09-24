@@ -1,0 +1,38 @@
+# Eigene Begriffstabelle fuer stratum.
+#
+# Vorlage fuer fallbezogene Begriffe. Diese Tabelle wird mit -k uebergeben und
+# laeuft zusaetzlich zur mitgelieferten Voreinstellung:
+#
+#   stratum merged.dd -o report.json -k eigene.toml
+#
+# Fallbezogene und sensible Wortlisten gehoeren NICHT in ein oeffentliches
+# Repository. Diese Datei hier pro Fall getrennt fuehren und versionieren.
+
+[meta]
+name = "Eigene Begriffe"
+version = 1
+
+# Beispiel: einfache Begriffssuche.
+[[kategorie]]
+id = "fall"
+aktiv = true
+begriffe = [
+  # "beispielbegriff",
+  # "aktenzeichen-123",
+]
+
+# Beispiel: Zugangsdaten-Paar mit eigenen Feldnamen.
+# [[kategorie]]
+# id = "eigene-zugangsdaten"
+# aktiv = true
+# modus = "paar"
+# abstand_bytes = 128
+# links = ["nutzer", "kennung"]
+# rechts = ["kennwort", "losung"]
+
+# Beispiel: eigene Kategorie mit Onion-Pruefung.
+# [[kategorie]]
+# id = "eigene-onion"
+# aktiv = true
+# onion_pruefung = true
+# begriffe = [".onion"]

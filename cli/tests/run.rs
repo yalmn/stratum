@@ -95,10 +95,33 @@ fn no_hash_lässt_hashes_weg() {
     let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
         .arg(&dd)
         .arg("--no-hash")
+        .arg("--no-default-keywords")
         .output()
         .unwrap();
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json["image"].get("hashes").is_none());
+    // Ohne mitgelieferte Liste und ohne -k wird nicht gesucht.
     assert!(json.get("search").is_none());
+}
+
+#[test]
+fn mitgelieferte_liste_laeuft_ohne_keywords() {
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path().join("test.dd");
+    std::fs::write(&dd, build_dd()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .arg("--no-hash")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // Ohne -k laeuft die eingebaute Liste "Strafverfolgung" automatisch mit.
+    let name = json["search"]["table_name"].as_str().unwrap();
+    assert!(name.contains("Strafverfolgung"), "Name: {name}");
+    // torrc steht in der Datenzone und ist in der Default-Liste enthalten.
+    let findings = json["search"]["findings"].as_array().unwrap();
+    assert!(findings.iter().any(|f| f["begriff"] == "torrc"));
 }
