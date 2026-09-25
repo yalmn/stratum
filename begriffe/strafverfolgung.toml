@@ -15,7 +15,7 @@
 
 [meta]
 name = "Strafverfolgung"
-version = 2
+version = 3
 max_treffer = 200000
 
 # Zugangsdaten im Klartext: nur als Paar aus einem Benutzer- und einem
@@ -33,7 +33,7 @@ rechts = ["pw", "pwd", "pass", "passw", "passwort", "password", "pword", "kennwo
 id = "darknet"
 aktiv = true
 onion_pruefung = true
-begriffe = [".onion", "torrc", "HiddenServiceDir", "hs_ed25519_secret_key", "hs_ed25519_public_key", "tor browser", "torproject", "hidden service", "onion service", "i2p", "eepsite", "dread", "escrow", "vendor", "marketplace", "dark market", "pgp key"]
+begriffe = [".onion", "torrc", "HiddenServiceDir", "hs_ed25519_secret_key", "hs_ed25519_public_key", "tor browser", "torproject", "hidden service", "onion service", "i2p", "eepsite", "dread", "dark market", "pgp key"]
 
 # Anonymisierung und Verschluesselung, oft zur Verschleierung genutzt.
 [[kategorie]]
@@ -45,31 +45,31 @@ begriffe = ["vpn", "openvpn", "wireguard", "nordvpn", "protonvpn", "mullvad", "p
 [[kategorie]]
 id = "kryptowaehrung"
 aktiv = true
-begriffe = ["bitcoin", "btc", "wallet.dat", "electrum", "monero", "xmr", "ethereum", "litecoin", "seed phrase", "mnemonic", "recovery phrase", "private key", "blockchain", "exodus", "metamask", "ledger", "trezor", "coinbase", "binance", "kraken", "mixer", "tumbler", "cashout"]
+begriffe = ["bitcoin", "btc", "wallet.dat", "electrum", "monero", "xmr", "ethereum", "litecoin", "seed phrase", "mnemonic", "recovery phrase", "private key", "blockchain", "exodus", "metamask", "ledger", "trezor", "coinbase", "binance", "kraken", "tumbler", "cashout"]
 
 # Finanz-, Vermoegens- und Betrugsdelikte.
 [[kategorie]]
 id = "finanzbetrug"
 aktiv = true
-begriffe = ["betrug", "phishing", "fake", "faelschung", "geldwaesche", "money laundering", "carding", "dump", "fullz", "cvv", "track2", "skimming", "iban", "kreditkarte", "credit card", "paypal", "klarna", "western union", "moneygram", "ueberweisung", "rechnung", "mahnung", "strohmann", "mule", "drop"]
+begriffe = ["betrug", "phishing", "fake", "faelschung", "geldwaesche", "money laundering", "carding", "dump", "fullz", "cvv", "track2", "skimming", "iban", "kreditkarte", "credit card", "paypal", "klarna", "western union", "moneygram", "ueberweisung", "rechnung", "mahnung", "strohmann", "mule"]
 
 # Ausweis- und Identitaetsdokumente.
 [[kategorie]]
 id = "dokumente"
 aktiv = true
-begriffe = ["personalausweis", "reisepass", "fuehrerschein", "ausweis", "passport", "id card", "geburtsurkunde", "meldebescheinigung", "aufenthaltstitel", "visum", "gefaelscht", "faelschung", "blanko", "template", "vorlage", "hologramm"]
+begriffe = ["personalausweis", "reisepass", "fuehrerschein", "ausweis", "passport", "id card", "geburtsurkunde", "meldebescheinigung", "aufenthaltstitel", "visum", "gefaelscht", "faelschung", "blanko", "vorlage", "hologramm"]
 
 # Cybercrime, Schadsoftware und Angriffswerkzeuge.
 [[kategorie]]
 id = "cybercrime"
 aktiv = true
-begriffe = ["malware", "ransomware", "trojaner", "keylogger", "spyware", "stealer", "rat", "botnet", "command and control", "exploit", "payload", "backdoor", "mimikatz", "cobalt strike", "metasploit", "shellcode", "bruteforce", "hydra", "credential", "exfil", "dropper", "loader", "obfuscated"]
+begriffe = ["malware", "ransomware", "trojaner", "keylogger", "spyware", "stealer", "botnet", "command and control", "exploit", "backdoor", "mimikatz", "cobalt strike", "metasploit", "shellcode", "bruteforce", "hydra", "exfil", "dropper", "obfuscated"]
 
 # Betaeubungsmittel. Kann bei allgemeinen Texten rauschen, bei Bedarf abschalten.
 [[kategorie]]
 id = "betaeubungsmittel"
 aktiv = true
-begriffe = ["kokain", "koks", "heroin", "amphetamin", "speed", "methamphetamin", "crystal", "cannabis", "marihuana", "haschisch", "gras", "weed", "mdma", "ecstasy", "pille", "lsd", "ketamin", "fentanyl", "gramm", "streckmittel", "dealer", "bunker", "grow"]
+begriffe = ["kokain", "koks", "heroin", "amphetamin", "methamphetamin", "cannabis", "marihuana", "haschisch", "gras", "weed", "mdma", "ecstasy", "pille", "lsd", "ketamin", "fentanyl", "gramm", "streckmittel", "dealer", "bunker"]
 
 # Waffen und Sprengstoff.
 [[kategorie]]

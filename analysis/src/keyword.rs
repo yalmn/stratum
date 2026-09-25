@@ -33,6 +33,35 @@ const GLOBAL_CAT_CAP: usize = 20_000;
 /// werden muss.
 const CHUNK: usize = 128;
 
+/// Verzeichnisse, die fast nur Programm- und Systemdateien enthalten und das
+/// Rauschen der Keyword-Suche erzeugen.
+const EXCLUDE_PREFIX: &[&str] = &[
+    "windows\\",
+    "program files\\",
+    "program files (x86)\\",
+    "programdata\\",
+    "$recycle.bin\\",
+    "system volume information\\",
+    "msocache\\",
+    "perflogs\\",
+    "recovery\\",
+    "$windows.~bt\\",
+    "$windows.~ws\\",
+];
+
+/// Beschränkt die datei-gescopte Suche auf mögliche Nutzerinhalte: System- und
+/// Programmverzeichnisse sowie `AppData` werden ausgeschlossen (dort liegen fast
+/// nur Programm- und Systemdateien). Alles Übrige, insbesondere Nutzerdateien
+/// unter `Users\`, bleibt drin. Der optionale Roh-Sweep (`--raw-sweep`) deckt
+/// bei Bedarf weiterhin den gesamten Datenträger ab.
+fn is_user_content(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    if EXCLUDE_PREFIX.iter().any(|x| p.starts_with(x)) {
+        return false;
+    }
+    !p.contains("\\appdata\\")
+}
+
 /// Analyzer für die Keyword-Suche.
 pub struct KeywordAnalyzer {
     engine: SearchEngine,
@@ -80,6 +109,7 @@ impl KeywordAnalyzer {
             .volumes
             .iter()
             .flat_map(|v| v.by_extension(TEXT_EXTS))
+            .filter(|e| is_user_content(&e.path))
             .map(|e| e.size)
             .sum();
         let done = AtomicU64::new(0);
@@ -88,7 +118,10 @@ impl KeywordAnalyzer {
         let warnings: Vec<String> = Vec::new();
 
         for v in &ctx.volumes {
-            let entries: Vec<_> = v.by_extension(TEXT_EXTS).collect();
+            let entries: Vec<_> = v
+                .by_extension(TEXT_EXTS)
+                .filter(|e| is_user_content(&e.path))
+                .collect();
             let target = v.target;
 
             let chunk_results: Vec<Vec<Finding>> = entries
@@ -152,7 +185,7 @@ impl Analyzer for KeywordAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         // Ohne Pfad-Index bleibt nur die Rohsuche. Mit Index werden gezielt die
         // Textdateien durchsucht; --raw-sweep haengt zusaetzlich eine Rohsuche
-        // ueber das ganze Image an (unallozierte/geloeschte Bereiche).
+        // über das ganze Image an (unallozierte/gelöschte Bereiche).
         let mut outcome = if ctx.volumes.is_empty() {
             self.run_raw(ctx)
         } else {
@@ -164,7 +197,7 @@ impl Analyzer for KeywordAnalyzer {
             }
             oc
         };
-        // Kategorie-Obergrenze einmal ueber alle (Datei + roh) Funde.
+        // Kategorie-Obergrenze einmal über alle (Datei + roh) Funde.
         cap_per_domain(&mut outcome.findings, &mut outcome.warnings);
         outcome
     }
@@ -226,5 +259,22 @@ fn cap_per_domain(findings: &mut Vec<Finding>, warnings: &mut Vec<String>) {
         warnings.push(format!(
             "Domäne {d}: globale Grenze {GLOBAL_CAT_CAP} erreicht, weitere Treffer nicht erfasst"
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_user_content;
+
+    #[test]
+    fn scoping_nutzerinhalte() {
+        assert!(is_user_content("Users\\ich\\Documents\\notiz.txt"));
+        assert!(is_user_content("notiz.txt")); // Wurzeldatei
+        assert!(is_user_content("Daten\\brief.docx"));
+        // Ausgeschlossen:
+        assert!(!is_user_content("Windows\\System32\\x.ini"));
+        assert!(!is_user_content("Program Files\\App\\config.json"));
+        assert!(!is_user_content("Users\\ich\\AppData\\Local\\Edge\\x.js"));
+        assert!(!is_user_content("ProgramData\\Microsoft\\y.xml"));
     }
 }

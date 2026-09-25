@@ -8,8 +8,6 @@
 //! Gespeicherte Passwörter (Chromium `Login Data`, Firefox `logins.json`) sind
 //! mit DPAPI verschlüsselt und bleiben einer späteren Ausbaustufe vorbehalten.
 
-use std::io::Write;
-
 use rusqlite::{Connection, OpenFlags};
 
 use stratum_ntfs::NtfsVolume;
@@ -159,7 +157,19 @@ fn process<R: std::io::Read + std::io::Seek>(
         Ok(Some(f)) => f.data,
         _ => return,
     };
-    match read_history(&data, query) {
+    // Aktuelle Eintraege stehen oft in der WAL-Datei; diese (und -shm) mitlesen,
+    // damit sie beim Oeffnen eingespielt werden.
+    let wal = vol
+        .read_file(&format!("{path}-wal"))
+        .ok()
+        .flatten()
+        .map(|f| f.data);
+    let shm = vol
+        .read_file(&format!("{path}-shm"))
+        .ok()
+        .flatten()
+        .map(|f| f.data);
+    match read_history(&data, wal.as_deref(), shm.as_deref(), query) {
         Ok(rows) => {
             for (url, title, unix) in rows {
                 let mut f = Finding::new("browser", url, path)
@@ -182,11 +192,23 @@ fn process<R: std::io::Read + std::io::Seek>(
     }
 }
 
-/// Schreibt die Datenbank-Bytes in eine temporäre Datei und liest den Verlauf.
-fn read_history(data: &[u8], query: Query) -> Result<Vec<HistoryRow>, Box<dyn std::error::Error>> {
-    let mut tmp = tempfile::NamedTempFile::new()?;
-    tmp.write_all(data)?;
-    tmp.flush()?;
+/// Schreibt die Datenbank-Bytes (samt WAL/SHM, falls vorhanden) in ein
+/// temporäres Verzeichnis und liest den Verlauf.
+fn read_history(
+    data: &[u8],
+    wal: Option<&[u8]>,
+    shm: Option<&[u8]>,
+    query: Query,
+) -> Result<Vec<HistoryRow>, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let db = dir.path().join("db.sqlite");
+    std::fs::write(&db, data)?;
+    if let Some(w) = wal {
+        std::fs::write(dir.path().join("db.sqlite-wal"), w)?;
+    }
+    if let Some(s) = shm {
+        std::fs::write(dir.path().join("db.sqlite-shm"), s)?;
+    }
 
     let (sql, base) = match query {
         Query::Chromium => (
@@ -199,20 +221,27 @@ fn read_history(data: &[u8], query: Query) -> Result<Vec<HistoryRow>, Box<dyn st
             TimeBase::Firefox,
         ),
     };
-    Ok(read_urls(tmp.path(), sql, base)?)
+    Ok(read_urls(&db, wal.is_some(), sql, base)?)
 }
 
 fn read_urls(
     path: &std::path::Path,
+    has_wal: bool,
     sql: &str,
     base: TimeBase,
 ) -> rusqlite::Result<Vec<HistoryRow>> {
-    // Nur-Lese-Zugriff auf die unveränderliche Kopie; kein Journal/WAL noetig.
-    let uri = format!("file:{}?immutable=1", path.display());
-    let conn = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
-    )?;
+    let conn = if has_wal {
+        // Mit WAL: normal (schreibend auf die Kopie) öffnen, damit SQLite die
+        // WAL-Eintraege einspielt.
+        Connection::open(path)?
+    } else {
+        // Ohne WAL: unveränderlicher Nur-Lese-Zugriff auf die Kopie.
+        let uri = format!("file:{}?immutable=1", path.display());
+        Connection::open_with_flags(
+            uri,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+        )?
+    };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
         let url: String = row.get(0)?;
@@ -294,6 +323,7 @@ mod tests {
         );
         let rows = read_urls(
             tmp.path(),
+            false,
             "SELECT url,title,last_visit_time FROM urls ORDER BY last_visit_time DESC",
             TimeBase::Chromium,
         )
@@ -315,6 +345,7 @@ mod tests {
         );
         let rows = read_urls(
             tmp.path(),
+            false,
             "SELECT url,title,last_visit_date FROM moz_places WHERE url IS NOT NULL",
             TimeBase::Firefox,
         )
