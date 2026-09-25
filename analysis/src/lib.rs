@@ -15,6 +15,7 @@
 
 mod browser;
 mod context;
+mod eventlog;
 mod finding;
 mod fsindex;
 mod keyword;
@@ -30,6 +31,7 @@ mod builder;
 
 pub use browser::BrowserAnalyzer;
 pub use context::{AnalysisContext, NtfsTarget};
+pub use eventlog::EventLogAnalyzer;
 pub use finding::Finding;
 pub use fsindex::{FileEntry, FsIndex};
 pub use keyword::KeywordAnalyzer;
