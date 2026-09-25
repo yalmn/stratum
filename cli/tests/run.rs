@@ -75,10 +75,9 @@ fn erzeugt_json_report() {
     assert_eq!(json["partitions"]["scheme"], "mbr");
     assert_eq!(json["partitions"]["partitions"][0]["fs_hint"], "ntfs");
 
-    // Suche: Zugangsdaten-Paar und torrc. Domäne, Name und Attribute im
-    // neuen Fund-Schema.
-    let findings = json["search"]["findings"].as_array().unwrap();
-    assert_eq!(json["search"]["table_version"], 3);
+    // Funde aller Domänen liegen jetzt flach unter "findings".
+    let findings = json["findings"].as_array().unwrap();
+    assert_eq!(json["keywords"]["table_version"], 3);
     assert!(findings
         .iter()
         .any(|f| f["domain"] == "zugangsdaten" && f["attributes"]["art"] == "paar"));
@@ -102,8 +101,8 @@ fn no_hash_lässt_hashes_weg() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(json["image"].get("hashes").is_none());
-    // Ohne mitgelieferte Liste und ohne -k wird nicht gesucht.
-    assert!(json.get("search").is_none());
+    // Ohne mitgelieferte Liste und ohne -k gibt es keine Begriffstabelle.
+    assert!(json["keywords"].is_null());
 }
 
 #[test]
@@ -120,9 +119,9 @@ fn mitgelieferte_liste_laeuft_ohne_keywords() {
     assert!(output.status.success());
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     // Ohne -k laeuft die eingebaute Liste "Strafverfolgung" automatisch mit.
-    let name = json["search"]["table_name"].as_str().unwrap();
+    let name = json["keywords"]["table_name"].as_str().unwrap();
     assert!(name.contains("Strafverfolgung"), "Name: {name}");
     // torrc steht in der Datenzone und ist in der Default-Liste enthalten.
-    let findings = json["search"]["findings"].as_array().unwrap();
+    let findings = json["findings"].as_array().unwrap();
     assert!(findings.iter().any(|f| f["name"] == "torrc"));
 }

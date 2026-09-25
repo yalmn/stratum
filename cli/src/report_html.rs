@@ -86,17 +86,22 @@ pub fn render(report: &Report) -> String {
         h.push_str("</section>\n");
     }
 
-    // Funde der Domänen-Analyzer.
-    if let Some(s) = &report.search {
+    // Funde aller Domänen-Analyzer.
+    {
         h.push_str("<section class=\"card\">\n<h2>Funde</h2>\n");
+        if let Some(k) = &report.keywords {
+            h.push_str(&format!(
+                "<p>Begriffstabelle: {} (v{})</p>\n",
+                esc(&k.table_name),
+                k.table_version
+            ));
+        }
         h.push_str(&format!(
-            "<p>Begriffstabelle: {} (v{}), {} Treffer</p>\n",
-            esc(&s.table_name),
-            s.table_version,
-            s.findings.len()
+            "<p>{} Funde insgesamt</p>\n",
+            report.findings.len()
         ));
         h.push_str("<table>\n<tr><th>Domäne</th><th>Name</th><th>Pfad</th><th>Offset</th><th>Kontext</th></tr>\n");
-        for f in &s.findings {
+        for f in &report.findings {
             h.push_str("<tr>");
             cell(&mut h, &f.domain);
             cell(&mut h, &f.name);
@@ -106,13 +111,13 @@ pub fn render(report: &Report) -> String {
                 &mut h,
                 f.attributes
                     .get("kontext")
+                    .or_else(|| f.attributes.get("hinweis"))
                     .map(String::as_str)
                     .unwrap_or(""),
             );
             h.push_str("</tr>\n");
         }
         h.push_str("</table>\n");
-        push_warnings(&mut h, &s.warnings);
         h.push_str("</section>\n");
     }
 

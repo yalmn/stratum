@@ -17,13 +17,15 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
-use stratum_analysis::{run_all, AnalysisContext, Analyzer, KeywordAnalyzer, NtfsTarget};
+use stratum_analysis::{
+    run_all, AnalysisContext, Analyzer, KeywordAnalyzer, NtfsTarget, TorAnalyzer,
+};
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
 };
 use stratum_search::TermTable;
 
-use report::{ImageInfo, Report, SearchReport, Tool, WindowsReport};
+use report::{ImageInfo, KeywordInfo, Report, Tool, WindowsReport};
 
 /// Automatisierte, gerichtsverwertbare Inhaltsanalyse eines Roh-Images (read-only).
 #[derive(Parser, Debug)]
@@ -152,12 +154,35 @@ fn main() -> Result<()> {
         });
     }
 
+    // Domänen-Analyzer zusammenstellen: Tor läuft immer, die Keyword-Suche nur
+    // bei aktiver Begriffsliste.
     let use_default = !cli.no_default_keywords;
-    let search = if !use_default && cli.keywords.is_empty() {
+    let mut analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(TorAnalyzer)];
+
+    let mut keyword_bar = None;
+    let keywords = if !use_default && cli.keywords.is_empty() {
         None
     } else {
-        Some(run_search(&ctx, use_default, &cli.keywords)?)
+        let (analyzer, info) = build_keyword_analyzer(use_default, &cli.keywords)?;
+        let pb = bytes_bar(img.len(), "Suche");
+        let bar = pb.clone();
+        analyzers.push(Box::new(analyzer.with_progress(Box::new(
+            move |done, total| {
+                bar.set_length(total);
+                bar.set_position(done);
+            },
+        ))));
+        keyword_bar = Some(pb);
+        Some(info)
     };
+
+    eprintln!("[*] Führe Domänen-Analyzer aus ...");
+    let mut analysis = run_all(&ctx, &analyzers);
+    if let Some(pb) = keyword_bar {
+        pb.finish_and_clear();
+    }
+    warnings.append(&mut analysis.warnings);
+    eprintln!("[+] {} Funde ueber alle Domänen", analysis.findings.len());
 
     let generated_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -174,7 +199,8 @@ fn main() -> Result<()> {
         },
         partitions,
         windows,
-        search,
+        findings: analysis.findings,
+        keywords,
         warnings,
     };
 
@@ -201,11 +227,12 @@ fn bytes_bar(len: u64, label: &str) -> ProgressBar {
     pb
 }
 
-fn run_search(
-    ctx: &AnalysisContext<'_>,
+/// Baut den Keyword-Analyzer aus der mitgelieferten und den eigenen
+/// Begriffstabellen und liefert dazu die Angaben für den Report.
+fn build_keyword_analyzer(
     use_default: bool,
     paths: &[PathBuf],
-) -> Result<SearchReport> {
+) -> Result<(KeywordAnalyzer, KeywordInfo)> {
     // Mehrere Tabellen werden zu einer zusammengeführt: alle Kategorien
     // hintereinander, der Name aus den Quellen, die höchste Version. Die
     // mitgelieferte Tabelle kommt zuerst, damit eigene Kategorien folgen.
@@ -240,29 +267,11 @@ fn run_search(
         },
         categories,
     };
-    let table_name = table.meta.name.clone();
-    let table_version = table.meta.version;
-
-    // Der Keyword-Analyzer durchsucht das Image blockweise parallel und meldet
-    // seinen Fortschritt an einen Byte-Balken.
-    let pb = bytes_bar(ctx.img.len(), "Suche");
-    let bar = pb.clone();
-    let analyzer =
-        KeywordAnalyzer::from_table(&table).with_progress(Box::new(move |done, total| {
-            bar.set_length(total);
-            bar.set_position(done);
-        }));
-    let analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(analyzer)];
-
-    let result = run_all(ctx, &analyzers);
-    pb.finish_and_clear();
-    eprintln!("[+] Keyword-Suche: {} Treffer", result.findings.len());
-    Ok(SearchReport {
-        table_name,
-        table_version,
-        findings: result.findings,
-        warnings: result.warnings,
-    })
+    let info = KeywordInfo {
+        table_name: table.meta.name.clone(),
+        table_version: table.meta.version,
+    };
+    Ok((KeywordAnalyzer::from_table(&table), info))
 }
 
 fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<()> {

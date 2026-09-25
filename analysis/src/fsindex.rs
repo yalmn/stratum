@@ -71,6 +71,16 @@ impl FsIndex {
         })
     }
 
+    /// Dateien, deren Dateiname (letzter Pfadteil) exakt `name` ist (ohne
+    /// Beachtung der Groß-/Kleinschreibung). Nützlich für Dateien ohne Endung
+    /// wie `torrc`, `hostname` oder `hs_ed25519_secret_key`.
+    pub fn by_name<'s>(&'s self, name: &'s str) -> impl Iterator<Item = &'s FileEntry> + 's {
+        self.files.iter().filter(move |f| {
+            let base = f.path.rsplit('\\').next().unwrap_or(&f.path);
+            base.eq_ignore_ascii_case(name)
+        })
+    }
+
     /// Die erste Datei, deren Pfad exakt passt (ohne Beachtung der
     /// Groß-/Kleinschreibung).
     pub fn get(&self, path: &str) -> Option<&FileEntry> {

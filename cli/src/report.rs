@@ -23,11 +23,23 @@ pub struct Report {
     pub partitions: PartitionTable,
     /// Ergebnisse je Windows-Installation.
     pub windows: Vec<WindowsReport>,
-    /// Ergebnis der Keyword-Suche, falls eine Begriffstabelle geladen wurde.
+    /// Funde aller Domänen-Analyzer (Keyword, Tor, ...), mit Domäne, Name und
+    /// Pfad.
+    pub findings: Vec<Finding>,
+    /// Angaben zur verwendeten Begriffstabelle, falls die Keyword-Suche lief.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub search: Option<SearchReport>,
+    pub keywords: Option<KeywordInfo>,
     /// Übergreifende Hinweise.
     pub warnings: Vec<String>,
+}
+
+/// Angaben zur verwendeten Begriffstabelle.
+#[derive(Debug, Serialize)]
+pub struct KeywordInfo {
+    /// Name der Begriffstabelle(n).
+    pub table_name: String,
+    /// Höchste Version der verwendeten Tabellen.
+    pub table_version: u32,
 }
 
 /// Angaben zum Werkzeug.
@@ -76,18 +88,5 @@ pub struct WindowsReport {
     /// Lokale Konten mit NT-Hash.
     pub accounts: Vec<Account>,
     /// Hinweise zu dieser Installation.
-    pub warnings: Vec<String>,
-}
-
-/// Ergebnis der Keyword-Suche.
-#[derive(Debug, Serialize)]
-pub struct SearchReport {
-    /// Name der verwendeten Begriffstabelle.
-    pub table_name: String,
-    /// Version der Begriffstabelle.
-    pub table_version: u32,
-    /// Treffer.
-    pub findings: Vec<Finding>,
-    /// Hinweise der Suche.
     pub warnings: Vec<String>,
 }
