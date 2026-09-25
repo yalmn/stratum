@@ -6,6 +6,7 @@
 //! mit einer Begriffstabelle. Das Ergebnis ist ein JSON-Report.
 
 mod bdp;
+mod liveness;
 mod report;
 mod report_html;
 
@@ -62,6 +63,15 @@ struct Cli {
     /// unallozierte und gelöschte Bereiche, dauert aber deutlich länger).
     #[arg(long)]
     raw_sweep: bool,
+
+    /// Gefundene .onion-Adressen online über Tor auf Erreichbarkeit prüfen.
+    /// Verlässt die Offline-Analyse und setzt einen laufenden Tor-Dienst voraus.
+    #[arg(long)]
+    check_onion: bool,
+
+    /// SOCKS5-Proxy für --check-onion.
+    #[arg(long, default_value = "127.0.0.1:9050")]
+    tor_proxy: String,
 
     /// Die mitgelieferte Begriffsliste "Strafverfolgung" nicht verwenden
     /// (dann wird nur gesucht, wenn eine eigene Tabelle mit -k angegeben ist).
@@ -202,6 +212,17 @@ fn main() -> Result<()> {
     }
     warnings.append(&mut analysis.warnings);
     eprintln!("[+] {} Funde ueber alle Domänen", analysis.findings.len());
+
+    // Optionale Online-Erreichbarkeitspruefung der gefundenen .onion-Adressen.
+    if cli.check_onion {
+        eprintln!(
+            "[*] Pruefe .onion-Erreichbarkeit ueber {} ...",
+            cli.tor_proxy
+        );
+        let mut live = liveness::check_onions(&analysis.findings, &cli.tor_proxy);
+        eprintln!("[+] {} .onion-Adresse(n) geprueft", live.len());
+        analysis.findings.append(&mut live);
+    }
 
     let timeline = stratum_analysis::build_timeline(&analysis.findings);
     eprintln!("[+] Zeitstrahl mit {} Ereignissen", timeline.len());
