@@ -26,7 +26,7 @@ use serde::Serialize;
 
 use stratum_registry::{Hive, HiveError};
 
-pub use lsa::{lsa_key, secrets as lsa_secrets, LsaError, Secret};
+pub use lsa::{cached_logons, lsa_key, secrets as lsa_secrets, CachedLogon, LsaError, Secret};
 pub use sam::{bootkey_from_classes, hashed_bootkey, user_hash, SamError, UserHash, EMPTY_NT_HASH};
 
 /// Die vier Schlüssel unter `Control\Lsa`, deren Class-Werte den Bootkey
@@ -146,6 +146,21 @@ pub fn read_bootkey(system: &Hive) -> Result<[u8; 16], CredsError> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Liest die gecachten Domain-Logins (DCC2) aus SYSTEM- und SECURITY-Hive.
+pub fn extract_cached_logons(
+    system: &Hive,
+    security: &Hive,
+) -> Result<Vec<CachedLogon>, CredsError> {
+    let secrets = extract_lsa_secrets(system, security)?;
+    let Some(nklm) = secrets
+        .iter()
+        .find(|s| s.name.eq_ignore_ascii_case("NL$KM"))
+    else {
+        return Ok(Vec::new());
+    };
+    Ok(lsa::cached_logons(security, &nklm.value))
 }
 
 /// Liest die LSA-Secrets aus SYSTEM- und SECURITY-Hive (Vista und neuer).

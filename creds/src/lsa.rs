@@ -11,7 +11,7 @@
 //! (secretsdump). Wie bei den SAM-Hashes ist der abschliessende Abgleich gegen
 //! echte Hives (secretsdump.py) der VM-Analyse vorbehalten.
 
-use crate::crypto::{aes256_ecb_decrypt, sha256_rounds};
+use crate::crypto::{aes128_cbc_decrypt, aes256_ecb_decrypt, sha256_rounds};
 use stratum_registry::Hive;
 
 /// Fehler der LSA-Auswertung.
@@ -80,6 +80,73 @@ pub fn secrets(security: &Hive, lsa_key: &[u8; 32]) -> Vec<Secret> {
                 out.push(Secret { name, value });
             }
         }
+    }
+    out
+}
+
+/// Ein gecachter Domain-Login (Domain Cached Credentials v2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedLogon {
+    /// Benutzername (mit Domäne, falls vorhanden).
+    pub username: String,
+    /// DCC2-Hash (MSCACHEV2), hex, mit hashcat-Modus 2100 angreifbar.
+    pub dcc2_hex: String,
+}
+
+/// Entschlüsselt die gecachten Domain-Logins unter `Cache\NL$n` mit dem
+/// NL$KM-Secret. `nklm` ist der entschlüsselte Wert des Secrets `NL$KM`.
+pub fn cached_logons(security: &Hive, nklm: &[u8]) -> Vec<CachedLogon> {
+    let mut out = Vec::new();
+    if nklm.len() < 32 {
+        return out;
+    }
+    let mut key = [0u8; 16];
+    key.copy_from_slice(&nklm[16..32]); // NL$KM[16..32] ist der AES-Schlüssel
+
+    let Ok(Some(cache)) = security.open_key("Cache") else {
+        return out;
+    };
+    let Ok(values) = cache.values() else {
+        return out;
+    };
+    for v in values {
+        let name = v.name();
+        if !name.starts_with("NL$") || name.eq_ignore_ascii_case("NL$Control") {
+            continue;
+        }
+        let data = v.data();
+        if data.len() < 0x60 {
+            continue;
+        }
+        let user_len = u16::from_le_bytes([data[0], data[1]]) as usize;
+        let flags = u32::from_le_bytes([data[0x30], data[0x31], data[0x32], data[0x33]]);
+        if flags & 1 == 0 {
+            continue; // leerer/unverschlüsselter Slot
+        }
+        let iv: [u8; 16] = data[0x40..0x50].try_into().unwrap();
+        let enc = &data[0x60..];
+        if enc.is_empty() {
+            continue;
+        }
+        let plain = aes128_cbc_decrypt(&key, &iv, enc);
+        let Some(hash) = plain.get(0..16) else {
+            continue;
+        };
+        // Benutzername liegt ab Offset 0x48 als UTF-16LE.
+        let username = plain
+            .get(0x48..0x48 + user_len)
+            .map(|raw| {
+                let units: Vec<u16> = raw
+                    .chunks_exact(2)
+                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                String::from_utf16_lossy(&units)
+            })
+            .unwrap_or_default();
+        out.push(CachedLogon {
+            username,
+            dcc2_hex: hash.iter().map(|b| format!("{b:02x}")).collect(),
+        });
     }
     out
 }

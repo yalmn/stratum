@@ -7,7 +7,7 @@
 //! Wie bei den SAM-Hashes gilt: gegen echte Hives (secretsdump.py) auf der VM
 //! abschliessend verifizieren.
 
-use stratum_creds::extract_lsa_secrets;
+use stratum_creds::{extract_cached_logons, extract_lsa_secrets};
 use stratum_registry::Hive;
 
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
@@ -45,6 +45,21 @@ impl Analyzer for LsaAnalyzer {
                     }
                 }
                 Err(e) => out.warnings.push(format!("LSA-Secrets: {e}")),
+            }
+
+            // Gecachte Domain-Logins (DCC2).
+            match extract_cached_logons(&system, &security) {
+                Ok(logons) => {
+                    for l in logons {
+                        out.findings.push(
+                            Finding::new("lsa", l.username, "SECURITY\\Cache")
+                                .with("art", "dcc2")
+                                .with("dcc2_hash", l.dcc2_hex)
+                                .with("hinweis", "DCC2, mit hashcat-Modus 2100 angreifbar"),
+                        );
+                    }
+                }
+                Err(e) => out.warnings.push(format!("DCC2: {e}")),
             }
         }
         out
