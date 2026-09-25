@@ -247,8 +247,11 @@ fn run_search(
     // seinen Fortschritt an einen Byte-Balken.
     let pb = bytes_bar(ctx.img.len(), "Suche");
     let bar = pb.clone();
-    let analyzer = KeywordAnalyzer::from_table(&table)
-        .with_progress(Box::new(move |done| bar.set_position(done)));
+    let analyzer =
+        KeywordAnalyzer::from_table(&table).with_progress(Box::new(move |done, total| {
+            bar.set_length(total);
+            bar.set_position(done);
+        }));
     let analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(analyzer)];
 
     let result = run_all(ctx, &analyzers);

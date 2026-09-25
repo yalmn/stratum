@@ -1,14 +1,39 @@
-//! Domäne „Keyword-Suche": durchsucht das Image nach den Begriffen der
-//! Begriffstabelle und liefert die Treffer als [`Finding`].
+//! Domäne „Keyword-Suche".
+//!
+//! Standardmäßig gezielt: Es werden nur die allozierten Textdateien aus dem
+//! Pfad-Index gelesen und durchsucht (parallel über die Dateiliste). Jeder
+//! Treffer trägt den echten Dateipfad und den Offset innerhalb der Datei. Nur
+//! wenn kein Pfad-Index vorliegt, fällt der Analyzer auf eine rohe Suche über
+//! das gesamte Image zurück.
 
-use stratum_search::{Encoding, FindingKind, SearchEngine, TermTable};
+use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use rayon::prelude::*;
+
+use stratum_ntfs::NtfsVolume;
+use stratum_search::{Encoding, FindingKind, SearchEngine, SearchResult, TermTable};
 
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
-/// Rückmeldung über die Zahl bereits durchsuchter Bytes.
-pub type Progress = Box<dyn Fn(u64) + Sync + Send>;
+/// Rückmeldung über den Fortschritt: (durchsuchte Bytes, Gesamtbytes).
+pub type Progress = Box<dyn Fn(u64, u64) + Sync + Send>;
 
-/// Analyzer für die Keyword-Suche über das rohe Image.
+/// Endungen, die als Klartext gelten und durchsucht werden.
+const TEXT_EXTS: &[&str] = &[
+    "txt", "log", "csv", "tsv", "ini", "cfg", "conf", "json", "xml", "yaml", "yml", "html", "htm",
+    "md", "eml", "vcf", "rtf", "sql", "ps1", "bat", "cmd", "sh", "py", "js", "php", "reg", "url",
+    "srt", "sub",
+];
+
+/// Globale Obergrenze für die Treffer einer Domäne über alle Dateien hinweg.
+const GLOBAL_CAT_CAP: usize = 20_000;
+
+/// Dateien je Arbeitspaket, damit ein NTFS-Volume nicht pro Datei neu geöffnet
+/// werden muss.
+const CHUNK: usize = 128;
+
+/// Analyzer für die Keyword-Suche.
 pub struct KeywordAnalyzer {
     engine: SearchEngine,
     progress: Option<Progress>,
@@ -28,10 +53,86 @@ impl KeywordAnalyzer {
         Self::new(SearchEngine::new(table))
     }
 
-    /// Hinterlegt eine Fortschritts-Rückmeldung (durchsuchte Bytes).
+    /// Hinterlegt eine Fortschritts-Rückmeldung (durchsuchte Bytes, Gesamtbytes).
     pub fn with_progress(mut self, progress: Progress) -> Self {
         self.progress = Some(progress);
         self
+    }
+
+    fn report(&self, done: u64, total: u64) {
+        if let Some(p) = &self.progress {
+            p(done, total);
+        }
+    }
+
+    /// Gezielte Suche über die Textdateien des Pfad-Index.
+    fn run_files(&self, ctx: &AnalysisContext<'_>) -> Outcome {
+        let total_bytes: u64 = ctx
+            .volumes
+            .iter()
+            .flat_map(|v| v.by_extension(TEXT_EXTS))
+            .map(|e| e.size)
+            .sum();
+        let done = AtomicU64::new(0);
+
+        let mut findings: Vec<Finding> = Vec::new();
+        let mut warnings: Vec<String> = Vec::new();
+
+        for v in &ctx.volumes {
+            let entries: Vec<_> = v.by_extension(TEXT_EXTS).collect();
+            let target = v.target;
+
+            let chunk_results: Vec<Vec<Finding>> = entries
+                .par_chunks(CHUNK)
+                .map(|chunk| {
+                    let mut out = Vec::new();
+                    let mut vol = match NtfsVolume::open(ctx.img, target.offset, target.size) {
+                        Ok(vol) => vol,
+                        Err(_) => {
+                            // Fortschritt trotzdem weiterzaehlen.
+                            let sum: u64 = chunk.iter().map(|e| e.size).sum();
+                            let d = done.fetch_add(sum, Ordering::Relaxed) + sum;
+                            self.report(d, total_bytes);
+                            return out;
+                        }
+                    };
+                    for e in chunk {
+                        if let Ok(Some(file)) = vol.read_file_by_record(e.mft_record, &e.path) {
+                            let result = self.engine.run(&file.data, 0);
+                            map_findings(result, &e.path, Some(e.mft_record), &mut out);
+                        }
+                        let d = done.fetch_add(e.size, Ordering::Relaxed) + e.size;
+                        self.report(d, total_bytes);
+                    }
+                    out
+                })
+                .collect();
+
+            for c in chunk_results {
+                findings.extend(c);
+            }
+        }
+
+        cap_per_domain(&mut findings, &mut warnings);
+        self.report(total_bytes, total_bytes);
+        Outcome { findings, warnings }
+    }
+
+    /// Rohsuche über das gesamte Image (Fallback ohne Pfad-Index).
+    fn run_raw(&self, ctx: &AnalysisContext<'_>) -> Outcome {
+        let total = ctx.img.len();
+        let cb = |done: u64| self.report(done, total);
+        let cb_ref: &(dyn Fn(u64) + Sync) = &cb;
+        let result = self
+            .engine
+            .run_parallel_with_progress(ctx.img.as_slice(), 0, Some(cb_ref));
+
+        let mut findings = Vec::new();
+        map_findings(result, "Image (roh)", None, &mut findings);
+        Outcome {
+            findings,
+            warnings: Vec::new(),
+        }
     }
 }
 
@@ -41,46 +142,69 @@ impl Analyzer for KeywordAnalyzer {
     }
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
-        // Blockweise parallele Suche über das gesamte Image.
-        let progress = self
-            .progress
-            .as_ref()
-            .map(|p| p.as_ref() as &(dyn Fn(u64) + Sync));
-        let result = self
-            .engine
-            .run_parallel_with_progress(ctx.img.as_slice(), 0, progress);
-
-        let findings = result
-            .findings
-            .into_iter()
-            .map(|f| {
-                let kodierung = match f.kodierung {
-                    Encoding::Ascii => "ascii",
-                    Encoding::Utf16Le => "utf16le",
-                };
-                let (name, art, extra) = match f.kind {
-                    FindingKind::Term { begriff } => (begriff, "term", None),
-                    FindingKind::Paar {
-                        links,
-                        rechts,
-                        abstand,
-                    } => (format!("{links} / {rechts}"), "paar", Some(abstand)),
-                };
-                let mut finding = Finding::new(f.kategorie, name, "Image (roh)")
-                    .at(f.offset)
-                    .with("art", art)
-                    .with("kodierung", kodierung)
-                    .with("kontext", f.kontext);
-                if let Some(abstand) = extra {
-                    finding = finding.with("abstand", abstand.to_string());
-                }
-                finding
-            })
-            .collect();
-
-        Outcome {
-            findings,
-            warnings: result.warnings,
+        if ctx.volumes.is_empty() {
+            self.run_raw(ctx)
+        } else {
+            self.run_files(ctx)
         }
+    }
+}
+
+/// Wandelt die Treffer eines Suchlaufs in Funde mit Quelle um.
+fn map_findings(
+    result: SearchResult,
+    source: &str,
+    mft_record: Option<u64>,
+    out: &mut Vec<Finding>,
+) {
+    for f in result.findings {
+        let kodierung = match f.kodierung {
+            Encoding::Ascii => "ascii",
+            Encoding::Utf16Le => "utf16le",
+        };
+        let (name, art, abstand) = match f.kind {
+            FindingKind::Term { begriff } => (begriff, "term", None),
+            FindingKind::Paar {
+                links,
+                rechts,
+                abstand,
+            } => (format!("{links} / {rechts}"), "paar", Some(abstand)),
+        };
+        let mut finding = Finding::new(f.kategorie, name, source)
+            .at(f.offset)
+            .with("art", art)
+            .with("kodierung", kodierung)
+            .with("kontext", f.kontext);
+        if let Some(a) = abstand {
+            finding = finding.with("abstand", a.to_string());
+        }
+        if let Some(rec) = mft_record {
+            finding = finding.with("mft_record", rec.to_string());
+        }
+        out.push(finding);
+    }
+}
+
+/// Kappt die Treffer je Domäne global (über alle Dateien) und meldet die
+/// betroffenen Domänen.
+fn cap_per_domain(findings: &mut Vec<Finding>, warnings: &mut Vec<String>) {
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut capped: HashSet<String> = HashSet::new();
+    findings.retain(|f| {
+        let c = counts.entry(f.domain.clone()).or_default();
+        if *c < GLOBAL_CAT_CAP {
+            *c += 1;
+            true
+        } else {
+            capped.insert(f.domain.clone());
+            false
+        }
+    });
+    let mut capped: Vec<_> = capped.into_iter().collect();
+    capped.sort();
+    for d in capped {
+        warnings.push(format!(
+            "Domäne {d}: globale Grenze {GLOBAL_CAT_CAP} erreicht, weitere Treffer nicht erfasst"
+        ));
     }
 }
