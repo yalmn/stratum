@@ -66,6 +66,8 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 | `--html` | zusätzlich einen übersichtlichen HTML-Report in diese Datei schreiben |
 | `-k, --keywords` | eigene Begriffstabelle (TOML), mehrfach angebbar |
 | `--no-default-keywords` | die mitgelieferte Liste nicht verwenden |
+| `--raw-sweep` | zusätzlich das ganze Image roh durchsuchen (unallozierte/gelöschte Bereiche) |
+| `--check-onion` | gefundene .onion-Adressen online über Tor auf Erreichbarkeit prüfen (opt-in) |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |
 | `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei grossen Images Zeit) |
 
@@ -88,6 +90,18 @@ stratum merged.dd -o report.json --bdp bdp.info -k eigene.toml
 ```
 
 Die eingebaute Liste ist ein neutraler Ausgangspunkt, kein fertiger Fallkatalog. Pro Fall lässt sich abschalten, was nicht passt (`aktiv = false`), und mit `--no-default-keywords` deaktiviert man sie ganz. Sensible oder fallbezogene Wortlisten gehören nicht in dieses Repository, sondern in die eigene Tabelle, die getrennt geführt wird. Name und Version der verwendeten Tabellen stehen im Report, damit nachvollziehbar bleibt, wonach gesucht wurde.
+
+## Report-Integrität
+
+Beim Schreiben in eine Datei (`-o`) legt stratum neben dem Report eine
+Prüfsummen-Datei `<report>.sha256` mit SHA-256 und BLAKE3 des Reports an und gibt
+den SHA-256 auf der Fehlerausgabe aus. So ist für die Beweiskette belegbar, dass
+der Report unverändert ist.
+
+Für die Weiterverarbeitung in Cortex XSOAR liegt unter `xsoar/` eine Vorlage
+(Automation, Playbook), die den JSON-Report einliest, `.onion`-Adressen als
+Indikatoren anlegt und den Incident bei Belegen für einen Hidden Service
+hochstuft.
 
 ## Tests
 

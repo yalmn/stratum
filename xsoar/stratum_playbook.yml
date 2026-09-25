@@ -1,0 +1,100 @@
+id: stratum-webserver-analyse
+version: -1
+name: Stratum Webserver-/Darknet-Analyse
+description: >-
+  Wertet einen stratum-Report (report.json) aus, legt die gefundenen
+  .onion-Adressen als Indikatoren an und stuft den Incident hoch, wenn Belege
+  für einen betriebenen Hidden Service vorliegen. Vorlage; an den eigenen
+  XSOAR-Mandanten anzupassen.
+starttaskid: "0"
+tasks:
+  "0":
+    id: "0"
+    taskid: start
+    type: start
+    task:
+      id: start
+      version: -1
+      name: ""
+    nexttasks:
+      '#none#':
+        - "1"
+    separatecontext: false
+  "1":
+    id: "1"
+    taskid: ingest
+    type: regular
+    task:
+      id: ingest
+      version: -1
+      name: Report einlesen
+      description: Liest report.json und schreibt die Funde in den Kontext.
+      scriptName: StratumIngest
+      type: regular
+    scriptarguments:
+      entryID:
+        simple: ${File.EntryID}
+    nexttasks:
+      '#none#':
+        - "2"
+    separatecontext: false
+  "2":
+    id: "2"
+    taskid: check-tor
+    type: condition
+    task:
+      id: check-tor
+      version: -1
+      name: Hidden Service gefunden?
+      type: condition
+    conditions:
+      - label: "yes"
+        condition:
+          - - operator: isEqualString
+              left:
+                value:
+                  simple: Stratum.TorHiddenServiceFound
+                iscontext: true
+              right:
+                value:
+                  simple: "true"
+    nexttasks:
+      "yes":
+        - "3"
+      '#default#':
+        - "4"
+    separatecontext: false
+  "3":
+    id: "3"
+    taskid: raise-severity
+    type: regular
+    task:
+      id: raise-severity
+      version: -1
+      name: Schweregrad auf Hoch setzen
+      description: Belege für einen betriebenen Hidden Service liegen vor.
+      scriptName: Set
+      type: regular
+    scriptarguments:
+      key:
+        simple: severity
+      value:
+        simple: "3"
+    nexttasks:
+      '#none#':
+        - "4"
+    separatecontext: false
+  "4":
+    id: "4"
+    taskid: done
+    type: title
+    task:
+      id: done
+      version: -1
+      name: Fertig
+      type: title
+    separatecontext: false
+view: |-
+  {"linkLabelsPosition": {}, "paper": {"dimensions": {"height": 700, "width": 400, "x": 0, "y": 0}}}
+inputs: []
+outputs: []

@@ -322,9 +322,18 @@ fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<()> {
     let json = serde_json::to_string_pretty(report).context("Report nicht serialisierbar")?;
     match out {
         Some(path) => {
-            std::fs::write(path, json)
+            std::fs::write(path, &json)
                 .with_context(|| format!("Report nicht schreibbar: {}", path.display()))?;
             eprintln!("Report geschrieben: {}", path.display());
+            // Fuer die Beweiskette: Pruefsummen des Reports als Beisatz schreiben.
+            let hashes = stratum_core::hash_bytes(json.as_bytes());
+            let sidecar = with_extension(path, "sha256");
+            let content = format!("sha256  {}\nblake3  {}\n", hashes.sha256, hashes.blake3);
+            std::fs::write(&sidecar, content).with_context(|| {
+                format!("Pruefsummen-Datei nicht schreibbar: {}", sidecar.display())
+            })?;
+            eprintln!("[+] Report-SHA-256: {}", hashes.sha256);
+            eprintln!("[+] Pruefsummen geschrieben: {}", sidecar.display());
         }
         None => {
             let mut stdout = std::io::stdout().lock();
@@ -333,6 +342,14 @@ fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Haengt eine Endung an den Report-Pfad an (report.json -> report.json.sha256).
+fn with_extension(path: &std::path::Path, ext: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_os_string();
+    s.push(".");
+    s.push(ext);
+    PathBuf::from(s)
 }
 
 #[cfg(test)]
