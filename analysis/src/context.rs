@@ -3,7 +3,7 @@
 use stratum_core::ImageReader;
 
 use crate::fsindex::FsIndex;
-use crate::windows::{extract_installs, WindowsInstall};
+use crate::windows::{extract_installs, extract_snapshots, WindowsInstall};
 
 /// Ein NTFS-Bereich, den die Analyzer untersuchen sollen.
 #[derive(Debug, Clone, Copy)]
@@ -52,7 +52,10 @@ impl<'a> AnalysisContext<'a> {
     /// und extrahiert die Registry-Hives (Zeitzone, Rechnername, Konten). Diese
     /// teure Arbeit wird einmal geleistet und von allen Analyzern geteilt.
     pub fn build(img: &'a ImageReader, ntfs_targets: Vec<NtfsTarget>) -> Self {
-        let installs = extract_installs(img, &ntfs_targets);
+        let mut installs = extract_installs(img, &ntfs_targets);
+        // Frühere Zustände aus Volume Shadow Copies ergänzen; registry-basierte
+        // Analyzer werten sie automatisch mit aus.
+        installs.extend(extract_snapshots(img, &ntfs_targets));
 
         let mut volumes = Vec::new();
         let mut warnings = Vec::new();

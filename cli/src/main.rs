@@ -162,6 +162,7 @@ fn main() -> Result<()> {
                 .unwrap_or_default()
         );
         windows.push(WindowsReport {
+            origin: inst.origin.clone(),
             partition_index: inst.target.index,
             partition_offset: inst.target.offset,
             computer_name: inst.computer_name.clone(),

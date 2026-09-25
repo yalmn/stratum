@@ -77,6 +77,8 @@ pub struct ImageInfo {
 /// Ergebnisse einer Windows-Installation (einer NTFS-Partition).
 #[derive(Debug, Serialize, Default)]
 pub struct WindowsReport {
+    /// Herkunft des Volumes ("live" oder eine Schattenkopie).
+    pub origin: String,
     /// Index der Partition in der Tabelle.
     pub partition_index: u32,
     /// Byte-Offset der Partition im Image.

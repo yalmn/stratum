@@ -50,6 +50,8 @@ pub struct TimeZone {
 
 /// Eine Windows-Installation auf einer NTFS-Partition mitsamt Grunddaten.
 pub struct WindowsInstall {
+    /// Herkunft des Volumes: `"live"` oder z. B. `"VSS#1 (2021-01-01)"`.
+    pub origin: String,
     /// Partition, auf der die Installation liegt.
     pub target: NtfsTarget,
     /// Extrahierte Hives.
@@ -77,6 +79,7 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
             Ok(Some(install)) => out.push(install),
             Ok(None) => {}
             Err(e) => out.push(WindowsInstall {
+                origin: "live".into(),
                 target,
                 hives: Hives::default(),
                 computer_name: None,
@@ -93,22 +96,79 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
     out
 }
 
+/// Extrahiert je NTFS-Bereich die Windows-Installationen aus allen Volume Shadow
+/// Copies (frühere Zustände). Registry-basierte Analyzer laufen dadurch
+/// automatisch auch auf diese Snapshots.
+pub fn extract_snapshots(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<WindowsInstall> {
+    use std::io::Cursor;
+    let data = img.as_slice();
+    let mut out = Vec::new();
+
+    for &target in targets {
+        let start = target.offset as usize;
+        let end = match start.checked_add(target.size as usize) {
+            Some(e) if e <= data.len() => e,
+            _ => continue,
+        };
+        let mut cursor = Cursor::new(&data[start..end]);
+        let Ok(vss) = vshadow::VssVolume::new(&mut cursor) else {
+            continue;
+        };
+        for i in 0..vss.store_count() {
+            let created = vss
+                .store_info(i)
+                .ok()
+                .and_then(|s| filetime_to_unix(s.creation_time))
+                .map(|u| format!(" ({u})"))
+                .unwrap_or_default();
+            let origin = format!("VSS#{}{}", i + 1, created);
+            let Ok(reader) = vss.store_reader(&mut cursor, i) else {
+                continue;
+            };
+            let mut vol = match NtfsVolume::from_reader(reader, 0, target.size) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if let Ok(Some(install)) = install_from_volume(&mut vol, target, origin) {
+                out.push(install);
+            }
+        }
+    }
+    out
+}
+
+/// FILETIME (100-ns seit 1601) -> Unix-Sekunden.
+fn filetime_to_unix(ft: u64) -> Option<i64> {
+    const EPOCH_DIFF: u64 = 116_444_736_000_000_000;
+    ft.checked_sub(EPOCH_DIFF).map(|t| (t / 10_000_000) as i64)
+}
+
 fn extract_one(
     img: &ImageReader,
     target: NtfsTarget,
 ) -> Result<Option<WindowsInstall>, stratum_ntfs::NtfsVolumeError> {
     let mut vol = NtfsVolume::open(img, target.offset, target.size)?;
+    install_from_volume(&mut vol, target, "live".into())
+}
 
+/// Baut aus einem geöffneten NTFS-Volume die Windows-Grunddaten (Hives,
+/// Zeitzone, Rechnername, Konten, NTUSER). `Ok(None)`, wenn kein SYSTEM-Hive
+/// vorhanden ist (keine Windows-Installation).
+fn install_from_volume<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
+    target: NtfsTarget,
+    origin: String,
+) -> Result<Option<WindowsInstall>, stratum_ntfs::NtfsVolumeError> {
     let Some(system) = vol.read_file(SYSTEM_PATH)? else {
         return Ok(None);
     };
 
     let mut warnings = Vec::new();
     let hives = Hives {
-        sam: read_optional(&mut vol, SAM_PATH, &mut warnings),
-        software: read_optional(&mut vol, SOFTWARE_PATH, &mut warnings),
-        security: read_optional(&mut vol, SECURITY_PATH, &mut warnings),
-        amcache: read_optional(&mut vol, AMCACHE_PATH, &mut warnings),
+        sam: read_optional(vol, SAM_PATH, &mut warnings),
+        software: read_optional(vol, SOFTWARE_PATH, &mut warnings),
+        security: read_optional(vol, SECURITY_PATH, &mut warnings),
+        amcache: read_optional(vol, AMCACHE_PATH, &mut warnings),
         system: Some(system.data),
     };
 
@@ -147,9 +207,10 @@ fn extract_one(
     }
 
     // NTUSER.DAT je Benutzer (für HKCU-basierte Analyzer).
-    let ntuser = read_ntuser_hives(&mut vol, &mut warnings);
+    let ntuser = read_ntuser_hives(vol, &mut warnings);
 
     Ok(Some(WindowsInstall {
+        origin,
         target,
         hives,
         computer_name,
@@ -161,8 +222,8 @@ fn extract_one(
 }
 
 /// Liest die NTUSER.DAT jedes Benutzers unter `Users\<name>\NTUSER.DAT`.
-fn read_ntuser_hives(
-    vol: &mut NtfsVolume<'_>,
+fn read_ntuser_hives<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
     warnings: &mut Vec<String>,
 ) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
@@ -184,8 +245,8 @@ fn read_ntuser_hives(
     out
 }
 
-fn read_optional(
-    vol: &mut NtfsVolume<'_>,
+fn read_optional<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
     path: &str,
     warnings: &mut Vec<String>,
 ) -> Option<Vec<u8>> {

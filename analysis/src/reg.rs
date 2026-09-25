@@ -27,6 +27,7 @@ impl Analyzer for PersistenceAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
+            let before = out.findings.len();
             // HKLM aus dem SOFTWARE-Hive.
             if let Some(bytes) = &inst.hives.software {
                 match Hive::parse(bytes) {
@@ -43,6 +44,7 @@ impl Analyzer for PersistenceAnalyzer {
                         .push(format!("NTUSER von {user} nicht lesbar: {e}")),
                 }
             }
+            out.tag_origin(before, &inst.origin);
         }
         out
     }
@@ -83,6 +85,7 @@ impl Analyzer for UsbAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
+            let before = out.findings.len();
             let Some(bytes) = &inst.hives.system else {
                 continue;
             };
@@ -123,6 +126,7 @@ impl Analyzer for UsbAnalyzer {
                     );
                 }
             }
+            out.tag_origin(before, &inst.origin);
         }
         out
     }
@@ -144,6 +148,7 @@ impl Analyzer for UserActivityAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
+            let before = out.findings.len();
             for (user, bytes) in &inst.ntuser {
                 match Hive::parse(bytes) {
                     Ok(hive) => {
@@ -155,6 +160,7 @@ impl Analyzer for UserActivityAnalyzer {
                         .push(format!("NTUSER von {user} nicht lesbar: {e}")),
                 }
             }
+            out.tag_origin(before, &inst.origin);
         }
         out
     }
@@ -282,6 +288,7 @@ mod tests {
         let software = b.finish(root);
 
         let inst = WindowsInstall {
+            origin: "live".into(),
             target: NtfsTarget {
                 index: 0,
                 offset: 0,
@@ -326,6 +333,7 @@ mod tests {
         let ntuser = b.finish(root);
 
         let inst = WindowsInstall {
+            origin: "live".into(),
             target: NtfsTarget {
                 index: 0,
                 offset: 0,

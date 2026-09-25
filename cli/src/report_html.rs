@@ -57,6 +57,7 @@ pub fn render(report: &Report) -> String {
         h.push_str(
             "<section class=\"card\">\n<h2>Windows-Installation</h2>\n<table class=\"kv\">\n",
         );
+        row(&mut h, "Herkunft", &w.origin);
         row(&mut h, "Partition-Offset", &w.partition_offset.to_string());
         if let Some(c) = &w.computer_name {
             row(&mut h, "Rechnername", c);

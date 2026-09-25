@@ -17,7 +17,7 @@
 
 mod error;
 
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek};
 
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileNamespace, NtfsStandardInformation};
@@ -34,12 +34,12 @@ pub use error::NtfsVolumeError;
 /// liegen weit darunter.
 pub const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
-type Fs<'a> = Cursor<&'a [u8]>;
-
-/// Ein geöffnetes NTFS-Volume auf einem Ausschnitt des Images.
-pub struct NtfsVolume<'a> {
+/// Ein geöffnetes NTFS-Volume. Generisch über die darunterliegende Quelle
+/// (`Read + Seek`): ein Ausschnitt des Images (`Cursor<&[u8]>`) oder der Reader
+/// einer Volume Shadow Copy.
+pub struct NtfsVolume<R: Read + Seek> {
     ntfs: Ntfs,
-    fs: Fs<'a>,
+    fs: R,
     part_offset: u64,
     part_size: u64,
 }
@@ -106,7 +106,7 @@ pub const MAX_WALK_ENTRIES: usize = 5_000_000;
 /// Obergrenze für die Verzeichnistiefe.
 const MAX_WALK_DEPTH: usize = 128;
 
-impl<'a> NtfsVolume<'a> {
+impl<'a> NtfsVolume<Cursor<&'a [u8]>> {
     /// Öffnet ein NTFS-Volume, das bei `part_offset` beginnt und `part_size`
     /// Bytes umfasst.
     pub fn open(
@@ -129,21 +129,25 @@ impl<'a> NtfsVolume<'a> {
             image_size,
         })?;
         let slice = &img.as_slice()[start..end as usize];
-        Self::on_slice(slice, part_offset, part_size)
+        Self::from_reader(Cursor::new(slice), part_offset, part_size)
     }
 
     /// Öffnet ein NTFS-Volume, das bereits als blanker Byte-Slice vorliegt
     /// (das Volume beginnt bei Byte 0). Nützlich für Tests und Fuzzing.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, NtfsVolumeError> {
-        Self::on_slice(data, 0, data.len() as u64)
+        Self::from_reader(Cursor::new(data), 0, data.len() as u64)
     }
+}
 
-    fn on_slice(
-        slice: &'a [u8],
+impl<R: Read + Seek> NtfsVolume<R> {
+    /// Öffnet ein NTFS-Volume über eine beliebige `Read + Seek`-Quelle, z. B.
+    /// den rekonstruierten Reader einer Volume Shadow Copy. `part_offset` dient
+    /// nur der Herkunftsangabe (bei Snapshots ohne festen Image-Offset 0).
+    pub fn from_reader(
+        mut fs: R,
         part_offset: u64,
         part_size: u64,
     ) -> Result<Self, NtfsVolumeError> {
-        let mut fs = Cursor::new(slice);
         let mut ntfs = Ntfs::new(&mut fs)?;
         // Für den namensbasierten Verzeichnis-Lookup muss die $UpCase-Tabelle
         // geladen sein.
@@ -272,9 +276,9 @@ impl<'a> NtfsVolume<'a> {
 }
 
 /// Listet die Einträge eines Verzeichnisses über dessen MFT-Nummer.
-fn list_children(
+fn list_children<R: Read + Seek>(
     ntfs: &Ntfs,
-    fs: &mut Fs<'_>,
+    fs: &mut R,
     dir_rec: u64,
 ) -> Result<Vec<DirEntry>, NtfsVolumeError> {
     let dir = ntfs.file(fs, dir_rec)?;
@@ -305,9 +309,9 @@ fn list_children(
 
 /// Liest den Inhalt eines Datensatzes (ungenannter $DATA-Strom) mitsamt
 /// Herkunft.
-fn read_record(
+fn read_record<R: Read + Seek>(
     ntfs: &Ntfs,
-    fs: &mut Fs<'_>,
+    fs: &mut R,
     rec: u64,
     path: &str,
     part_offset: u64,
@@ -340,7 +344,11 @@ fn read_record(
 }
 
 /// Löst einen Pfad in eine MFT-Datensatznummer auf.
-fn resolve(ntfs: &Ntfs, fs: &mut Fs<'_>, path: &str) -> Result<Option<u64>, NtfsVolumeError> {
+fn resolve<R: Read + Seek>(
+    ntfs: &Ntfs,
+    fs: &mut R,
+    path: &str,
+) -> Result<Option<u64>, NtfsVolumeError> {
     let mut rec = ntfs.root_directory(fs)?.file_record_number();
 
     for component in path.split(['/', '\\']).filter(|c| !c.is_empty()) {

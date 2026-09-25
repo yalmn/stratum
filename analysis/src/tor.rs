@@ -140,7 +140,11 @@ impl Analyzer for TorAnalyzer {
     }
 }
 
-fn read(vol: &mut NtfsVolume<'_>, record: u64, path: &str) -> Option<Vec<u8>> {
+fn read<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
+    record: u64,
+    path: &str,
+) -> Option<Vec<u8>> {
     vol.read_file_by_record(record, path)
         .ok()
         .flatten()

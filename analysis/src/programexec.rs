@@ -20,6 +20,7 @@ impl Analyzer for ProgramExecutionAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
+            let before = out.findings.len();
             if let Some(bytes) = &inst.hives.amcache {
                 match Hive::parse(bytes) {
                     Ok(hive) => amcache(&hive, &mut out),
@@ -34,6 +35,7 @@ impl Analyzer for ProgramExecutionAnalyzer {
                         .push(format!("SYSTEM (Shimcache) nicht lesbar: {e}")),
                 }
             }
+            out.tag_origin(before, &inst.origin);
         }
         out
     }

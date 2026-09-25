@@ -147,8 +147,8 @@ enum Query {
     Firefox,
 }
 
-fn process(
-    vol: &mut NtfsVolume<'_>,
+fn process<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
     record: u64,
     path: &str,
     browser: &str,

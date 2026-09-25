@@ -23,6 +23,7 @@ impl Analyzer for LsaAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
+            let before = out.findings.len();
             let (Some(system), Some(security)) = (&inst.hives.system, &inst.hives.security) else {
                 continue;
             };
@@ -61,6 +62,7 @@ impl Analyzer for LsaAnalyzer {
                 }
                 Err(e) => out.warnings.push(format!("DCC2: {e}")),
             }
+            out.tag_origin(before, &inst.origin);
         }
         out
     }
