@@ -17,14 +17,20 @@ mod context;
 mod finding;
 mod fsindex;
 mod keyword;
+mod reg;
 mod runner;
 mod tor;
 mod windows;
+
+#[cfg(test)]
+#[path = "../tests/common/builder.rs"]
+mod builder;
 
 pub use context::{AnalysisContext, NtfsTarget};
 pub use finding::Finding;
 pub use fsindex::{FileEntry, FsIndex};
 pub use keyword::KeywordAnalyzer;
+pub use reg::{PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
 pub use runner::{run_all, AnalysisResult};
 pub use tor::TorAnalyzer;
 pub use windows::{Hives, TimeZone, WindowsInstall};

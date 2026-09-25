@@ -53,10 +53,13 @@ pub struct WindowsInstall {
     pub hives: Hives,
     /// Rechnername.
     pub computer_name: Option<String>,
-    /// Zeitzone (fuer alle zeitbasierten Analyzer).
+    /// Zeitzone (für alle zeitbasierten Analyzer).
     pub timezone: Option<TimeZone>,
     /// Lokale Konten mit NT-Hash.
     pub accounts: Vec<Account>,
+    /// NTUSER.DAT je Benutzer (Benutzername, Rohbytes) für HKCU-basierte
+    /// Analyzer.
+    pub ntuser: Vec<(String, Vec<u8>)>,
     /// Auffälligkeiten beim Aufbau.
     pub warnings: Vec<String>,
 }
@@ -76,6 +79,7 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
                 computer_name: None,
                 timezone: None,
                 accounts: Vec::new(),
+                ntuser: Vec::new(),
                 warnings: vec![format!(
                     "NTFS-Partition bei Offset {} nicht lesbar: {e}",
                     target.offset
@@ -138,14 +142,42 @@ fn extract_one(
         }
     }
 
+    // NTUSER.DAT je Benutzer (für HKCU-basierte Analyzer).
+    let ntuser = read_ntuser_hives(&mut vol, &mut warnings);
+
     Ok(Some(WindowsInstall {
         target,
         hives,
         computer_name,
         timezone,
         accounts,
+        ntuser,
         warnings,
     }))
+}
+
+/// Liest die NTUSER.DAT jedes Benutzers unter `Users\<name>\NTUSER.DAT`.
+fn read_ntuser_hives(
+    vol: &mut NtfsVolume<'_>,
+    warnings: &mut Vec<String>,
+) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let users = match vol.list_dir("Users") {
+        Ok(Some(u)) => u,
+        _ => return out,
+    };
+    for u in users {
+        if !u.is_directory {
+            continue;
+        }
+        let path = format!("Users\\{}\\NTUSER.DAT", u.name);
+        match vol.read_file(&path) {
+            Ok(Some(f)) => out.push((u.name.clone(), f.data)),
+            Ok(None) => {}
+            Err(e) => warnings.push(format!("NTUSER.DAT von {} nicht lesbar: {e}", u.name)),
+        }
+    }
+    out
 }
 
 fn read_optional(
