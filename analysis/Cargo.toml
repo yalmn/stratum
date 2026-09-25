@@ -14,6 +14,8 @@ stratum-creds = { path = "../creds" }
 serde = { workspace = true }
 rayon = "1.12.0"
 thiserror.workspace = true
+tempfile.workspace = true
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile.workspace = true

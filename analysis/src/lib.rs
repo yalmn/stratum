@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod browser;
 mod context;
 mod finding;
 mod fsindex;
@@ -26,6 +27,7 @@ mod windows;
 #[path = "../tests/common/builder.rs"]
 mod builder;
 
+pub use browser::BrowserAnalyzer;
 pub use context::{AnalysisContext, NtfsTarget};
 pub use finding::Finding;
 pub use fsindex::{FileEntry, FsIndex};
