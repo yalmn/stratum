@@ -5,9 +5,9 @@
 
 use serde::Serialize;
 
+use stratum_analysis::Finding;
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
-use stratum_search::Finding;
 
 /// Der komplette Report eines Laufs.
 #[derive(Debug, Serialize)]

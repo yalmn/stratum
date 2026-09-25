@@ -63,6 +63,7 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 |---|---|
 | `<image.dd>` | entschlüsseltes Roh-Image (z. B. `merged.dd`) |
 | `-o, --out` | Zieldatei für den JSON-Report (ohne Angabe: Ausgabe auf stdout) |
+| `--html` | zusätzlich einen übersichtlichen HTML-Report in diese Datei schreiben |
 | `-k, --keywords` | eigene Begriffstabelle (TOML), mehrfach angebbar |
 | `--no-default-keywords` | die mitgelieferte Liste nicht verwenden |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |

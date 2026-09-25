@@ -15,7 +15,7 @@
 
 [meta]
 name = "Strafverfolgung"
-version = 1
+version = 2
 max_treffer = 200000
 
 # Zugangsdaten im Klartext: nur als Paar aus einem Benutzer- und einem
@@ -25,108 +25,64 @@ id = "zugangsdaten"
 aktiv = true
 modus = "paar"
 abstand_bytes = 128
-links = [
-  "user", "username", "benutzer", "benutzername", "login", "anmeldename",
-  "konto", "account", "uname", "usern", "un", "mail", "email", "e-mail", "nick",
-]
-rechts = [
-  "pw", "pwd", "pass", "passw", "passwort", "password", "pword", "kennwort",
-  "secret", "geheim", "pin", "code", "token", "apikey", "api_key",
-]
+links = ["user", "username", "benutzer", "benutzername", "login", "anmeldename", "konto", "account", "uname", "usern", "mail", "email", "e-mail", "nick"]
+rechts = ["pw", "pwd", "pass", "passw", "passwort", "password", "pword", "kennwort", "secret", "geheim", "code", "token", "apikey", "api_key"]
 
 # Hinweise auf einen versteckten Dienst im Tor-Netz oder Darknet-Handel.
 [[kategorie]]
 id = "darknet"
 aktiv = true
 onion_pruefung = true
-begriffe = [
-  ".onion", "torrc", "HiddenServiceDir", "hs_ed25519_secret_key", "hs_ed25519_public_key",
-  "tor browser", "torproject", "hidden service", "onion service", "i2p", "eepsite",
-  "dread", "escrow", "vendor", "marketplace", "dark market", "pgp key",
-]
+begriffe = [".onion", "torrc", "HiddenServiceDir", "hs_ed25519_secret_key", "hs_ed25519_public_key", "tor browser", "torproject", "hidden service", "onion service", "i2p", "eepsite", "dread", "escrow", "vendor", "marketplace", "dark market", "pgp key"]
 
 # Anonymisierung und Verschluesselung, oft zur Verschleierung genutzt.
 [[kategorie]]
 id = "anonymisierung"
 aktiv = true
-begriffe = [
-  "vpn", "openvpn", "wireguard", "nordvpn", "protonvpn", "mullvad", "proxychains",
-  "tails", "whonix", "qubes", "veracrypt", "truecrypt", "bitlocker", "cryptomator",
-  "keepass", "bitwarden", "gpg", "pgp", "gnupg", "shredder", "ccleaner", "eraser",
-]
+begriffe = ["vpn", "openvpn", "wireguard", "nordvpn", "protonvpn", "mullvad", "proxychains", "tails", "whonix", "qubes", "veracrypt", "truecrypt", "bitlocker", "cryptomator", "keepass", "bitwarden", "gpg", "pgp", "gnupg", "shredder", "ccleaner", "eraser"]
 
 # Kryptowaehrungen und Wallets.
 [[kategorie]]
 id = "kryptowaehrung"
 aktiv = true
-begriffe = [
-  "bitcoin", "btc", "wallet.dat", "electrum", "monero", "xmr", "ethereum", "eth",
-  "litecoin", "seed phrase", "mnemonic", "recovery phrase", "private key",
-  "blockchain", "exodus", "metamask", "ledger", "trezor", "coinbase", "binance",
-  "kraken", "mixer", "tumbler", "cashout",
-]
+begriffe = ["bitcoin", "btc", "wallet.dat", "electrum", "monero", "xmr", "ethereum", "litecoin", "seed phrase", "mnemonic", "recovery phrase", "private key", "blockchain", "exodus", "metamask", "ledger", "trezor", "coinbase", "binance", "kraken", "mixer", "tumbler", "cashout"]
 
 # Finanz-, Vermoegens- und Betrugsdelikte.
 [[kategorie]]
 id = "finanzbetrug"
 aktiv = true
-begriffe = [
-  "betrug", "phishing", "fake", "faelschung", "geldwaesche", "money laundering",
-  "carding", "dump", "fullz", "cvv", "cvc", "track2", "skimming", "iban", "bic",
-  "kreditkarte", "credit card", "paypal", "klarna", "western union", "moneygram",
-  "ueberweisung", "rechnung", "mahnung", "strohmann", "mule", "drop",
-]
+begriffe = ["betrug", "phishing", "fake", "faelschung", "geldwaesche", "money laundering", "carding", "dump", "fullz", "cvv", "track2", "skimming", "iban", "kreditkarte", "credit card", "paypal", "klarna", "western union", "moneygram", "ueberweisung", "rechnung", "mahnung", "strohmann", "mule", "drop"]
 
 # Ausweis- und Identitaetsdokumente.
 [[kategorie]]
 id = "dokumente"
 aktiv = true
-begriffe = [
-  "personalausweis", "reisepass", "fuehrerschein", "ausweis", "passport", "id card",
-  "geburtsurkunde", "meldebescheinigung", "aufenthaltstitel", "visum",
-  "gefaelscht", "faelschung", "blanko", "template", "vorlage", "hologramm",
-]
+begriffe = ["personalausweis", "reisepass", "fuehrerschein", "ausweis", "passport", "id card", "geburtsurkunde", "meldebescheinigung", "aufenthaltstitel", "visum", "gefaelscht", "faelschung", "blanko", "template", "vorlage", "hologramm"]
 
 # Cybercrime, Schadsoftware und Angriffswerkzeuge.
 [[kategorie]]
 id = "cybercrime"
 aktiv = true
-begriffe = [
-  "malware", "ransomware", "trojaner", "keylogger", "spyware", "stealer", "rat",
-  "botnet", "c2", "command and control", "exploit", "payload", "backdoor",
-  "mimikatz", "cobalt strike", "metasploit", "shellcode", "bruteforce", "hydra",
-  "credential", "exfil", "dropper", "loader", "obfuscated",
-]
+begriffe = ["malware", "ransomware", "trojaner", "keylogger", "spyware", "stealer", "rat", "botnet", "command and control", "exploit", "payload", "backdoor", "mimikatz", "cobalt strike", "metasploit", "shellcode", "bruteforce", "hydra", "credential", "exfil", "dropper", "loader", "obfuscated"]
 
 # Betaeubungsmittel. Kann bei allgemeinen Texten rauschen, bei Bedarf abschalten.
 [[kategorie]]
 id = "betaeubungsmittel"
 aktiv = true
-begriffe = [
-  "kokain", "koks", "heroin", "amphetamin", "speed", "methamphetamin", "crystal",
-  "cannabis", "marihuana", "haschisch", "gras", "weed", "mdma", "ecstasy", "pille",
-  "lsd", "ketamin", "fentanyl", "gramm", "streckmittel", "dealer", "bunker", "grow",
-]
+begriffe = ["kokain", "koks", "heroin", "amphetamin", "speed", "methamphetamin", "crystal", "cannabis", "marihuana", "haschisch", "gras", "weed", "mdma", "ecstasy", "pille", "lsd", "ketamin", "fentanyl", "gramm", "streckmittel", "dealer", "bunker", "grow"]
 
 # Waffen und Sprengstoff.
 [[kategorie]]
 id = "waffen"
 aktiv = true
-begriffe = [
-  "waffe", "pistole", "schusswaffe", "revolver", "gewehr", "munition", "patronen",
-  "kaliber", "schalldaempfer", "sprengstoff", "sprengsatz", "tnt", "c4", "detonator",
-  "zuender", "glock", "kalaschnikow", "ak47", "3d druck", "ghost gun",
-]
+begriffe = ["waffe", "pistole", "schusswaffe", "revolver", "gewehr", "munition", "patronen", "kaliber", "schalldaempfer", "sprengstoff", "sprengsatz", "tnt", "detonator", "zuender", "glock", "kalaschnikow", "ak47", "3d druck", "ghost gun"]
 
 # Verbreitete Messenger, in Chats oft Ausgangspunkt fuer weitere Spuren.
 # Standardmaessig aus, da haeufig und damit rauschanfaellig.
 [[kategorie]]
 id = "kommunikation"
 aktiv = false
-begriffe = [
-  "telegram", "signal", "threema", "wickr", "whatsapp", "wire", "session",
-  "jabber", "xmpp", "briar", "element", "matrix",
-]
+begriffe = ["telegram", "signal", "threema", "wickr", "whatsapp", "wire", "session", "jabber", "xmpp", "briar", "element", "matrix"]
 
 # Darstellungen sexuellen Kindesmissbrauchs.
 #

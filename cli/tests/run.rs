@@ -75,15 +75,16 @@ fn erzeugt_json_report() {
     assert_eq!(json["partitions"]["scheme"], "mbr");
     assert_eq!(json["partitions"]["partitions"][0]["fs_hint"], "ntfs");
 
-    // Suche: Zugangsdaten-Paar und torrc.
+    // Suche: Zugangsdaten-Paar und torrc. Domäne, Name und Attribute im
+    // neuen Fund-Schema.
     let findings = json["search"]["findings"].as_array().unwrap();
     assert_eq!(json["search"]["table_version"], 3);
     assert!(findings
         .iter()
-        .any(|f| f["art"] == "paar" && f["kategorie"] == "zugangsdaten"));
+        .any(|f| f["domain"] == "zugangsdaten" && f["attributes"]["art"] == "paar"));
     assert!(findings
         .iter()
-        .any(|f| f["art"] == "term" && f["begriff"] == "torrc"));
+        .any(|f| f["domain"] == "darknet" && f["name"] == "torrc"));
 }
 
 #[test]
@@ -123,5 +124,5 @@ fn mitgelieferte_liste_laeuft_ohne_keywords() {
     assert!(name.contains("Strafverfolgung"), "Name: {name}");
     // torrc steht in der Datenzone und ist in der Default-Liste enthalten.
     let findings = json["search"]["findings"].as_array().unwrap();
-    assert!(findings.iter().any(|f| f["begriff"] == "torrc"));
+    assert!(findings.iter().any(|f| f["name"] == "torrc"));
 }

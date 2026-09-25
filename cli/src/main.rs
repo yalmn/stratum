@@ -7,6 +7,7 @@
 
 mod bdp;
 mod report;
+mod report_html;
 mod windows;
 
 use std::io::Write;
@@ -17,10 +18,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use stratum_analysis::{run_all, AnalysisContext, Analyzer, KeywordAnalyzer, NtfsTarget};
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
 };
-use stratum_search::{SearchEngine, TermTable};
+use stratum_search::TermTable;
 
 use report::{ImageInfo, Report, SearchReport, Tool};
 
@@ -34,6 +36,10 @@ struct Cli {
     /// Zieldatei für den JSON-Report (Standard: Ausgabe auf stdout).
     #[arg(short, long)]
     out: Option<PathBuf>,
+
+    /// Zusätzlich einen übersichtlichen HTML-Report in diese Datei schreiben.
+    #[arg(long)]
+    html: Option<PathBuf>,
 
     /// Begriffstabelle(n) (TOML) für die Keyword-Suche. Mehrfach angebbar, die
     /// Tabellen werden zusammengeführt (z. B. eine mitgelieferte und eine
@@ -86,16 +92,24 @@ fn main() -> Result<()> {
 
     // Welche Bereiche als NTFS untersucht werden: entweder genau die per
     // bdp.info benannte Partition, oder alle als NTFS erkannten aus dem Scan.
-    let targets = match &cli.bdp {
+    let targets: Vec<NtfsTarget> = match &cli.bdp {
         Some(path) => {
             let b = bdp::load(path)?;
-            vec![(u32::MAX, b.offset_bytes, b.size_bytes)]
+            vec![NtfsTarget {
+                index: u32::MAX,
+                offset: b.offset_bytes,
+                size: b.size_bytes,
+            }]
         }
         None => partitions
             .partitions
             .iter()
             .filter(|p| p.fs_hint == FsHint::Ntfs || p.typ == stratum_core::PartitionType::Volume)
-            .map(|p| (p.index, p.start_offset, p.size_bytes))
+            .map(|p| NtfsTarget {
+                index: p.index,
+                offset: p.start_offset,
+                size: p.size_bytes,
+            })
             .collect(),
     };
     if targets.is_empty() && partitions.scheme != PartitionScheme::None {
@@ -103,7 +117,8 @@ fn main() -> Result<()> {
     }
 
     let mut windows = Vec::new();
-    for (index, offset, size) in targets {
+    for t in &targets {
+        let (index, offset, size) = (t.index, t.offset, t.size);
         eprintln!("[*] Untersuche NTFS-Partition bei Offset {offset} ...");
         match windows::analyze(&img, index, offset, size) {
             Ok(Some(w)) => {
@@ -126,7 +141,7 @@ fn main() -> Result<()> {
     let search = if !use_default && cli.keywords.is_empty() {
         None
     } else {
-        Some(run_search(&img, use_default, &cli.keywords)?)
+        Some(run_search(&img, &targets, use_default, &cli.keywords)?)
     };
 
     let generated_unix = SystemTime::now()
@@ -147,6 +162,13 @@ fn main() -> Result<()> {
         search,
         warnings,
     };
+
+    if let Some(path) = &cli.html {
+        let html = report_html::render(&out);
+        std::fs::write(path, html)
+            .with_context(|| format!("HTML-Report nicht schreibbar: {}", path.display()))?;
+        eprintln!("[+] HTML-Report geschrieben: {}", path.display());
+    }
 
     write_report(&out, cli.out.as_deref())
 }
@@ -171,9 +193,14 @@ fn spinner(msg: &'static str) -> ProgressBar {
     pb
 }
 
-fn run_search(img: &ImageReader, use_default: bool, paths: &[PathBuf]) -> Result<SearchReport> {
+fn run_search(
+    img: &ImageReader,
+    targets: &[NtfsTarget],
+    use_default: bool,
+    paths: &[PathBuf],
+) -> Result<SearchReport> {
     // Mehrere Tabellen werden zu einer zusammengeführt: alle Kategorien
-    // hintereinander, der Name aus den Quellen, die hoechste Version. Die
+    // hintereinander, der Name aus den Quellen, die höchste Version. Die
     // mitgelieferte Tabelle kommt zuerst, damit eigene Kategorien folgen.
     let mut names = Vec::new();
     let mut version = 0;
@@ -206,14 +233,20 @@ fn run_search(img: &ImageReader, use_default: bool, paths: &[PathBuf]) -> Result
         },
         categories,
     };
-    let engine = SearchEngine::new(&table);
+    let table_name = table.meta.name.clone();
+    let table_version = table.meta.version;
+
+    // Der Keyword-Analyzer durchsucht das Image blockweise parallel.
+    let analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(KeywordAnalyzer::from_table(&table))];
+    let ctx = AnalysisContext::new(img, targets.to_vec());
+
     let pb = spinner("Durchsuche Image nach Begriffen");
-    let result = engine.run(img.as_slice(), 0);
+    let result = run_all(&ctx, &analyzers);
     pb.finish_and_clear();
     eprintln!("[+] Keyword-Suche: {} Treffer", result.findings.len());
     Ok(SearchReport {
-        table_name: table.meta.name,
-        table_version: table.meta.version,
+        table_name,
+        table_version,
         findings: result.findings,
         warnings: result.warnings,
     })

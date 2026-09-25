@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "mmap", "registry", "search", "ntfs", "creds", "cli"]
+members = ["core", "mmap", "registry", "search", "ntfs", "creds", "analysis", "cli"]
 exclude = ["fuzz"]
 
 [workspace.package]
