@@ -12,7 +12,7 @@ mod windows;
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
     let hashes = if cli.no_hash {
         None
     } else {
-        let pb = bytes_bar(img.len());
+        let pb = bytes_bar(img.len(), "Hashing");
         let cb: stratum_core::Progress = &|done| pb.set_position(done);
         let h = hash_image_with_progress(&img, Some(cb));
         pb.finish_and_clear();
@@ -175,21 +175,14 @@ fn main() -> Result<()> {
 
 /// Fortschrittsbalken in Bytes. Zeichnet auf stderr und blendet sich aus, wenn
 /// stderr kein Terminal ist, damit der JSON-Report auf stdout sauber bleibt.
-fn bytes_bar(len: u64) -> ProgressBar {
+fn bytes_bar(len: u64, label: &str) -> ProgressBar {
     let pb = ProgressBar::new(len);
-    if let Ok(style) = ProgressStyle::with_template(
-        "  Hashing [{bar:40}] {bytes}/{total_bytes} ({bytes_per_sec}, ETA {eta})",
-    ) {
+    let tmpl = format!(
+        "  {label:<8}[{{bar:40}}] {{bytes}}/{{total_bytes}} ({{bytes_per_sec}}, ETA {{eta}})"
+    );
+    if let Ok(style) = ProgressStyle::with_template(&tmpl) {
         pb.set_style(style.progress_chars("=>-"));
     }
-    pb
-}
-
-/// Laufender Spinner für eine Phase ohne bekannte Gesamtlänge.
-fn spinner(msg: &'static str) -> ProgressBar {
-    let pb = ProgressBar::new_spinner();
-    pb.set_message(msg);
-    pb.enable_steady_tick(Duration::from_millis(120));
     pb
 }
 
@@ -236,11 +229,15 @@ fn run_search(
     let table_name = table.meta.name.clone();
     let table_version = table.meta.version;
 
-    // Der Keyword-Analyzer durchsucht das Image blockweise parallel.
-    let analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(KeywordAnalyzer::from_table(&table))];
+    // Der Keyword-Analyzer durchsucht das Image blockweise parallel und meldet
+    // seinen Fortschritt an einen Byte-Balken.
+    let pb = bytes_bar(img.len(), "Suche");
+    let bar = pb.clone();
+    let analyzer = KeywordAnalyzer::from_table(&table)
+        .with_progress(Box::new(move |done| bar.set_position(done)));
+    let analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(analyzer)];
     let ctx = AnalysisContext::new(img, targets.to_vec());
 
-    let pb = spinner("Durchsuche Image nach Begriffen");
     let result = run_all(&ctx, &analyzers);
     pb.finish_and_clear();
     eprintln!("[+] Keyword-Suche: {} Treffer", result.findings.len());

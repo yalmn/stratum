@@ -212,7 +212,19 @@ impl SearchEngine {
     /// Länge des längsten Begriffs, damit kein Treffer an einer Blockgrenze
     /// verloren geht; Duplikate im Überlappungsbereich werden entfernt.
     pub fn run_parallel(&self, data: &[u8], base_offset: u64) -> SearchResult {
+        self.run_parallel_with_progress(data, base_offset, None)
+    }
+
+    /// Wie [`SearchEngine::run_parallel`], meldet aber über `progress` die Zahl
+    /// der bereits durchsuchten Bytes (für einen Fortschrittsbalken).
+    pub fn run_parallel_with_progress(
+        &self,
+        data: &[u8],
+        base_offset: u64,
+        progress: Option<&(dyn Fn(u64) + Sync)>,
+    ) -> SearchResult {
         use rayon::prelude::*;
+        use std::sync::atomic::{AtomicU64, Ordering};
 
         // Grobe Blockgröße: genug, damit sich die Parallelität lohnt, aber viele
         // Blöcke für gute Lastverteilung.
@@ -220,9 +232,14 @@ impl SearchEngine {
         let overlap = self.max_pattern_len().max(1) - 1;
 
         if self.ac.is_none() || data.len() <= BLOCK {
-            return self.run(data, base_offset);
+            let r = self.run(data, base_offset);
+            if let Some(p) = progress {
+                p(data.len() as u64);
+            }
+            return r;
         }
 
+        let done = AtomicU64::new(0);
         // Startpositionen der Blöcke.
         let starts: Vec<usize> = (0..data.len()).step_by(BLOCK).collect();
         let mut parts: Vec<SearchResult> = starts
@@ -236,6 +253,11 @@ impl SearchEngine {
                 if end < data.len() {
                     let grenze = base_offset + (s + BLOCK) as u64;
                     r.findings.retain(|f| f.offset < grenze);
+                }
+                if let Some(p) = progress {
+                    let block_len = (end - s).min(BLOCK) as u64;
+                    let total = done.fetch_add(block_len, Ordering::Relaxed) + block_len;
+                    p(total);
                 }
                 r
             })
