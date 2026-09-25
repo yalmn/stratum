@@ -21,6 +21,7 @@ const SYSTEM_PATH: &str = "Windows/System32/config/SYSTEM";
 const SAM_PATH: &str = "Windows/System32/config/SAM";
 const SOFTWARE_PATH: &str = "Windows/System32/config/SOFTWARE";
 const SECURITY_PATH: &str = "Windows/System32/config/SECURITY";
+const AMCACHE_PATH: &str = "Windows/AppCompat/Programs/Amcache.hve";
 
 /// Extrahierte Hive-Rohdaten einer Installation.
 #[derive(Debug, Default)]
@@ -33,6 +34,8 @@ pub struct Hives {
     pub software: Option<Vec<u8>>,
     /// SECURITY-Hive.
     pub security: Option<Vec<u8>>,
+    /// Amcache-Hive (`Windows\AppCompat\Programs\Amcache.hve`).
+    pub amcache: Option<Vec<u8>>,
 }
 
 /// Zeitzone laut Registry.
@@ -105,6 +108,7 @@ fn extract_one(
         sam: read_optional(&mut vol, SAM_PATH, &mut warnings),
         software: read_optional(&mut vol, SOFTWARE_PATH, &mut warnings),
         security: read_optional(&mut vol, SECURITY_PATH, &mut warnings),
+        amcache: read_optional(&mut vol, AMCACHE_PATH, &mut warnings),
         system: Some(system.data),
     };
 
