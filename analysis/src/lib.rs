@@ -23,6 +23,7 @@ mod prefetch;
 mod reg;
 mod runner;
 mod tor;
+mod vss;
 mod windows;
 
 #[cfg(test)]
@@ -39,6 +40,7 @@ pub use prefetch::PrefetchAnalyzer;
 pub use reg::{PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
 pub use runner::{run_all, AnalysisResult};
 pub use tor::TorAnalyzer;
+pub use vss::VssAnalyzer;
 pub use windows::{Hives, TimeZone, WindowsInstall};
 
 /// Ergebnis eines einzelnen Analyzers.
