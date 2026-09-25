@@ -19,8 +19,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use stratum_analysis::{
     run_all, AnalysisContext, Analyzer, BrowserAnalyzer, EventLogAnalyzer, KeywordAnalyzer,
-    NtfsTarget, PersistenceAnalyzer, PrefetchAnalyzer, ProgramExecutionAnalyzer, TorAnalyzer,
-    UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
+    LsaAnalyzer, NtfsTarget, PersistenceAnalyzer, PrefetchAnalyzer, ProgramExecutionAnalyzer,
+    TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
 };
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
@@ -169,6 +169,7 @@ fn main() -> Result<()> {
         Box::new(EventLogAnalyzer),
         Box::new(VssAnalyzer),
         Box::new(ProgramExecutionAnalyzer),
+        Box::new(LsaAnalyzer),
     ];
 
     let mut keyword_bar = None;

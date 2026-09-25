@@ -19,12 +19,14 @@
 #![warn(missing_docs)]
 
 mod crypto;
+mod lsa;
 mod sam;
 
 use serde::Serialize;
 
 use stratum_registry::{Hive, HiveError};
 
+pub use lsa::{lsa_key, secrets as lsa_secrets, LsaError, Secret};
 pub use sam::{bootkey_from_classes, hashed_bootkey, user_hash, SamError, UserHash, EMPTY_NT_HASH};
 
 /// Die vier Schlüssel unter `Control\Lsa`, deren Class-Werte den Bootkey
@@ -119,7 +121,8 @@ pub fn extract_local_accounts(system: &Hive, sam: &Hive) -> Result<CredsReport, 
     Ok(report)
 }
 
-fn read_bootkey(system: &Hive) -> Result<[u8; 16], CredsError> {
+/// Leitet den Bootkey (Syskey) aus dem SYSTEM-Hive ab.
+pub fn read_bootkey(system: &Hive) -> Result<[u8; 16], CredsError> {
     let current = system
         .open_key("Select")?
         .and_then(|k| k.value("Current").ok().flatten())
@@ -143,6 +146,13 @@ fn read_bootkey(system: &Hive) -> Result<[u8; 16], CredsError> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Liest die LSA-Secrets aus SYSTEM- und SECURITY-Hive (Vista und neuer).
+pub fn extract_lsa_secrets(system: &Hive, security: &Hive) -> Result<Vec<Secret>, CredsError> {
+    let bootkey = read_bootkey(system)?;
+    let key = lsa::lsa_key(security, &bootkey).map_err(|e| CredsError::Missing(e.to_string()))?;
+    Ok(lsa::secrets(security, &key))
 }
 
 #[cfg(test)]

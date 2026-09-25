@@ -1743,6 +1743,7 @@ dependencies = [
  "md-5 0.11.0",
  "serde",
  "serde_json",
+ "sha2",
  "stratum-registry",
  "thiserror 2.0.21",
 ]

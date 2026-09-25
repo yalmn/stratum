@@ -6,12 +6,53 @@
 //! Zusammensetzung in [`crate::sam`] auf gesicherten Grundlagen steht.
 
 use md5::{Digest, Md5};
+use sha2::Sha256;
 
-use aes::Aes128;
+use aes::{Aes128, Aes256};
 use cbc::cipher::array::Array;
-use cbc::cipher::consts::{U16, U8};
+use cbc::cipher::consts::{U16, U32, U8};
 use cbc::cipher::{BlockCipherDecrypt, BlockModeDecrypt, KeyInit, KeyIvInit};
 use des::Des;
+
+/// SHA-256 in der von LSA genutzten Form: der Schlüssel einmal, danach der Wert
+/// `rounds`-mal (Standard 1000) in den Hash gegeben.
+pub fn sha256_rounds(key: &[u8], value: &[u8], rounds: usize) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(key);
+    for _ in 0..rounds {
+        h.update(value);
+    }
+    h.finalize().into()
+}
+
+/// AES-256 entschlüsselt blockweise mit Null-IV ohne Verkettung (entspricht
+/// dem ECB-artigen Modus, den LSA für Schlüssel und Secrets verwendet).
+pub fn aes256_ecb_decrypt(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
+    let cipher = Aes256::new(&Array::<u8, U32>::from(*key));
+    let mut out = Vec::with_capacity(data.len());
+    for chunk in data.chunks_exact(16) {
+        let mut block = Array::<u8, U16>::default();
+        block.copy_from_slice(chunk);
+        cipher.decrypt_block(&mut block);
+        out.extend_from_slice(block.as_slice());
+    }
+    out
+}
+
+/// AES-256 verschlüsselt blockweise mit Null-IV (nur für Tests).
+#[cfg(test)]
+pub fn aes256_ecb_encrypt(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
+    use cbc::cipher::BlockCipherEncrypt;
+    let cipher = Aes256::new(&Array::<u8, U32>::from(*key));
+    let mut out = Vec::with_capacity(data.len());
+    for chunk in data.chunks_exact(16) {
+        let mut block = Array::<u8, U16>::default();
+        block.copy_from_slice(chunk);
+        cipher.encrypt_block(&mut block);
+        out.extend_from_slice(block.as_slice());
+    }
+    out
+}
 
 /// MD5 über die Verkettung mehrerer Teilstücke.
 pub fn md5(parts: &[&[u8]]) -> [u8; 16] {

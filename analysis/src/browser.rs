@@ -77,9 +77,68 @@ impl Analyzer for BrowserAnalyzer {
                     &mut out,
                 );
             }
+            // Gespeicherte Zugangsdaten (verschluesselt): nur Vorhandensein und
+            // Anzahl. Chromium "Login Data" (SQLite, DPAPI/AES-GCM), Firefox
+            // "logins.json" (DPAPI ueber key4.db). Entschluesselung braucht das
+            // Benutzerpasswort und ist einer spaeteren Stufe vorbehalten.
+            for e in v.by_name("Login Data") {
+                if !is_chromium_path(&e.path) {
+                    continue;
+                }
+                if let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) {
+                    let n = count_rows(&f.data, "SELECT COUNT(*) FROM logins");
+                    out.findings.push(
+                        Finding::new("browser", "gespeicherte Zugangsdaten", &e.path)
+                            .with("art", "passwoerter")
+                            .with("browser", browser_of(&e.path))
+                            .with("anzahl", n.to_string())
+                            .with(
+                                "hinweis",
+                                "verschluesselt (DPAPI/AES-GCM), Benutzerpasswort noetig",
+                            ),
+                    );
+                }
+            }
+            for e in v.by_name("logins.json") {
+                if let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) {
+                    let n = f
+                        .data
+                        .windows(r#""encryptedUsername""#.len())
+                        .filter(|w| w == br#""encryptedUsername""#)
+                        .count();
+                    out.findings.push(
+                        Finding::new("browser", "gespeicherte Zugangsdaten", &e.path)
+                            .with("art", "passwoerter")
+                            .with("browser", "firefox")
+                            .with("anzahl", n.to_string())
+                            .with(
+                                "hinweis",
+                                "verschluesselt (key4.db), Hauptpasswort/Schluessel noetig",
+                            ),
+                    );
+                }
+            }
         }
         out
     }
+}
+
+/// Zaehlt die Zeilen einer Abfrage in einer SQLite-Datei; 0 bei Fehler.
+fn count_rows(data: &[u8], sql: &str) -> i64 {
+    let Ok(mut tmp) = tempfile::NamedTempFile::new() else {
+        return 0;
+    };
+    if std::io::Write::write_all(&mut tmp, data).is_err() {
+        return 0;
+    }
+    let uri = format!("file:{}?immutable=1", tmp.path().display());
+    let Ok(conn) = rusqlite::Connection::open_with_flags(
+        uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    ) else {
+        return 0;
+    };
+    conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0)
 }
 
 #[derive(Clone, Copy)]
