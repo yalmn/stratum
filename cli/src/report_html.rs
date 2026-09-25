@@ -121,6 +121,23 @@ pub fn render(report: &Report) -> String {
         h.push_str("</section>\n");
     }
 
+    // Zeitstrahl.
+    if !report.timeline.is_empty() {
+        h.push_str("<section class=\"card\">\n<h2>Zeitstrahl</h2>\n");
+        h.push_str(&format!("<p>{} Ereignisse</p>\n", report.timeline.len()));
+        h.push_str("<table>\n<tr><th>Zeit (Unix)</th><th>Domäne</th><th>Ereignis</th><th>Name</th><th>Pfad</th></tr>\n");
+        for t in &report.timeline {
+            h.push_str("<tr>");
+            cell(&mut h, &t.unix.to_string());
+            cell(&mut h, &t.domain);
+            cell(&mut h, t.ereignis);
+            cell(&mut h, &t.name);
+            cell(&mut h, &t.source);
+            h.push_str("</tr>\n");
+        }
+        h.push_str("</table>\n</section>\n");
+    }
+
     // Übergreifende Hinweise.
     if !report.warnings.is_empty() {
         h.push_str("<section class=\"card\">\n<h2>Hinweise</h2>\n");

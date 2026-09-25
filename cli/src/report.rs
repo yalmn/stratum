@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use stratum_analysis::{Finding, TimeZone};
+use stratum_analysis::{Finding, TimeZone, TimelineEntry};
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
 
@@ -26,6 +26,8 @@ pub struct Report {
     /// Funde aller Domänen-Analyzer (Keyword, Tor, ...), mit Domäne, Name und
     /// Pfad.
     pub findings: Vec<Finding>,
+    /// Zeitstrahl aller zeitbehafteten Funde (nach Zeit sortiert).
+    pub timeline: Vec<TimelineEntry>,
     /// Angaben zur verwendeten Begriffstabelle, falls die Keyword-Suche lief.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keywords: Option<KeywordInfo>,

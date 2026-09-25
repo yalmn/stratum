@@ -196,6 +196,9 @@ fn main() -> Result<()> {
     warnings.append(&mut analysis.warnings);
     eprintln!("[+] {} Funde ueber alle Domänen", analysis.findings.len());
 
+    let timeline = stratum_analysis::build_timeline(&analysis.findings);
+    eprintln!("[+] Zeitstrahl mit {} Ereignissen", timeline.len());
+
     let generated_unix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -212,6 +215,7 @@ fn main() -> Result<()> {
         partitions,
         windows,
         findings: analysis.findings,
+        timeline,
         keywords,
         warnings,
     };
