@@ -81,9 +81,30 @@ pub struct DirEntry {
     pub name: String,
     /// MFT-Datensatznummer.
     pub mft_record: u64,
+    /// Länge der Datei in Bytes (aus dem Verzeichniseintrag).
+    pub size: u64,
     /// Ob der Eintrag ein Verzeichnis ist.
     pub is_directory: bool,
 }
+
+/// Ein Eintrag aus dem rekursiven Verzeichnis-Durchlauf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WalkEntry {
+    /// Vollständiger Pfad ab der Wurzel, mit `\` getrennt.
+    pub path: String,
+    /// MFT-Datensatznummer, zum direkten Lesen ohne erneute Pfadauflösung.
+    pub mft_record: u64,
+    /// Länge der Datei in Bytes.
+    pub size: u64,
+    /// Ob der Eintrag ein Verzeichnis ist.
+    pub is_directory: bool,
+}
+
+/// Obergrenze für die Zahl der Einträge eines Durchlaufs (Schutz vor
+/// manipulierten Images mit absurd vielen Einträgen).
+pub const MAX_WALK_ENTRIES: usize = 5_000_000;
+/// Obergrenze für die Verzeichnistiefe.
+const MAX_WALK_DEPTH: usize = 128;
 
 impl<'a> NtfsVolume<'a> {
     /// Öffnet ein NTFS-Volume, das bei `part_offset` beginnt und `part_size`
@@ -164,30 +185,7 @@ impl<'a> NtfsVolume<'a> {
         let Some(rec) = resolve(ntfs, fs, path)? else {
             return Ok(None);
         };
-        let file = ntfs.file(fs, rec)?;
-        if file.is_directory() {
-            return Err(NtfsVolumeError::NotAFile {
-                path: path.to_string(),
-            });
-        }
-
-        let meta = file_meta(&file, path, self.part_offset)?;
-
-        let data = match file.data(fs, "") {
-            None => Vec::new(),
-            Some(item) => {
-                let item = item?;
-                let attribute = item.to_attribute()?;
-                let value = attribute.value(fs)?;
-                let len = value.len().min(self.part_size);
-                let cap = usize::try_from(len.min(MAX_FILE_SIZE)).unwrap_or(0);
-                let mut buf = Vec::with_capacity(cap);
-                value.attach(fs).take(MAX_FILE_SIZE).read_to_end(&mut buf)?;
-                buf
-            }
-        };
-
-        Ok(Some(FileData { meta, data }))
+        read_record(ntfs, fs, rec, path, self.part_offset, self.part_size)
     }
 
     /// Prüft, ob ein Pfad existiert.
@@ -207,31 +205,138 @@ impl<'a> NtfsVolume<'a> {
         let Some(rec) = resolve(ntfs, fs, path)? else {
             return Ok(None);
         };
-        let dir = ntfs.file(fs, rec)?;
-        if !dir.is_directory() {
-            return Err(NtfsVolumeError::NotADirectory {
-                path: path.to_string(),
-            });
-        }
+        list_children(ntfs, fs, rec).map(Some)
+    }
 
-        let index = dir.directory_index(fs)?;
-        let mut entries = index.entries();
+    /// Liest eine Datei direkt über ihre MFT-Datensatznummer, ohne den Pfad
+    /// erneut aufzulösen. `path` wird nur für die Herkunftsangabe übernommen.
+    pub fn read_file_by_record(
+        &mut self,
+        record: u64,
+        path: &str,
+    ) -> Result<Option<FileData>, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        read_record(ntfs, fs, record, path, self.part_offset, self.part_size)
+    }
+
+    /// Durchläuft das komplette Verzeichnis ab der Wurzel und liefert alle
+    /// Dateien und Verzeichnisse mit vollständigem Pfad. Es werden nur Metadaten
+    /// gelesen, keine Dateiinhalte; das ist die Grundlage des Pfad-Index.
+    ///
+    /// Der Durchlauf ist gegen manipulierte Images abgesichert: bereits besuchte
+    /// Verzeichnisse werden nicht erneut betreten (Zyklenschutz), die Tiefe und
+    /// die Gesamtzahl der Einträge sind begrenzt.
+    pub fn walk(&mut self) -> Result<Vec<WalkEntry>, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        let root = ntfs.root_directory(fs)?.file_record_number();
+
         let mut out = Vec::new();
-        while let Some(entry) = entries.next(fs) {
-            let entry = entry?;
-            let Some(key) = entry.key() else { continue };
-            let key = key?;
-            if key.namespace() == NtfsFileNamespace::Dos {
+        let mut visited = std::collections::HashSet::new();
+        visited.insert(root);
+        // Iterativer Durchlauf (Stack), damit die Rekursionstiefe nicht den
+        // Programmstack sprengt.
+        let mut stack: Vec<(u64, String, usize)> = vec![(root, String::new(), 0)];
+
+        while let Some((dir_rec, prefix, depth)) = stack.pop() {
+            if depth >= MAX_WALK_DEPTH || out.len() >= MAX_WALK_ENTRIES {
                 continue;
             }
-            out.push(DirEntry {
-                name: key.name().to_string_lossy(),
-                mft_record: entry.file_reference().file_record_number(),
-                is_directory: key.is_directory(),
-            });
+            let children = match list_children(ntfs, fs, dir_rec) {
+                Ok(c) => c,
+                Err(_) => continue, // beschädigtes Verzeichnis überspringen
+            };
+            for c in children {
+                let path = if prefix.is_empty() {
+                    c.name.clone()
+                } else {
+                    format!("{prefix}\\{}", c.name)
+                };
+                if c.is_directory && visited.insert(c.mft_record) {
+                    stack.push((c.mft_record, path.clone(), depth + 1));
+                }
+                out.push(WalkEntry {
+                    path,
+                    mft_record: c.mft_record,
+                    size: c.size,
+                    is_directory: c.is_directory,
+                });
+                if out.len() >= MAX_WALK_ENTRIES {
+                    break;
+                }
+            }
         }
-        Ok(Some(out))
+        Ok(out)
     }
+}
+
+/// Listet die Einträge eines Verzeichnisses über dessen MFT-Nummer.
+fn list_children(
+    ntfs: &Ntfs,
+    fs: &mut Fs<'_>,
+    dir_rec: u64,
+) -> Result<Vec<DirEntry>, NtfsVolumeError> {
+    let dir = ntfs.file(fs, dir_rec)?;
+    if !dir.is_directory() {
+        return Err(NtfsVolumeError::NotADirectory {
+            path: format!("MFT {dir_rec}"),
+        });
+    }
+    let index = dir.directory_index(fs)?;
+    let mut entries = index.entries();
+    let mut out = Vec::new();
+    while let Some(entry) = entries.next(fs) {
+        let entry = entry?;
+        let Some(key) = entry.key() else { continue };
+        let key = key?;
+        if key.namespace() == NtfsFileNamespace::Dos {
+            continue;
+        }
+        out.push(DirEntry {
+            name: key.name().to_string_lossy(),
+            mft_record: entry.file_reference().file_record_number(),
+            size: key.data_size(),
+            is_directory: key.is_directory(),
+        });
+    }
+    Ok(out)
+}
+
+/// Liest den Inhalt eines Datensatzes (ungenannter $DATA-Strom) mitsamt
+/// Herkunft.
+fn read_record(
+    ntfs: &Ntfs,
+    fs: &mut Fs<'_>,
+    rec: u64,
+    path: &str,
+    part_offset: u64,
+    part_size: u64,
+) -> Result<Option<FileData>, NtfsVolumeError> {
+    let file = ntfs.file(fs, rec)?;
+    if file.is_directory() {
+        return Err(NtfsVolumeError::NotAFile {
+            path: path.to_string(),
+        });
+    }
+
+    let meta = file_meta(&file, path, part_offset)?;
+
+    let data = match file.data(fs, "") {
+        None => Vec::new(),
+        Some(item) => {
+            let item = item?;
+            let attribute = item.to_attribute()?;
+            let value = attribute.value(fs)?;
+            let len = value.len().min(part_size);
+            let cap = usize::try_from(len.min(MAX_FILE_SIZE)).unwrap_or(0);
+            let mut buf = Vec::with_capacity(cap);
+            value.attach(fs).take(MAX_FILE_SIZE).read_to_end(&mut buf)?;
+            buf
+        }
+    };
+
+    Ok(Some(FileData { meta, data }))
 }
 
 /// Löst einen Pfad in eine MFT-Datensatznummer auf.

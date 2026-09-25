@@ -15,12 +15,14 @@
 
 mod context;
 mod finding;
+mod fsindex;
 mod keyword;
 mod runner;
 mod windows;
 
 pub use context::{AnalysisContext, NtfsTarget};
 pub use finding::Finding;
+pub use fsindex::{FileEntry, FsIndex};
 pub use keyword::KeywordAnalyzer;
 pub use runner::{run_all, AnalysisResult};
 pub use windows::{Hives, TimeZone, WindowsInstall};

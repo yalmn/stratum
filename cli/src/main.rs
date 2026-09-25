@@ -117,8 +117,12 @@ fn main() -> Result<()> {
 
     // Gemeinsamer Kontext: extrahiert einmalig je NTFS-Bereich die Hives und
     // leitet Zeitzone, Rechnername und Konten ab.
-    eprintln!("[*] Lese Registry-Hives und Windows-Grunddaten ...");
+    eprintln!("[*] Lese Registry-Hives und baue Pfad-Index ...");
     let ctx = AnalysisContext::build(&img, targets.clone());
+    warnings.extend(ctx.warnings.iter().cloned());
+    if let Some(v) = ctx.volumes.first() {
+        eprintln!("[+] Pfad-Index: {} Dateien", v.files.len());
+    }
 
     let mut windows = Vec::new();
     for inst in &ctx.installs {

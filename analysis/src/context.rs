@@ -2,6 +2,7 @@
 
 use stratum_core::ImageReader;
 
+use crate::fsindex::FsIndex;
 use crate::windows::{extract_installs, WindowsInstall};
 
 /// Ein NTFS-Bereich, den die Analyzer untersuchen sollen.
@@ -27,6 +28,11 @@ pub struct AnalysisContext<'a> {
     /// Gefundene Windows-Installationen mit Grunddaten (Hives, Zeitzone,
     /// Rechnername, Konten). Wird von [`AnalysisContext::build`] gefüllt.
     pub installs: Vec<WindowsInstall>,
+    /// Pfad-Index je NTFS-Bereich, den die Analyzer abfragen. Wird von
+    /// [`AnalysisContext::build`] gefüllt.
+    pub volumes: Vec<FsIndex>,
+    /// Auffälligkeiten aus dem Kontext-Aufbau (z. B. nicht indizierbare Bereiche).
+    pub warnings: Vec<String>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -37,18 +43,35 @@ impl<'a> AnalysisContext<'a> {
             img,
             ntfs_targets,
             installs: Vec::new(),
+            volumes: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
-    /// Baut den vollständigen Kontext auf: extrahiert je NTFS-Bereich die
-    /// Registry-Hives und leitet Zeitzone, Rechnername und Konten ab. Diese
+    /// Baut den vollständigen Kontext auf: legt je NTFS-Bereich den Pfad-Index an
+    /// und extrahiert die Registry-Hives (Zeitzone, Rechnername, Konten). Diese
     /// teure Arbeit wird einmal geleistet und von allen Analyzern geteilt.
     pub fn build(img: &'a ImageReader, ntfs_targets: Vec<NtfsTarget>) -> Self {
         let installs = extract_installs(img, &ntfs_targets);
+
+        let mut volumes = Vec::new();
+        let mut warnings = Vec::new();
+        for &target in &ntfs_targets {
+            match FsIndex::build(img, target) {
+                Ok(idx) => volumes.push(idx),
+                Err(e) => warnings.push(format!(
+                    "Pfad-Index für Offset {} nicht erstellbar: {e}",
+                    target.offset
+                )),
+            }
+        }
+
         Self {
             img,
             ntfs_targets,
             installs,
+            volumes,
+            warnings,
         }
     }
 }

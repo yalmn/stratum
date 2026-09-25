@@ -99,4 +99,17 @@ fn liest_datei_und_verzeichnis() {
     let names: Vec<&str> = root.iter().map(|e| e.name.as_str()).collect();
     assert!(names.contains(&"SYSTEM"), "gefunden: {names:?}");
     assert!(names.contains(&"notiz.txt"), "gefunden: {names:?}");
+
+    // Vollständiger Durchlauf und Lesen über die MFT-Nummer.
+    let walked = vol.walk().unwrap();
+    let notiz = walked
+        .iter()
+        .find(|e| e.path.eq_ignore_ascii_case("notiz.txt"))
+        .expect("notiz.txt im Walk");
+    assert!(!notiz.is_directory);
+    let by_rec = vol
+        .read_file_by_record(notiz.mft_record, &notiz.path)
+        .unwrap()
+        .unwrap();
+    assert_eq!(by_rec.data, b"hallo welt");
 }
