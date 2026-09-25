@@ -8,7 +8,6 @@
 mod bdp;
 mod report;
 mod report_html;
-mod windows;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -24,7 +23,7 @@ use stratum_core::{
 };
 use stratum_search::TermTable;
 
-use report::{ImageInfo, Report, SearchReport, Tool};
+use report::{ImageInfo, Report, SearchReport, Tool, WindowsReport};
 
 /// Automatisierte, gerichtsverwertbare Inhaltsanalyse eines Roh-Images (read-only).
 #[derive(Parser, Debug)]
@@ -116,32 +115,44 @@ fn main() -> Result<()> {
         warnings.push("keine NTFS-Partition gefunden".into());
     }
 
+    // Gemeinsamer Kontext: extrahiert einmalig je NTFS-Bereich die Hives und
+    // leitet Zeitzone, Rechnername und Konten ab.
+    eprintln!("[*] Lese Registry-Hives und Windows-Grunddaten ...");
+    let ctx = AnalysisContext::build(&img, targets.clone());
+
     let mut windows = Vec::new();
-    for t in &targets {
-        let (index, offset, size) = (t.index, t.offset, t.size);
-        eprintln!("[*] Untersuche NTFS-Partition bei Offset {offset} ...");
-        match windows::analyze(&img, index, offset, size) {
-            Ok(Some(w)) => {
-                eprintln!(
-                    "[+] Windows gefunden: {} Konto(en){}",
-                    w.accounts.len(),
-                    w.computer_name
-                        .as_deref()
-                        .map(|c| format!(", Rechner {c}"))
-                        .unwrap_or_default()
-                );
-                windows.push(w);
+    for inst in &ctx.installs {
+        // Reine Datenpartitionen (kein SYSTEM-Hive) liefern keinen Eintrag; hier
+        // erscheinen nur echte Windows-Installationen und Fehlerfaelle.
+        if inst.hives.system.is_none() && inst.accounts.is_empty() {
+            for w in &inst.warnings {
+                warnings.push(format!("Offset {}: {w}", inst.target.offset));
             }
-            Ok(None) => eprintln!("    kein Windows auf dieser Partition"),
-            Err(e) => warnings.push(format!("Partition {index}: {e:#}")),
+            continue;
         }
+        eprintln!(
+            "[+] Windows gefunden: {} Konto(en){}",
+            inst.accounts.len(),
+            inst.computer_name
+                .as_deref()
+                .map(|c| format!(", Rechner {c}"))
+                .unwrap_or_default()
+        );
+        windows.push(WindowsReport {
+            partition_index: inst.target.index,
+            partition_offset: inst.target.offset,
+            computer_name: inst.computer_name.clone(),
+            timezone: inst.timezone.clone(),
+            accounts: inst.accounts.clone(),
+            warnings: inst.warnings.clone(),
+        });
     }
 
     let use_default = !cli.no_default_keywords;
     let search = if !use_default && cli.keywords.is_empty() {
         None
     } else {
-        Some(run_search(&img, &targets, use_default, &cli.keywords)?)
+        Some(run_search(&ctx, use_default, &cli.keywords)?)
     };
 
     let generated_unix = SystemTime::now()
@@ -187,8 +198,7 @@ fn bytes_bar(len: u64, label: &str) -> ProgressBar {
 }
 
 fn run_search(
-    img: &ImageReader,
-    targets: &[NtfsTarget],
+    ctx: &AnalysisContext<'_>,
     use_default: bool,
     paths: &[PathBuf],
 ) -> Result<SearchReport> {
@@ -231,14 +241,13 @@ fn run_search(
 
     // Der Keyword-Analyzer durchsucht das Image blockweise parallel und meldet
     // seinen Fortschritt an einen Byte-Balken.
-    let pb = bytes_bar(img.len(), "Suche");
+    let pb = bytes_bar(ctx.img.len(), "Suche");
     let bar = pb.clone();
     let analyzer = KeywordAnalyzer::from_table(&table)
         .with_progress(Box::new(move |done| bar.set_position(done)));
     let analyzers: Vec<Box<dyn Analyzer>> = vec![Box::new(analyzer)];
-    let ctx = AnalysisContext::new(img, targets.to_vec());
 
-    let result = run_all(&ctx, &analyzers);
+    let result = run_all(ctx, &analyzers);
     pb.finish_and_clear();
     eprintln!("[+] Keyword-Suche: {} Treffer", result.findings.len());
     Ok(SearchReport {

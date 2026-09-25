@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use stratum_analysis::Finding;
+use stratum_analysis::{Finding, TimeZone};
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
 
@@ -77,16 +77,6 @@ pub struct WindowsReport {
     pub accounts: Vec<Account>,
     /// Hinweise zu dieser Installation.
     pub warnings: Vec<String>,
-}
-
-/// Zeitzone laut Registry.
-#[derive(Debug, Serialize)]
-pub struct TimeZone {
-    /// Name des Zeitzonen-Schlüssels, z. B. "W. Europe Standard Time".
-    pub key_name: String,
-    /// Aktiver Zeitversatz zu UTC in Minuten (aus ActiveTimeBias).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_bias_minutes: Option<i32>,
 }
 
 /// Ergebnis der Keyword-Suche.

@@ -17,11 +17,13 @@ mod context;
 mod finding;
 mod keyword;
 mod runner;
+mod windows;
 
 pub use context::{AnalysisContext, NtfsTarget};
 pub use finding::Finding;
 pub use keyword::KeywordAnalyzer;
 pub use runner::{run_all, AnalysisResult};
+pub use windows::{Hives, TimeZone, WindowsInstall};
 
 /// Ergebnis eines einzelnen Analyzers.
 #[derive(Debug, Default)]

@@ -2,6 +2,8 @@
 
 use stratum_core::ImageReader;
 
+use crate::windows::{extract_installs, WindowsInstall};
+
 /// Ein NTFS-Bereich, den die Analyzer untersuchen sollen.
 #[derive(Debug, Clone, Copy)]
 pub struct NtfsTarget {
@@ -22,11 +24,31 @@ pub struct AnalysisContext<'a> {
     pub img: &'a ImageReader,
     /// Als NTFS erkannte Bereiche.
     pub ntfs_targets: Vec<NtfsTarget>,
+    /// Gefundene Windows-Installationen mit Grunddaten (Hives, Zeitzone,
+    /// Rechnername, Konten). Wird von [`AnalysisContext::build`] gefüllt.
+    pub installs: Vec<WindowsInstall>,
 }
 
 impl<'a> AnalysisContext<'a> {
-    /// Baut einen Kontext aus Image und NTFS-Bereichen.
+    /// Kontext ohne Windows-Grunddaten (z. B. für die reine Keyword-Suche und
+    /// für Tests).
     pub fn new(img: &'a ImageReader, ntfs_targets: Vec<NtfsTarget>) -> Self {
-        Self { img, ntfs_targets }
+        Self {
+            img,
+            ntfs_targets,
+            installs: Vec::new(),
+        }
+    }
+
+    /// Baut den vollständigen Kontext auf: extrahiert je NTFS-Bereich die
+    /// Registry-Hives und leitet Zeitzone, Rechnername und Konten ab. Diese
+    /// teure Arbeit wird einmal geleistet und von allen Analyzern geteilt.
+    pub fn build(img: &'a ImageReader, ntfs_targets: Vec<NtfsTarget>) -> Self {
+        let installs = extract_installs(img, &ntfs_targets);
+        Self {
+            img,
+            ntfs_targets,
+            installs,
+        }
     }
 }
