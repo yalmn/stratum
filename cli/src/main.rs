@@ -58,6 +58,11 @@ struct Cli {
     #[arg(long)]
     no_hash: bool,
 
+    /// Zusätzlich das gesamte Image roh nach Begriffen durchsuchen (findet auch
+    /// unallozierte und gelöschte Bereiche, dauert aber deutlich länger).
+    #[arg(long)]
+    raw_sweep: bool,
+
     /// Die mitgelieferte Begriffsliste "Strafverfolgung" nicht verwenden
     /// (dann wird nur gesucht, wenn eine eigene Tabelle mit -k angegeben ist).
     #[arg(long)]
@@ -179,12 +184,13 @@ fn main() -> Result<()> {
         let (analyzer, info) = build_keyword_analyzer(use_default, &cli.keywords)?;
         let pb = bytes_bar(img.len(), "Suche");
         let bar = pb.clone();
-        analyzers.push(Box::new(analyzer.with_progress(Box::new(
-            move |done, total| {
+        let analyzer = analyzer
+            .with_raw_sweep(cli.raw_sweep)
+            .with_progress(Box::new(move |done, total| {
                 bar.set_length(total);
                 bar.set_position(done);
-            },
-        ))));
+            }));
+        analyzers.push(Box::new(analyzer));
         keyword_bar = Some(pb);
         Some(info)
     };

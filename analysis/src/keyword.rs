@@ -37,6 +37,7 @@ const CHUNK: usize = 128;
 pub struct KeywordAnalyzer {
     engine: SearchEngine,
     progress: Option<Progress>,
+    raw_sweep: bool,
 }
 
 impl KeywordAnalyzer {
@@ -45,7 +46,15 @@ impl KeywordAnalyzer {
         Self {
             engine,
             progress: None,
+            raw_sweep: false,
         }
+    }
+
+    /// Schaltet zusätzlich die Rohsuche über das gesamte Image ein (findet auch
+    /// unallozierte und gelöschte Bereiche, dauert aber deutlich länger).
+    pub fn with_raw_sweep(mut self, on: bool) -> Self {
+        self.raw_sweep = on;
+        self
     }
 
     /// Baut den Analyzer aus einer Begriffstabelle.
@@ -76,7 +85,7 @@ impl KeywordAnalyzer {
         let done = AtomicU64::new(0);
 
         let mut findings: Vec<Finding> = Vec::new();
-        let mut warnings: Vec<String> = Vec::new();
+        let warnings: Vec<String> = Vec::new();
 
         for v in &ctx.volumes {
             let entries: Vec<_> = v.by_extension(TEXT_EXTS).collect();
@@ -113,7 +122,6 @@ impl KeywordAnalyzer {
             }
         }
 
-        cap_per_domain(&mut findings, &mut warnings);
         self.report(total_bytes, total_bytes);
         Outcome { findings, warnings }
     }
@@ -142,11 +150,23 @@ impl Analyzer for KeywordAnalyzer {
     }
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
-        if ctx.volumes.is_empty() {
+        // Ohne Pfad-Index bleibt nur die Rohsuche. Mit Index werden gezielt die
+        // Textdateien durchsucht; --raw-sweep haengt zusaetzlich eine Rohsuche
+        // ueber das ganze Image an (unallozierte/geloeschte Bereiche).
+        let mut outcome = if ctx.volumes.is_empty() {
             self.run_raw(ctx)
         } else {
-            self.run_files(ctx)
-        }
+            let mut oc = self.run_files(ctx);
+            if self.raw_sweep {
+                let mut raw = self.run_raw(ctx);
+                oc.findings.append(&mut raw.findings);
+                oc.warnings.append(&mut raw.warnings);
+            }
+            oc
+        };
+        // Kategorie-Obergrenze einmal ueber alle (Datei + roh) Funde.
+        cap_per_domain(&mut outcome.findings, &mut outcome.warnings);
+        outcome
     }
 }
 
