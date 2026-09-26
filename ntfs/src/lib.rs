@@ -21,8 +21,8 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use ntfs::attribute_value::NtfsAttributeValue;
 use ntfs::indexes::NtfsFileNameIndex;
-use ntfs::structured_values::{NtfsFileNamespace, NtfsStandardInformation};
-use ntfs::{Ntfs, NtfsFile};
+use ntfs::structured_values::{NtfsAttributeList, NtfsFileNamespace, NtfsStandardInformation};
+use ntfs::{Ntfs, NtfsAttributeType, NtfsFile};
 
 use stratum_core::ImageReader;
 
@@ -326,7 +326,7 @@ fn read_record<R: Read + Seek>(
     }
 
     let meta = file_meta(&file, path, part_offset)?;
-    let data = read_data(&file, fs, part_size)?;
+    let data = read_data(ntfs, &file, fs, part_size)?;
     Ok(Some(FileData { meta, data }))
 }
 
@@ -337,7 +337,7 @@ enum RunPlan {
     Runs(Vec<(Option<u64>, u64)>),
     /// Residente Daten: (physischer Offset, Länge).
     Resident(u64, u64),
-    /// Sonderfall (Attributliste): über den eingebauten Leser holen.
+    /// Rückfall auf den eingebauten Leser (nur seltene Restfälle).
     Fallback,
 }
 
@@ -345,7 +345,18 @@ enum RunPlan {
 /// zusammengesetzt werden. Spärliche Läufe werden mit Nullen gefüllt, damit die
 /// Byte-Ausrichtung erhalten bleibt (der eingebaute Leser des ntfs-Crates
 /// lieferte hier fragmentierte/spärliche Dateien falsch zusammengesetzt).
+///
+/// Ist der Strom über eine Attributliste auf mehrere MFT-Datensätze verteilt
+/// (`AttributeListNonResident`), werden die Läufe aller verbundenen
+/// `$DATA`-Fragmente selbst eingesammelt (`collect_attribute_list_runs`) statt
+/// dem eingebauten Leser zu vertrauen, der beim ersten nicht passenden
+/// Listeneintrag abbricht und die Datei so verschoben zusammensetzt.
+///
+/// Mit gesetzter Umgebungsvariable `STRATUM_DEBUG` wird die erkannte Ablage
+/// (resident, nicht-resident, Attributliste) samt Lauf-Anzahl auf `stderr`
+/// gemeldet; hilfreich, um die Herkunft eines Fundes nachzuvollziehen.
 fn read_data<R: Read + Seek>(
+    ntfs: &Ntfs,
     file: &NtfsFile<'_>,
     fs: &mut R,
     part_size: u64,
@@ -360,7 +371,10 @@ fn read_data<R: Read + Seek>(
         return Ok(Vec::new());
     }
 
-    // Läufe ohne fs-Zugriff einsammeln, damit fs danach frei zum Lesen ist.
+    let debug = std::env::var_os("STRATUM_DEBUG").is_some();
+
+    // Läufe ohne dauerhaften fs-Zugriff einsammeln, damit fs danach frei zum
+    // Lesen ist.
     let plan = {
         let value = attribute.value(fs)?;
         match value {
@@ -373,13 +387,34 @@ fn read_data<R: Read + Seek>(
                         run.allocated_size(),
                     ));
                 }
+                if debug {
+                    eprintln!(
+                        "[stratum] $DATA nicht-resident: {} Lauf/Laeufe, {file_size} Bytes",
+                        runs.len()
+                    );
+                }
                 RunPlan::Runs(runs)
             }
             NtfsAttributeValue::Resident(ref res) => match res.data_position().value() {
-                Some(p) => RunPlan::Resident(p.get(), file_size),
+                Some(p) => {
+                    if debug {
+                        eprintln!("[stratum] $DATA resident: {file_size} Bytes");
+                    }
+                    RunPlan::Resident(p.get(), file_size)
+                }
                 None => RunPlan::Fallback,
             },
-            NtfsAttributeValue::AttributeListNonResident(_) => RunPlan::Fallback,
+            NtfsAttributeValue::AttributeListNonResident(_) => {
+                // `value` haelt hier keinen fs-Borrow; der Sammler darf fs nutzen.
+                let runs = collect_attribute_list_runs(ntfs, fs, file)?;
+                if debug {
+                    eprintln!(
+                        "[stratum] $DATA ueber Attributliste: {} Lauf/Laeufe, {file_size} Bytes",
+                        runs.len()
+                    );
+                }
+                RunPlan::Runs(runs)
+            }
         }
     };
 
@@ -427,6 +462,66 @@ fn read_data<R: Read + Seek>(
         }
     }
     Ok(buf)
+}
+
+/// Sammelt die Datenläufe eines über eine Attributliste verteilten
+/// (`AttributeListNonResident`) ungenannten `$DATA`-Stroms ein.
+///
+/// Statt dem eingebauten Leser zu vertrauen, wird die `$ATTRIBUTE_LIST` selbst
+/// durchlaufen: für jeden Eintrag vom Typ `$DATA` ohne Namen wird der zugehörige
+/// MFT-Datensatz geladen und dessen nicht-residente Läufe (physischer Offset,
+/// belegte Länge) angehängt. Die Einträge liegen nach aufsteigender VCN vor, die
+/// Läufe ergeben also aneinandergereiht den Datenstrom in Byte-Reihenfolge.
+/// Spärliche Läufe (Offset `None`) bleiben erhalten und werden vom Aufrufer mit
+/// Nullen gefüllt.
+fn collect_attribute_list_runs<R: Read + Seek>(
+    ntfs: &Ntfs,
+    fs: &mut R,
+    file: &NtfsFile<'_>,
+) -> Result<Vec<(Option<u64>, u64)>, NtfsVolumeError> {
+    // Die $ATTRIBUTE_LIST unter den rohen Attributen des Basis-Datensatzes
+    // suchen (sie wird nicht über die Liste selbst referenziert).
+    let mut list: Option<NtfsAttributeList<'_, '_>> = None;
+    for attr in file.attributes_raw() {
+        let attr = attr?;
+        if matches!(attr.ty(), Ok(NtfsAttributeType::AttributeList)) {
+            list = Some(attr.structured_value::<_, NtfsAttributeList>(fs)?);
+            break;
+        }
+    }
+    let Some(list) = list else {
+        return Ok(Vec::new());
+    };
+
+    let mut runs: Vec<(Option<u64>, u64)> = Vec::new();
+    let mut entries = list.entries();
+    while let Some(entry) = entries.next(fs) {
+        let entry = entry?;
+        if !matches!(entry.ty(), Ok(NtfsAttributeType::Data)) {
+            continue;
+        }
+        // Nur der ungenannte Datenstrom, keine alternativen Datenströme (ADS).
+        if entry.name_length() != 0 {
+            continue;
+        }
+        let entry_file = entry.to_file(ntfs, fs)?;
+        let entry_attr = entry.to_attribute(&entry_file)?;
+        if entry_attr.is_resident() {
+            // Verbundene Fragmente sind stets nicht-resident; resident wäre der
+            // ungeteilte Fall, den read_data nicht über diesen Pfad erreicht.
+            continue;
+        }
+        if let NtfsAttributeValue::NonResident(nr) = entry_attr.value(fs)? {
+            for run in nr.data_runs() {
+                let run = run?;
+                runs.push((
+                    run.data_position().value().map(|p| p.get()),
+                    run.allocated_size(),
+                ));
+            }
+        }
+    }
+    Ok(runs)
 }
 
 /// Löst einen Pfad in eine MFT-Datensatznummer auf.
