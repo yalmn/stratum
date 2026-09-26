@@ -17,8 +17,9 @@
 
 mod error;
 
-use std::io::{Cursor, Read, Seek};
+use std::io::{Cursor, Read, Seek, SeekFrom};
 
+use ntfs::attribute_value::NtfsAttributeValue;
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsFileNamespace, NtfsStandardInformation};
 use ntfs::{Ntfs, NtfsFile};
@@ -325,22 +326,107 @@ fn read_record<R: Read + Seek>(
     }
 
     let meta = file_meta(&file, path, part_offset)?;
+    let data = read_data(&file, fs, part_size)?;
+    Ok(Some(FileData { meta, data }))
+}
 
-    let data = match file.data(fs, "") {
-        None => Vec::new(),
-        Some(item) => {
-            let item = item?;
-            let attribute = item.to_attribute()?;
-            let value = attribute.value(fs)?;
-            let len = value.len().min(part_size);
-            let cap = usize::try_from(len.min(MAX_FILE_SIZE)).unwrap_or(0);
-            let mut buf = Vec::with_capacity(cap);
-            value.attach(fs).take(MAX_FILE_SIZE).read_to_end(&mut buf)?;
-            buf
+/// Beschreibung eines Datenlaufs (Nutzdaten oder spärlich).
+enum RunPlan {
+    /// Nicht-residente Läufe: (physischer Offset im Volume, belegte Länge).
+    /// `None` als Offset bedeutet einen spärlichen Lauf (mit Nullen zu füllen).
+    Runs(Vec<(Option<u64>, u64)>),
+    /// Residente Daten: (physischer Offset, Länge).
+    Resident(u64, u64),
+    /// Sonderfall (Attributliste): über den eingebauten Leser holen.
+    Fallback,
+}
+
+/// Liest den ungenannten `$DATA`-Strom, indem die Datenläufe selbst
+/// zusammengesetzt werden. Spärliche Läufe werden mit Nullen gefüllt, damit die
+/// Byte-Ausrichtung erhalten bleibt (der eingebaute Leser des ntfs-Crates
+/// lieferte hier fragmentierte/spärliche Dateien falsch zusammengesetzt).
+fn read_data<R: Read + Seek>(
+    file: &NtfsFile<'_>,
+    fs: &mut R,
+    part_size: u64,
+) -> Result<Vec<u8>, NtfsVolumeError> {
+    let Some(item) = file.data(fs, "") else {
+        return Ok(Vec::new());
+    };
+    let item = item?;
+    let attribute = item.to_attribute()?;
+    let file_size = attribute.value_length().min(part_size).min(MAX_FILE_SIZE);
+    if file_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    // Läufe ohne fs-Zugriff einsammeln, damit fs danach frei zum Lesen ist.
+    let plan = {
+        let value = attribute.value(fs)?;
+        match value {
+            NtfsAttributeValue::NonResident(nr) => {
+                let mut runs = Vec::new();
+                for run in nr.data_runs() {
+                    let run = run?;
+                    runs.push((
+                        run.data_position().value().map(|p| p.get()),
+                        run.allocated_size(),
+                    ));
+                }
+                RunPlan::Runs(runs)
+            }
+            NtfsAttributeValue::Resident(ref res) => match res.data_position().value() {
+                Some(p) => RunPlan::Resident(p.get(), file_size),
+                None => RunPlan::Fallback,
+            },
+            NtfsAttributeValue::AttributeListNonResident(_) => RunPlan::Fallback,
         }
     };
 
-    Ok(Some(FileData { meta, data }))
+    let cap = usize::try_from(file_size).unwrap_or(0);
+    let mut buf = Vec::with_capacity(cap);
+    match plan {
+        RunPlan::Runs(runs) => {
+            let mut done: u64 = 0;
+            for (pos, alloc) in runs {
+                if done >= file_size {
+                    break;
+                }
+                let take = alloc.min(file_size - done);
+                let take_usize = usize::try_from(take).unwrap_or(0);
+                match pos {
+                    Some(p) => {
+                        // Bei Lesefehlern (z. B. gekürztes Image) den Lauf
+                        // mit Nullen füllen, damit die Ausrichtung erhalten bleibt.
+                        if fs.seek(SeekFrom::Start(p)).is_ok() {
+                            let start = buf.len();
+                            buf.resize(start + take_usize, 0);
+                            if fs.read_exact(&mut buf[start..]).is_err() {
+                                // teilweise gelesen ist ok; Rest bleibt 0
+                            }
+                        } else {
+                            buf.resize(buf.len() + take_usize, 0);
+                        }
+                    }
+                    None => buf.resize(buf.len() + take_usize, 0),
+                }
+                done += alloc;
+            }
+            buf.truncate(cap);
+        }
+        RunPlan::Resident(p, len) => {
+            let len = usize::try_from(len).unwrap_or(0);
+            buf.resize(len, 0);
+            if fs.seek(SeekFrom::Start(p)).is_ok() {
+                let _ = fs.read_exact(&mut buf);
+            }
+        }
+        RunPlan::Fallback => {
+            let value = attribute.value(fs)?;
+            value.attach(fs).take(MAX_FILE_SIZE).read_to_end(&mut buf)?;
+        }
+    }
+    Ok(buf)
 }
 
 /// Löst einen Pfad in eine MFT-Datensatznummer auf.

@@ -65,7 +65,14 @@ fn build_ntfs(dir: &Path, files: &[(&str, &[u8])]) -> Option<std::path::PathBuf>
 fn liest_datei_und_verzeichnis() {
     let dir = tempfile::tempdir().unwrap();
     let hive = b"regf-platzhalter-inhalt fuer den test";
-    let files: &[(&str, &[u8])] = &[("SYSTEM", hive.as_slice()), ("notiz.txt", b"hallo welt")];
+    // Grosse Datei (2 MiB, nicht-resident, mehrere Datenlaeufe) mit klarem
+    // Muster, um das laufbasierte Lesen zu pruefen.
+    let gross: Vec<u8> = (0..2 * 1024 * 1024u32).map(|i| (i % 251) as u8).collect();
+    let files: &[(&str, &[u8])] = &[
+        ("SYSTEM", hive.as_slice()),
+        ("notiz.txt", b"hallo welt"),
+        ("gross.bin", gross.as_slice()),
+    ];
 
     let Some(img_path) = build_ntfs(dir.path(), files) else {
         eprintln!("mkntfs/ntfscp nicht vorhanden, Test übersprungen");
@@ -88,6 +95,15 @@ fn liest_datei_und_verzeichnis() {
 
     let n = vol.read_file("notiz.txt").unwrap().unwrap();
     assert_eq!(n.data, b"hallo welt");
+
+    // Grosse, nicht-residente Datei byte-genau zuruecklesen (prueft die
+    // Zusammensetzung der Datenlaeufe).
+    let g = vol
+        .read_file("gross.bin")
+        .unwrap()
+        .expect("gross.bin fehlt");
+    assert_eq!(g.data.len(), gross.len(), "Laenge muss exakt stimmen");
+    assert_eq!(g.data, gross, "Inhalt muss byte-genau stimmen");
 
     // Nicht vorhanden.
     assert!(vol.read_file("gibtsnicht").unwrap().is_none());
