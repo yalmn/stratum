@@ -14,6 +14,7 @@ stratum-registry = { path = "../registry" }
 stratum-search = { path = "../search" }
 stratum-ntfs = { path = "../ntfs" }
 stratum-creds = { path = "../creds" }
+stratum-analysis = { path = "../analysis" }
 
 [[bin]]
 name = "partition"
@@ -46,6 +47,13 @@ bench = false
 [[bin]]
 name = "sam"
 path = "fuzz_targets/sam.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "powershell"
+path = "fuzz_targets/powershell.rs"
 test = false
 doc = false
 bench = false

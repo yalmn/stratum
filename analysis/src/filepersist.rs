@@ -61,18 +61,32 @@ fn scheduled_tasks<R: std::io::Read + std::io::Seek>(
         let arguments = tag(&text, "Arguments");
         let author = tag(&text, "Author");
         let user = tag(&text, "UserId");
+
+        // Bewertung und Erfassung bleiben getrennt: auch gewöhnliche Aufgaben
+        // und Aktionen ohne Exec-Befehl sind für die spätere Sichtung relevant.
+        let auffaellig = command
+            .as_deref()
+            .is_none_or(|cmd| crate::reg::ungewoehnlicher_pfad(cmd) || crate::reg::ist_lolbin(cmd));
+
         // Der Aufgabenname ist der Pfad unter Tasks.
         let name = e.path.strip_prefix(prefix).unwrap_or(&e.path);
         let name = name.trim_start_matches('\\');
 
         let befehl = match (&command, &arguments) {
-            (Some(c), Some(a)) => format!("{c} {a}"),
-            (Some(c), None) => c.clone(),
+            (Some(cmd), Some(a)) => format!("{cmd} {a}"),
+            (Some(cmd), None) => cmd.clone(),
             _ => String::new(),
         };
         let mut fd = Finding::new("persistence", name, &e.path)
             .with("ort", "Aufgabe")
-            .with("befehl", befehl);
+            .with("befehl", befehl)
+            .with("auffaellig", if auffaellig { "ja" } else { "nein" })
+            .with(
+                "bewertung",
+                "Pfadheuristik, kein Nachweis einer schädlichen Aktion",
+            )
+            .with("mft_record", e.mft_record.to_string())
+            .with("volume_offset", v.target.offset.to_string());
         if let Some(a) = author {
             fd = fd.with("autor", a);
         }
