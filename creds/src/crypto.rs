@@ -152,6 +152,46 @@ pub fn aes128_cbc_encrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8>
         .collect()
 }
 
+/// AES-256 im CBC-Modus, entschlüsselt ganze Blöcke ohne Padding.
+pub fn aes256_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    let mut dec =
+        cbc::Decryptor::<Aes256>::new(&Array::<u8, U32>::from(*key), &Array::<u8, U16>::from(*iv));
+    let mut blocks: Vec<Array<u8, U16>> = data
+        .chunks_exact(16)
+        .map(|c| {
+            let mut a = Array::<u8, U16>::default();
+            a.copy_from_slice(c);
+            a
+        })
+        .collect();
+    dec.decrypt_blocks(&mut blocks);
+    blocks
+        .iter()
+        .flat_map(|b| b.as_slice().iter().copied())
+        .collect()
+}
+
+/// AES-256 im CBC-Modus, verschlüsselt ganze Blöcke ohne Padding. Nur Tests.
+#[cfg(test)]
+pub fn aes256_cbc_encrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
+    use cbc::cipher::BlockModeEncrypt;
+    let mut enc =
+        cbc::Encryptor::<Aes256>::new(&Array::<u8, U32>::from(*key), &Array::<u8, U16>::from(*iv));
+    let mut blocks: Vec<Array<u8, U16>> = data
+        .chunks_exact(16)
+        .map(|c| {
+            let mut a = Array::<u8, U16>::default();
+            a.copy_from_slice(c);
+            a
+        })
+        .collect();
+    enc.encrypt_blocks(&mut blocks);
+    blocks
+        .iter()
+        .flat_map(|b| b.as_slice().iter().copied())
+        .collect()
+}
+
 /// Wandelt 7 Bytes in einen 8-Byte-DES-Schlüssel (7-Bit-Werte in die oberen
 /// Bits, Paritätsbit bleibt 0; DES ignoriert die Parität ohnehin).
 fn str_to_key(s: &[u8; 7]) -> [u8; 8] {

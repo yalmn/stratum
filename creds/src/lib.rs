@@ -19,6 +19,7 @@
 #![warn(missing_docs)]
 
 mod crypto;
+pub mod dpapi;
 mod lsa;
 mod sam;
 

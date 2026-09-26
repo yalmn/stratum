@@ -5,14 +5,17 @@
 //! `places.sqlite`. Die Datei wird über ihre MFT-Nummer gelesen, als temporäre
 //! Kopie geöffnet und abgefragt.
 //!
-//! Gespeicherte Passwörter (Chromium `Login Data`, Firefox `logins.json`) sind
-//! mit DPAPI verschlüsselt und bleiben einer späteren Ausbaustufe vorbehalten.
+//! Gespeicherte Passwörter (Chromium `Login Data`) sind mit DPAPI und AES-GCM
+//! verschlüsselt. Wird ein Benutzergeheimnis übergeben (siehe [`DpapiInput`]),
+//! entschlüsselt das Modul sie über [`stratum_creds::dpapi`]; ohne Geheimnis
+//! bleibt es bei Anzahl und Hinweis. Firefox (`logins.json` über key4.db) folgt
+//! einem anderen Verfahren und bleibt einer späteren Stufe vorbehalten.
 
 use rusqlite::{Connection, OpenFlags};
 
 use stratum_ntfs::NtfsVolume;
 
-use crate::{AnalysisContext, Analyzer, Finding, Outcome};
+use crate::{AnalysisContext, Analyzer, DpapiInput, Finding, FsIndex, Outcome};
 
 /// Obergrenze für Verlaufseinträge je Datenbank.
 const MAX_ROWS: usize = 20_000;
@@ -75,26 +78,67 @@ impl Analyzer for BrowserAnalyzer {
                     &mut out,
                 );
             }
-            // Gespeicherte Zugangsdaten (verschluesselt): nur Vorhandensein und
-            // Anzahl. Chromium "Login Data" (SQLite, DPAPI/AES-GCM), Firefox
-            // "logins.json" (DPAPI ueber key4.db). Entschluesselung braucht das
-            // Benutzerpasswort und ist einer spaeteren Stufe vorbehalten.
+            // Gespeicherte Zugangsdaten. Chromium "Login Data" (SQLite,
+            // DPAPI/AES-GCM): ohne Passwort nur Bestandsaufnahme, mit übergebenem
+            // DPAPI-Geheimnis wird entschlüsselt. Firefox "logins.json" (DPAPI
+            // über key4.db) bleibt einer späteren Stufe vorbehalten.
+            let keys = ctx
+                .dpapi
+                .as_ref()
+                .map(|input| chromium_keys(&mut vol, v, input, &mut out))
+                .unwrap_or_default();
             for e in v.by_name("Login Data") {
                 if !is_chromium_path(&e.path) {
                     continue;
                 }
-                if let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) {
-                    let n = count_rows(&f.data, "SELECT COUNT(*) FROM logins");
-                    out.findings.push(
-                        Finding::new("browser", "gespeicherte Zugangsdaten", &e.path)
-                            .with("art", "passwoerter")
-                            .with("browser", browser_of(&e.path))
-                            .with("anzahl", n.to_string())
-                            .with(
-                                "hinweis",
-                                "verschluesselt (DPAPI/AES-GCM), Benutzerpasswort noetig",
-                            ),
-                    );
+                let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
+                    continue;
+                };
+                let logins = read_logins(&f.data);
+                let browser = browser_of(&e.path);
+                out.findings.push(
+                    Finding::new("browser", "gespeicherte Zugangsdaten", &e.path)
+                        .with("art", "passwoerter")
+                        .with("browser", browser)
+                        .with("anzahl", logins.len().to_string())
+                        .with(
+                            "hinweis",
+                            if keys.is_empty() {
+                                "verschluesselt (DPAPI/AES-GCM), Benutzerpasswort noetig"
+                            } else {
+                                "verschluesselt (DPAPI/AES-GCM), Entschluesselung versucht"
+                            },
+                        ),
+                );
+                if keys.is_empty() {
+                    continue;
+                }
+                let mut entschluesselt = 0usize;
+                for (url, user, pw_value) in &logins {
+                    let Some(klartext) = keys
+                        .iter()
+                        .find_map(|k| stratum_creds::dpapi::chromium_password(pw_value, k).ok())
+                    else {
+                        continue;
+                    };
+                    entschluesselt += 1;
+                    let mut fd = Finding::new("browser", "gespeichertes Passwort", &e.path)
+                        .with("art", "passwort_klartext")
+                        .with("browser", browser)
+                        .with("url", url.clone())
+                        .with("passwort", klartext);
+                    if !user.is_empty() {
+                        fd = fd.with("benutzername", user.clone());
+                    }
+                    out.findings.push(fd);
+                }
+                if entschluesselt < logins.len() {
+                    out.warnings.push(format!(
+                        "{}: {} von {} Passwoertern nicht entschluesselbar",
+                        e.path,
+                        logins.len() - entschluesselt,
+                        logins.len()
+                    ));
                 }
             }
             for e in v.by_name("logins.json") {
@@ -121,22 +165,163 @@ impl Analyzer for BrowserAnalyzer {
     }
 }
 
-/// Zaehlt die Zeilen einer Abfrage in einer SQLite-Datei; 0 bei Fehler.
-fn count_rows(data: &[u8], sql: &str) -> i64 {
+/// Ein Eintrag aus `Login Data`: URL, Benutzername, verschlüsseltes Passwort.
+type Login = (String, String, Vec<u8>);
+
+/// Liest die Einträge aus einer `Login Data`-SQLite-Datei. Leer bei Fehler.
+fn read_logins(data: &[u8]) -> Vec<Login> {
     let Ok(mut tmp) = tempfile::NamedTempFile::new() else {
-        return 0;
+        return Vec::new();
     };
     if std::io::Write::write_all(&mut tmp, data).is_err() {
-        return 0;
+        return Vec::new();
     }
     let uri = format!("file:{}?immutable=1", tmp.path().display());
     let Ok(conn) = rusqlite::Connection::open_with_flags(
         uri,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
     ) else {
-        return 0;
+        return Vec::new();
     };
-    conn.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap_or(0)
+    let Ok(mut stmt) =
+        conn.prepare("SELECT origin_url, username_value, password_value FROM logins")
+    else {
+        return Vec::new();
+    };
+    let Ok(rows) = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0).unwrap_or_default(),
+            r.get::<_, String>(1).unwrap_or_default(),
+            r.get::<_, Vec<u8>>(2).unwrap_or_default(),
+        ))
+    }) else {
+        return Vec::new();
+    };
+    rows.flatten().collect()
+}
+
+/// Prüft, ob ein Pfad auf eine DPAPI-Masterkey-Datei zeigt
+/// (`...\Microsoft\Protect\<SID>\<GUID>`).
+fn is_masterkey_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    if !lower.contains("\\microsoft\\protect\\") {
+        return false;
+    }
+    path.rsplit('\\').next().map(is_guid).unwrap_or(false)
+}
+
+/// Erkennt einen GUID-Dateinamen (36 Zeichen, `8-4-4-4-12` Hex).
+fn is_guid(name: &str) -> bool {
+    let b = name.as_bytes();
+    if b.len() != 36 {
+        return false;
+    }
+    for (i, &c) in b.iter().enumerate() {
+        let ok = if matches!(i, 8 | 13 | 18 | 23) {
+            c == b'-'
+        } else {
+            c.is_ascii_hexdigit()
+        };
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
+/// Die SID aus dem Pfad einer Masterkey-Datei (der Ordner über der GUID-Datei).
+fn sid_from_path(path: &str) -> Option<String> {
+    let mut parts = path.rsplit('\\');
+    let _guid = parts.next()?;
+    let sid = parts.next()?;
+    sid.starts_with("S-1-").then(|| sid.to_string())
+}
+
+/// Liest den base64-dekodierten `os_crypt.encrypted_key` (inklusive `DPAPI`-
+/// Präfix) aus einer `Local State`-JSON-Datei.
+fn local_state_key(data: &[u8]) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let json: serde_json::Value = serde_json::from_slice(data).ok()?;
+    let b64 = json.get("os_crypt")?.get("encrypted_key")?.as_str()?;
+    base64::engine::general_purpose::STANDARD.decode(b64).ok()
+}
+
+/// Sammelt aus einem Volume die AES-GCM-Schlüssel der Chromium-Profile: erst die
+/// DPAPI-Masterkeys entschlüsseln, dann damit die Schlüssel aus `Local State`.
+fn chromium_keys<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
+    v: &FsIndex,
+    input: &DpapiInput,
+    out: &mut Outcome,
+) -> Vec<[u8; 32]> {
+    use std::collections::HashMap;
+    let pwd_sha1 = match input {
+        DpapiInput::Password(p) => Some(stratum_creds::dpapi::sha1_password(p)),
+        DpapiInput::Sha1(h) => Some(*h),
+        DpapiInput::Masterkey(_) => None,
+    };
+
+    let mut by_guid: HashMap<String, [u8; 64]> = HashMap::new();
+    let mut all: Vec<[u8; 64]> = Vec::new();
+    for e in v.files.iter().filter(|f| is_masterkey_path(&f.path)) {
+        let Some(sid) = sid_from_path(&e.path) else {
+            continue;
+        };
+        let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
+            continue;
+        };
+        let guid = e
+            .path
+            .rsplit('\\')
+            .next()
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        match input {
+            DpapiInput::Masterkey(mk) => {
+                by_guid.insert(guid, *mk);
+                all.push(*mk);
+            }
+            _ => {
+                let sha1 = pwd_sha1.expect("bei Password/Sha1 gesetzt");
+                match stratum_creds::dpapi::decrypt_masterkey(&f.data, &sid, &sha1) {
+                    Ok(mk) => {
+                        by_guid.insert(guid, mk);
+                        all.push(mk);
+                    }
+                    Err(err) => out.warnings.push(format!(
+                        "{}: Masterkey nicht entschluesselbar: {err}",
+                        e.path
+                    )),
+                }
+            }
+        }
+    }
+
+    let mut keys: Vec<[u8; 32]> = Vec::new();
+    for e in v.by_name("Local State") {
+        if !is_chromium_path(&e.path) {
+            continue;
+        }
+        let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
+            continue;
+        };
+        let Some(blob) = local_state_key(&f.data) else {
+            continue;
+        };
+        // Passenden Masterkey über die GUID im Blob wählen, sonst alle probieren.
+        let matched = blob
+            .strip_prefix(b"DPAPI")
+            .and_then(|b| stratum_creds::dpapi::blob_masterkey_guid(b).ok())
+            .and_then(|g| by_guid.get(&g).copied());
+        let candidates: Vec<[u8; 64]> = matched.map(|m| vec![m]).unwrap_or_else(|| all.clone());
+        for m in candidates {
+            if let Ok(k) = stratum_creds::dpapi::chromium_key(&blob, &m) {
+                keys.push(k);
+                break;
+            }
+        }
+    }
+    keys
 }
 
 #[derive(Clone, Copy)]
@@ -401,5 +586,46 @@ mod tests {
             browser_of("...\\Microsoft\\Edge\\User Data\\Default\\History"),
             "edge"
         );
+    }
+
+    #[test]
+    fn guid_und_masterkey_pfad() {
+        assert!(is_guid("1f2e3d4c-5b6a-7089-90ab-cdef01234567"));
+        assert!(!is_guid("nicht-guid"));
+        assert!(!is_guid("1f2e3d4c-5b6a-7089-90ab-cdef0123456")); // zu kurz
+        let mk = "Users\\ich\\AppData\\Roaming\\Microsoft\\Protect\\\
+                  S-1-5-21-1-2-3-1001\\1f2e3d4c-5b6a-7089-90ab-cdef01234567";
+        assert!(is_masterkey_path(mk));
+        assert_eq!(sid_from_path(mk).as_deref(), Some("S-1-5-21-1-2-3-1001"));
+        assert!(!is_masterkey_path(
+            "Users\\ich\\AppData\\Roaming\\Microsoft\\Protect\\CREDHIST"
+        ));
+    }
+
+    #[test]
+    fn local_state_schluessel_wird_base64_dekodiert() {
+        use base64::Engine;
+        let roh = b"DPAPI\x01\x02\x03";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(roh);
+        let json = format!("{{\"os_crypt\":{{\"encrypted_key\":\"{b64}\"}}}}");
+        assert_eq!(local_state_key(json.as_bytes()).as_deref(), Some(&roh[..]));
+        assert_eq!(local_state_key(b"{}"), None);
+    }
+
+    #[test]
+    fn login_data_wird_gelesen() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logins(origin_url TEXT, username_value TEXT, password_value BLOB);\
+             INSERT INTO logins VALUES('https://a.tld','max',x'763130aabb');",
+        )
+        .unwrap();
+        let bytes = std::fs::read(tmp.path()).unwrap();
+        let rows = read_logins(&bytes);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, "https://a.tld");
+        assert_eq!(rows[0].1, "max");
+        assert_eq!(rows[0].2, vec![0x76, 0x31, 0x30, 0xaa, 0xbb]); // "v10" + Daten
     }
 }

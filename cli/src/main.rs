@@ -19,9 +19,9 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use stratum_analysis::{
-    run_all, AnalysisContext, Analyzer, BrowserAnalyzer, EventLogAnalyzer, KeywordAnalyzer,
-    LsaAnalyzer, NtfsTarget, PersistenceAnalyzer, PrefetchAnalyzer, ProgramExecutionAnalyzer,
-    TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
+    run_all, AnalysisContext, Analyzer, BrowserAnalyzer, DpapiInput, EventLogAnalyzer,
+    KeywordAnalyzer, LsaAnalyzer, NtfsTarget, PersistenceAnalyzer, PrefetchAnalyzer,
+    ProgramExecutionAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
 };
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
@@ -83,6 +83,66 @@ struct Cli {
     /// Beispiel: --dump "Windows/System32/config/SAM" /tmp/SAM
     #[arg(long, num_args = 2, value_names = ["NTFS_PFAD", "ZIEL"])]
     dump: Option<Vec<String>>,
+
+    /// Klartextpasswort des Benutzers, um gespeicherte Browser-Passwörter
+    /// (DPAPI) zu entschlüsseln. Der NT-Hash genügt dafür nicht; das Passwort
+    /// wird üblicherweise vorher aus dem NT-Hash geknackt (hashcat/john).
+    #[arg(long, value_name = "PASSWORT")]
+    dpapi_password: Option<String>,
+
+    /// Statt des Klartextpassworts der vorberechnete SHA-1 (UTF-16LE), hex.
+    #[arg(long, value_name = "HEX40")]
+    dpapi_sha1: Option<String>,
+
+    /// Statt des Passworts ein bereits entschlüsselter DPAPI-Masterkey (64 Byte,
+    /// hex), z. B. aus mimikatz oder impacket.
+    #[arg(long, value_name = "HEX128")]
+    dpapi_masterkey: Option<String>,
+}
+
+/// Wandelt eine Hex-Zeichenkette fester Länge in Bytes; Fehler mit Kontext.
+fn hex_bytes(s: &str, erwartet: usize, name: &str) -> Result<Vec<u8>> {
+    let s = s.trim();
+    if s.len() != erwartet * 2 {
+        anyhow::bail!(
+            "{name}: {} Hex-Zeichen erwartet, {} erhalten",
+            erwartet * 2,
+            s.len()
+        );
+    }
+    (0..erwartet)
+        .map(|i| {
+            u8::from_str_radix(&s[i * 2..i * 2 + 2], 16)
+                .map_err(|_| anyhow::anyhow!("{name}: ungültiges Hex"))
+        })
+        .collect()
+}
+
+/// Baut aus den drei sich ausschliessenden DPAPI-Flags die Eingabe.
+fn dpapi_from_cli(cli: &Cli) -> Result<Option<DpapiInput>> {
+    let gesetzt = [
+        cli.dpapi_password.is_some(),
+        cli.dpapi_sha1.is_some(),
+        cli.dpapi_masterkey.is_some(),
+    ]
+    .iter()
+    .filter(|b| **b)
+    .count();
+    if gesetzt > 1 {
+        anyhow::bail!("--dpapi-password, --dpapi-sha1 und --dpapi-masterkey schliessen sich aus");
+    }
+    if let Some(p) = &cli.dpapi_password {
+        return Ok(Some(DpapiInput::Password(p.clone())));
+    }
+    if let Some(h) = &cli.dpapi_sha1 {
+        let b = hex_bytes(h, 20, "--dpapi-sha1")?;
+        return Ok(Some(DpapiInput::Sha1(b.try_into().unwrap())));
+    }
+    if let Some(m) = &cli.dpapi_masterkey {
+        let b = hex_bytes(m, 64, "--dpapi-masterkey")?;
+        return Ok(Some(DpapiInput::Masterkey(b.try_into().unwrap())));
+    }
+    Ok(None)
 }
 
 /// Mitgelieferte Standard-Begriffstabelle, in das Programm eingebaut.
@@ -148,7 +208,9 @@ fn main() -> Result<()> {
     // Gemeinsamer Kontext: extrahiert einmalig je NTFS-Bereich die Hives und
     // leitet Zeitzone, Rechnername und Konten ab.
     eprintln!("[*] Lese Registry-Hives und baue Pfad-Index ...");
-    let ctx = AnalysisContext::build(&img, targets.clone());
+    let dpapi = dpapi_from_cli(&cli)?;
+    let mut ctx = AnalysisContext::build(&img, targets.clone());
+    ctx.dpapi = dpapi;
     warnings.extend(ctx.warnings.iter().cloned());
     if let Some(v) = ctx.volumes.first() {
         eprintln!("[+] Pfad-Index: {} Dateien", v.files.len());

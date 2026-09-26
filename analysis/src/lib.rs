@@ -34,7 +34,7 @@ mod windows;
 mod builder;
 
 pub use browser::BrowserAnalyzer;
-pub use context::{AnalysisContext, NtfsTarget};
+pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
 pub use eventlog::EventLogAnalyzer;
 pub use finding::Finding;
 pub use fsindex::{FileEntry, FsIndex};

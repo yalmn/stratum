@@ -5,6 +5,19 @@ use stratum_core::ImageReader;
 use crate::fsindex::FsIndex;
 use crate::windows::{extract_installs, extract_snapshots, WindowsInstall};
 
+/// Vom Untersucher übergebenes Geheimnis, um benutzergebundene DPAPI-Daten
+/// (gespeicherte Browser-Passwörter) zu entschlüsseln. Ohne Angabe bleibt es
+/// bei der reinen Bestandsaufnahme (Anzahl verschlüsselter Einträge).
+#[derive(Debug, Clone)]
+pub enum DpapiInput {
+    /// Klartextpasswort des Benutzers; der SHA-1 wird selbst gebildet.
+    Password(String),
+    /// Bereits gebildeter SHA-1 des Passworts (UTF-16LE).
+    Sha1([u8; 20]),
+    /// Ein bereits entschlüsselter DPAPI-Masterkey (64 Byte).
+    Masterkey([u8; 64]),
+}
+
 /// Ein NTFS-Bereich, den die Analyzer untersuchen sollen.
 #[derive(Debug, Clone, Copy)]
 pub struct NtfsTarget {
@@ -33,6 +46,8 @@ pub struct AnalysisContext<'a> {
     pub volumes: Vec<FsIndex>,
     /// Auffälligkeiten aus dem Kontext-Aufbau (z. B. nicht indizierbare Bereiche).
     pub warnings: Vec<String>,
+    /// Optionales Geheimnis zum Entschlüsseln benutzergebundener DPAPI-Daten.
+    pub dpapi: Option<DpapiInput>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -45,6 +60,7 @@ impl<'a> AnalysisContext<'a> {
             installs: Vec::new(),
             volumes: Vec::new(),
             warnings: Vec::new(),
+            dpapi: None,
         }
     }
 
@@ -75,6 +91,7 @@ impl<'a> AnalysisContext<'a> {
             installs,
             volumes,
             warnings,
+            dpapi: None,
         }
     }
 }
