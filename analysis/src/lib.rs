@@ -44,7 +44,7 @@ pub use keyword::KeywordAnalyzer;
 pub use lsa::LsaAnalyzer;
 pub use prefetch::PrefetchAnalyzer;
 pub use programexec::ProgramExecutionAnalyzer;
-pub use reg::{PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
+pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
 pub use runner::{run_all, AnalysisResult};
 pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;

@@ -22,6 +22,7 @@ Das Werkzeug schliesst an [ForensiCUnlock](https://github.com/yalmn/ForensiCUnlo
 | NTFS | gezielter Zugriff auf einzelne Dateien per Pfad, ohne Einhängen |
 | Registry | eigener regf-Parser, Zugriff per Pfad, Zeitzone und Rechnername |
 | Konten | lokale Windows-Konten mit Benutzername und NT-Hash aus SAM und SYSTEM |
+| Artefakt-Domänen | Autostart, USB, Programmausführung (Amcache, Shimcache, Prefetch, BAM/DAM), Benutzeraktivität (UserAssist, TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs), EventLog, Browser-Verlauf und -Passwörter, LSA/DCC2, DPAPI, Tor, Volume Shadow Copies |
 | Keyword-Suche | Begriffe aus einer Tabelle, in ASCII und UTF-16LE, Zugangsdaten als Paar (Benutzer- und Passwort-Feld in geringem Abstand), validierte v3-Onion-Adressen |
 
 Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro Fall gepflegten und versionierten TOML-Tabelle. So bleibt nachvollziehbar, wonach gesucht wurde, und das Rauschen lässt sich pro Fall über die aktiven Kategorien steuern. Eine Beispieltabelle liegt unter `search/examples/begriffe.toml`.

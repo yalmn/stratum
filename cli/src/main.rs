@@ -19,7 +19,7 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use stratum_analysis::{
-    run_all, AnalysisContext, Analyzer, BrowserAnalyzer, DpapiAnalyzer, DpapiInput,
+    run_all, AnalysisContext, Analyzer, BamAnalyzer, BrowserAnalyzer, DpapiAnalyzer, DpapiInput,
     EventLogAnalyzer, KeywordAnalyzer, LsaAnalyzer, NtfsTarget, PersistenceAnalyzer,
     PrefetchAnalyzer, ProgramExecutionAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer,
     VssAnalyzer,
@@ -268,6 +268,7 @@ fn main() -> Result<()> {
         Box::new(ProgramExecutionAnalyzer),
         Box::new(LsaAnalyzer),
         Box::new(DpapiAnalyzer),
+        Box::new(BamAnalyzer),
     ];
 
     let mut keyword_bar = None;
