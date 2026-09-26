@@ -554,28 +554,46 @@ fn assemble_compressed<R: Read + Seek>(
 
     let cap = usize::try_from(file_size).unwrap_or(0);
     let mut out = Vec::with_capacity(cap);
-    for (u, &real) in real_per_unit.iter().enumerate() {
+    // Ausgabe entlang der LOGISCHEN (entpackten) Groesse aufbauen. Die letzte
+    // Einheit kann weniger als eine volle Einheitenlaenge tragen.
+    let logical_units = file_size.div_ceil(cu_size) as usize;
+    for u in 0..logical_units {
         let start = u as u64 * cu_size;
-        let this = cu_size.min(allocated - start);
+        let logical = cu_size.min(file_size - start);
+        let logical_usize = usize::try_from(logical).unwrap_or(0);
+        let real = real_per_unit.get(u).copied().unwrap_or(0);
+
+        // Eine Einheit ist komprimiert abgelegt, wenn die Kompression mindestens
+        // einen Cluster gespart hat, also weniger belegte Cluster als logische
+        // vorliegen. Sonst liegt sie unkomprimiert (roh) vor. Die letzte,
+        // teilweise gefuellte Einheit (z. B. ein einzelner Cluster) ist damit
+        // korrekt als unkomprimiert erkannt.
+        let logical_clusters = logical.div_ceil(cluster_size);
+        let real_clusters = real / cluster_size;
         let s = usize::try_from(start).unwrap_or(0);
-        let t = usize::try_from(this).unwrap_or(0);
-        let unit_raw = &raw[s..s + t];
 
         if real == 0 {
             // Vollständig spärliche Einheit: reine Nullfolge.
-            out.resize(out.len() + t, 0);
-        } else if real >= this {
-            // Vollständig belegt: unkomprimiert abgelegt, roh übernehmen.
-            out.extend_from_slice(unit_raw);
+            out.resize(out.len() + logical_usize, 0);
+        } else if real_clusters >= logical_clusters {
+            // Unkomprimiert: die logischen Bytes roh übernehmen (bei gekürztem
+            // Image mit Nullen auffüllen, damit die Länge stimmt).
+            let e = (s + logical_usize).min(raw.len());
+            out.extend_from_slice(&raw[s..e]);
+            let got = e - s;
+            if got < logical_usize {
+                out.resize(out.len() + (logical_usize - got), 0);
+            }
         } else {
             // Komprimierte Einheit: nur die belegten Bytes entpacken.
             let r = usize::try_from(real).unwrap_or(0);
+            let e = (s + r).min(raw.len());
             let before = out.len();
-            lznt1::decompress(&unit_raw[..r], &mut out)?;
-            // Nicht-letzte Einheiten müssen exakt eine Einheitenlänge liefern;
-            // bei Abweichung (defensiv gegen fehlerhafte Daten) angleichen.
-            if u + 1 < num_units && out.len() - before != t {
-                out.resize(before + t, 0);
+            lznt1::decompress(&raw[s..e], &mut out)?;
+            // Jede Einheit muss ihre logische Länge liefern; bei Abweichung
+            // (defensiv gegen fehlerhafte Daten) angleichen.
+            if out.len() - before != logical_usize {
+                out.resize(before + logical_usize, 0);
             }
         }
     }
