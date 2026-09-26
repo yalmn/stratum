@@ -22,7 +22,7 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 use ntfs::attribute_value::NtfsAttributeValue;
 use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{NtfsAttributeList, NtfsFileNamespace, NtfsStandardInformation};
-use ntfs::{Ntfs, NtfsAttributeType, NtfsFile};
+use ntfs::{Ntfs, NtfsAttributeFlags, NtfsAttributeType, NtfsFile};
 
 use stratum_core::ImageReader;
 
@@ -372,6 +372,18 @@ fn read_data<R: Read + Seek>(
     }
 
     let debug = std::env::var_os("STRATUM_DEBUG").is_some();
+    let flags = attribute.flags();
+    let compressed = flags.contains(NtfsAttributeFlags::COMPRESSED);
+    if debug {
+        eprintln!(
+            "[stratum] $DATA Flags: {flags:?}{}",
+            if compressed {
+                " (NTFS-komprimiert, LZNT1)"
+            } else {
+                ""
+            }
+        );
+    }
 
     // Läufe ohne dauerhaften fs-Zugriff einsammeln, damit fs danach frei zum
     // Lesen ist.
@@ -388,10 +400,14 @@ fn read_data<R: Read + Seek>(
                     ));
                 }
                 if debug {
+                    let sparse = runs.iter().filter(|(p, _)| p.is_none()).count();
                     eprintln!(
-                        "[stratum] $DATA nicht-resident: {} Lauf/Laeufe, {file_size} Bytes",
+                        "[stratum] $DATA nicht-resident: {} Lauf/Laeufe ({sparse} spaerlich), {file_size} Bytes",
                         runs.len()
                     );
+                    for (i, (pos, len)) in runs.iter().enumerate() {
+                        eprintln!("[stratum]   Lauf {i}: pos={pos:?} len={len}");
+                    }
                 }
                 RunPlan::Runs(runs)
             }
