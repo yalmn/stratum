@@ -32,8 +32,16 @@ use crate::crypto::aes256_cbc_decrypt;
 
 /// Windows-Algorithmus-Kennungen (CALG_*), wie sie in Masterkey- und
 /// DPAPI-Blob-Strukturen stehen.
+const CALG_SHA1: u32 = 0x8004;
 const CALG_SHA_512: u32 = 0x800e;
+const CALG_3DES: u32 = 0x6603;
 const CALG_AES_256: u32 = 0x6610;
+
+/// Bekannte Offsets, an denen der MasterKey-Blob in einer MasterKeyFile beginnt.
+/// Der Dateikopf ist je nach Windows-Version unterschiedlich lang; der Blob wird
+/// über seine Algorithmus-Signatur eindeutig bestätigt. Die MasterKeyLen steht
+/// jeweils 32 Byte vor dem Blob.
+const MK_BLOB_OFFSETS: [usize; 2] = [152, 128];
 
 /// Fehler der DPAPI-Auswertung.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -91,21 +99,25 @@ fn prekey(pwd_sha1: &[u8; 20], sid: &str) -> [u8; 20] {
     mac.finalize().into_bytes().into()
 }
 
-/// Kopfgrösse einer MasterKeyFile bis zum Beginn des Masterkey-Blobs.
-const MK_HEADER: usize = 132;
-
-/// Der GUID-Name einer Masterkey-Datei steht im Kopf als UTF-16LE-Text.
+/// Der GUID-Name einer Masterkey-Datei steht im Kopf als UTF-16LE-Text. Die
+/// Position variiert je nach Windows-Version (36 bei Windows 10/11, 12 älter);
+/// gewählt wird die Stelle, die wie eine GUID aussieht.
 pub fn masterkey_file_guid(file: &[u8]) -> Result<String, DpapiError> {
-    // Version(4) + 2x unk(4) = 12, dann 72 Byte GUID (36 UTF-16-Zeichen).
-    let raw = file
-        .get(12..12 + 72)
-        .ok_or(DpapiError::TooShort("Masterkey-Kopf"))?;
-    let units: Vec<u16> = raw
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .take_while(|&u| u != 0)
-        .collect();
-    Ok(String::from_utf16_lossy(&units))
+    for &off in &[36usize, 12] {
+        let Some(raw) = file.get(off..off + 72) else {
+            continue;
+        };
+        let units: Vec<u16> = raw
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .take_while(|&u| u != 0)
+            .collect();
+        let text = String::from_utf16_lossy(&units);
+        if text.len() == 36 && text.as_bytes()[8] == b'-' {
+            return Ok(text);
+        }
+    }
+    Err(DpapiError::TooShort("Masterkey-GUID nicht gefunden"))
 }
 
 /// Entschlüsselt den Masterkey aus einer MasterKeyFile mit Passwort-Hash und
@@ -126,13 +138,69 @@ pub fn decrypt_system_masterkey(file: &[u8], key: &[u8; 20]) -> Result<[u8; 64],
     decrypt_masterkey_with_prekey(file, key)
 }
 
+/// Findet den MasterKey-Blob in einer MasterKeyFile. Der Dateikopf variiert je
+/// nach Windows-Version in der Länge, deshalb werden die bekannten Blob-Offsets
+/// durchprobiert und der Treffer über seine Algorithmus-Signatur (bekannter
+/// Hash- und Krypto-Algorithmus an fester Stelle) bestätigt.
+fn locate_masterkey_blob(file: &[u8]) -> Result<&[u8], DpapiError> {
+    for &hdr in &MK_BLOB_OFFSETS {
+        let Some(len_off) = hdr.checked_sub(32) else {
+            continue;
+        };
+        let Some(mk_len) = le_u64(file, len_off) else {
+            continue;
+        };
+        let mk_len = mk_len as usize;
+        if !(32..=file.len()).contains(&mk_len) {
+            continue;
+        }
+        let Some(blob) = file.get(hdr..hdr + mk_len) else {
+            continue;
+        };
+        let (Some(ha), Some(ca)) = (le_u32(blob, 24), le_u32(blob, 28)) else {
+            continue;
+        };
+        let known_hash = ha == CALG_SHA1 || ha == CALG_SHA_512;
+        let known_crypt = ca == CALG_3DES || ca == CALG_AES_256;
+        if known_hash && known_crypt {
+            return Ok(blob);
+        }
+    }
+    Err(DpapiError::TooShort("Masterkey-Blob nicht gefunden"))
+}
+
+/// Schlüsselableitung der DPAPI-Masterkeys (HMAC-SHA512). Es ist bewusst nicht
+/// das Standard-PBKDF2 nach RFC 2898: Windows leitet jeden Block ab, indem der
+/// laufende Wert wiederholt mit `HMAC(passphrase, laufender Wert)` verXORt wird,
+/// statt jeweils den Vorgänger zu hashen. Gegen echte Masterkey-Dateien
+/// verifiziert; das Standard-PBKDF2 liefert hier falsche Schlüssel.
+fn derive_key_sha512(passphrase: &[u8], salt: &[u8], keylen: usize, count: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(keylen + 64);
+    let mut block: u32 = 1;
+    while out.len() < keylen {
+        let mut mac = Hmac::<Sha512>::new_from_slice(passphrase).expect("HMAC-Schlüssel");
+        mac.update(salt);
+        mac.update(&block.to_be_bytes());
+        let mut derived = mac.finalize().into_bytes().to_vec();
+        for _ in 0..count.saturating_sub(1) {
+            let mut m = Hmac::<Sha512>::new_from_slice(passphrase).expect("HMAC-Schlüssel");
+            m.update(&derived);
+            let actual = m.finalize().into_bytes();
+            for (d, a) in derived.iter_mut().zip(actual.iter()) {
+                *d ^= a;
+            }
+        }
+        out.extend_from_slice(&derived);
+        block += 1;
+    }
+    out.truncate(keylen);
+    out
+}
+
 /// Gemeinsamer Kern: entschlüsselt den Masterkey einer MasterKeyFile mit einem
 /// bereits abgeleiteten 20-Byte-Vorschlüssel.
 fn decrypt_masterkey_with_prekey(file: &[u8], pre: &[u8; 20]) -> Result<[u8; 64], DpapiError> {
-    let mk_len = le_u64(file, 100).ok_or(DpapiError::TooShort("Masterkey-Längen"))? as usize;
-    let blob = file
-        .get(MK_HEADER..MK_HEADER + mk_len)
-        .ok_or(DpapiError::TooShort("Masterkey-Blob"))?;
+    let blob = locate_masterkey_blob(file)?;
 
     // Masterkey-Blob: Version(4), Salt(16), Runden(4), HashAlgo(4), CryptAlgo(4).
     let salt = blob
@@ -152,10 +220,9 @@ fn decrypt_masterkey_with_prekey(file: &[u8], pre: &[u8; 20]) -> Result<[u8; 64]
         });
     }
 
-    // PBKDF2-HMAC-SHA512 über den Vorschlüssel, Salt = Masterkey-Salt.
-    // 32 Byte AES-Schlüssel + 16 Byte IV.
-    let mut derived = [0u8; 48];
-    pbkdf2::pbkdf2_hmac::<Sha512>(pre, salt, rounds, &mut derived);
+    // Schlüsselableitung von Windows (siehe [`derive_key_sha512`]): 32 Byte
+    // AES-Schlüssel + 16 Byte IV, Salt = Masterkey-Salt.
+    let derived = derive_key_sha512(pre, salt, 48, rounds);
     let aes_key: [u8; 32] = derived[..32].try_into().unwrap();
     let iv: [u8; 16] = derived[32..48].try_into().unwrap();
 
@@ -254,8 +321,13 @@ pub fn decrypt_dpapi_blob(
         });
     }
 
-    // sessionKey = HMAC-SHA512(masterkey, salt [+ entropy]).
-    let mut mac = Hmac::<Sha512>::new_from_slice(masterkey).expect("HMAC-Schlüssel");
+    // Als HMAC-Schlüssel dient nicht der Masterkey selbst, sondern sein SHA-1.
+    let mut kh = Sha1::new();
+    kh.update(masterkey);
+    let key_hash = kh.finalize();
+
+    // sessionKey = HMAC-SHA512(SHA1(masterkey), salt [+ entropy]).
+    let mut mac = Hmac::<Sha512>::new_from_slice(&key_hash).expect("HMAC-Schlüssel");
     mac.update(&salt);
     if let Some(e) = entropy {
         mac.update(e);
@@ -314,12 +386,10 @@ mod tests {
     use super::*;
     use crate::crypto::aes256_cbc_encrypt;
 
-    const CALG_SHA1: u32 = 0x8004;
-    const CALG_3DES: u32 = 0x6603;
-
-    // Baut eine MasterKeyFile, aus der sich ein gewählter Masterkey mit
-    // password/SID wieder ableiten lässt (Round-Trip, gleiche Ableitung wie im
-    // Produktionspfad).
+    // Baut eine MasterKeyFile im Windows-10/11-Layout (Blob ab Offset 152,
+    // MasterKeyLen bei 120), aus der sich ein gewählter Masterkey wieder
+    // ableiten lässt (Round-Trip, gleiche Ableitung wie im Produktionspfad).
+    const MK_HEADER: usize = 152;
     fn build_masterkey_file(
         masterkey: &[u8; 64],
         pre: &[u8; 20],
@@ -343,8 +413,7 @@ mod tests {
             plain.push(0);
         }
 
-        let mut derived = [0u8; 48];
-        pbkdf2::pbkdf2_hmac::<Sha512>(pre, salt, rounds, &mut derived);
+        let derived = derive_key_sha512(pre, salt, 48, rounds);
         let aes_key: [u8; 32] = derived[..32].try_into().unwrap();
         let iv: [u8; 16] = derived[32..48].try_into().unwrap();
         let enc = aes256_cbc_encrypt(&aes_key, &iv, &plain);
@@ -358,9 +427,9 @@ mod tests {
         mk.extend_from_slice(&CALG_AES_256.to_le_bytes());
         mk.extend_from_slice(&enc);
 
-        // Datei-Kopf: 132 Byte, dann Längen und Blob.
+        // Datei-Kopf: 152 Byte (Win10/11), MasterKeyLen bei Offset 120.
         let mut file = vec![0u8; MK_HEADER];
-        file[100..108].copy_from_slice(&(mk.len() as u64).to_le_bytes());
+        file[120..128].copy_from_slice(&(mk.len() as u64).to_le_bytes());
         file.extend_from_slice(&mk);
         file
     }
@@ -413,7 +482,7 @@ mod tests {
         mk.extend_from_slice(&CALG_SHA1.to_le_bytes());
         mk.extend_from_slice(&CALG_3DES.to_le_bytes());
         mk.extend_from_slice(&[0u8; 160]);
-        file[100..108].copy_from_slice(&(mk.len() as u64).to_le_bytes());
+        file[120..128].copy_from_slice(&(mk.len() as u64).to_le_bytes());
         file.extend_from_slice(&mk);
         assert_eq!(
             decrypt_masterkey(&file, "S-1-5-21-1-1-1-1", &[0; 20]),
@@ -426,7 +495,10 @@ mod tests {
 
     // Baut einen DPAPI-Blob, der einen Klartext mit gegebenem Masterkey trägt.
     fn build_blob(plain: &[u8], masterkey: &[u8; 64], salt: &[u8], guid: &[u8; 16]) -> Vec<u8> {
-        let mut mac = Hmac::<Sha512>::new_from_slice(masterkey).unwrap();
+        let mut kh = Sha1::new();
+        kh.update(masterkey);
+        let key_hash = kh.finalize();
+        let mut mac = Hmac::<Sha512>::new_from_slice(&key_hash).unwrap();
         mac.update(salt);
         let session_key = mac.finalize().into_bytes();
         let aes_key: [u8; 32] = session_key[..32].try_into().unwrap();
