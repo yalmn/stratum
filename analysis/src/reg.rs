@@ -14,9 +14,12 @@ use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 /// Findet Autostart-Einträge in den Run-/RunOnce-Schlüsseln (HKLM und HKCU).
 pub struct PersistenceAnalyzer;
 
-const RUN_KEYS: [&str; 2] = [
+const RUN_KEYS: [&str; 5] = [
     "Microsoft\\Windows\\CurrentVersion\\Run",
     "Microsoft\\Windows\\CurrentVersion\\RunOnce",
+    "Microsoft\\Windows\\CurrentVersion\\RunServices",
+    "Microsoft\\Windows\\CurrentVersion\\RunServicesOnce",
+    "Microsoft\\Windows\\CurrentVersion\\Policies\\Explorer\\Run",
 ];
 
 impl Analyzer for PersistenceAnalyzer {
@@ -28,11 +31,24 @@ impl Analyzer for PersistenceAnalyzer {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
             let before = out.findings.len();
-            // HKLM aus dem SOFTWARE-Hive.
+            // HKLM aus dem SOFTWARE-Hive: Run-Schluessel plus Winlogon,
+            // AppInit_DLLs und Image File Execution Options.
             if let Some(bytes) = &inst.hives.software {
                 match Hive::parse(bytes) {
-                    Ok(hive) => run_keys(&hive, "", "HKLM SOFTWARE", &mut out),
+                    Ok(hive) => {
+                        run_keys(&hive, "", "HKLM SOFTWARE", &mut out);
+                        winlogon(&hive, &mut out);
+                        appinit_dlls(&hive, &mut out);
+                        ifeo_debugger(&hive, &mut out);
+                    }
                     Err(e) => out.warnings.push(format!("SOFTWARE nicht lesbar: {e}")),
+                }
+            }
+            // SYSTEM-Hive: auffaellige Dienste.
+            if let Some(bytes) = &inst.hives.system {
+                match Hive::parse(bytes) {
+                    Ok(hive) => services(&hive, &mut out),
+                    Err(e) => out.warnings.push(format!("SYSTEM nicht lesbar: {e}")),
                 }
             }
             // HKCU aus jeder NTUSER.DAT.
@@ -48,6 +64,158 @@ impl Analyzer for PersistenceAnalyzer {
         }
         out
     }
+}
+
+/// Winlogon: `Shell` sollte `explorer.exe`, `Userinit` `...\userinit.exe,` sein.
+/// Abweichungen sind ein klassischer Autostart-Missbrauch und werden markiert.
+fn winlogon(hive: &Hive, out: &mut Outcome) {
+    const PATH: &str = "Microsoft\\Windows NT\\CurrentVersion\\Winlogon";
+    let Ok(Some(key)) = hive.open_key(PATH) else {
+        return;
+    };
+    for (name, normal) in [("Shell", "explorer.exe"), ("Userinit", "userinit.exe")] {
+        let Some(val) = key.value(name).ok().flatten().and_then(|v| v.as_string()) else {
+            continue;
+        };
+        let auffaellig = !val.to_ascii_lowercase().contains(normal);
+        out.findings.push(
+            Finding::new("persistence", name, format!("HKLM SOFTWARE\\{PATH}"))
+                .with("befehl", val)
+                .with("ort", "Winlogon")
+                .with("auffaellig", if auffaellig { "ja" } else { "nein" }),
+        );
+    }
+}
+
+/// `AppInit_DLLs` wird in jeden Prozess geladen, der user32.dll nutzt. Ein
+/// nicht leerer Wert ist auffällig.
+fn appinit_dlls(hive: &Hive, out: &mut Outcome) {
+    const PATH: &str = "Microsoft\\Windows NT\\CurrentVersion\\Windows";
+    let Ok(Some(key)) = hive.open_key(PATH) else {
+        return;
+    };
+    let Some(val) = key
+        .value("AppInit_DLLs")
+        .ok()
+        .flatten()
+        .and_then(|v| v.as_string())
+    else {
+        return;
+    };
+    if val.trim().is_empty() {
+        return;
+    }
+    out.findings.push(
+        Finding::new(
+            "persistence",
+            "AppInit_DLLs",
+            format!("HKLM SOFTWARE\\{PATH}"),
+        )
+        .with("befehl", val)
+        .with("ort", "AppInit_DLLs")
+        .with("auffaellig", "ja"),
+    );
+}
+
+/// Image File Execution Options: ein `Debugger`-Wert kapert den Start des
+/// jeweiligen Programms (auch fuer "Sticky Keys"-artige Hintertueren).
+fn ifeo_debugger(hive: &Hive, out: &mut Outcome) {
+    const PATH: &str = "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options";
+    let Ok(Some(root)) = hive.open_key(PATH) else {
+        return;
+    };
+    let Ok(progs) = root.subkeys() else { return };
+    for prog in progs {
+        let Some(dbg) = prog
+            .value("Debugger")
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_string())
+        else {
+            continue;
+        };
+        if dbg.trim().is_empty() {
+            continue;
+        }
+        out.findings.push(
+            Finding::new(
+                "persistence",
+                prog.name(),
+                format!("HKLM SOFTWARE\\{PATH}\\{}", prog.name()),
+            )
+            .with("befehl", dbg)
+            .with("ort", "IFEO-Debugger")
+            .with("auffaellig", "ja"),
+        );
+    }
+}
+
+/// Dienste aus `SYSTEM\{CS}\Services`, deren `ImagePath` in einem für Systemdienste
+/// ungewöhnlichen, vom Nutzer beschreibbaren Ort liegt. Die vollständige
+/// Dienstliste wäre zu verrauscht; gemeldet wird nur Auffälliges.
+fn services(hive: &Hive, out: &mut Outcome) {
+    let cs = current_control_set(hive);
+    let base = format!("{cs}\\Services");
+    let Ok(Some(root)) = hive.open_key(&base) else {
+        return;
+    };
+    let Ok(dienste) = root.subkeys() else { return };
+    for dienst in dienste {
+        let Some(image) = dienst
+            .value("ImagePath")
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_string())
+        else {
+            continue;
+        };
+        if !ungewoehnlicher_dienstpfad(&image) {
+            continue;
+        }
+        let start = dienst
+            .value("Start")
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u32());
+        let mut f = Finding::new(
+            "persistence",
+            dienst.name(),
+            format!("SYSTEM\\{base}\\{}", dienst.name()),
+        )
+        .with("befehl", image)
+        .with("ort", "Dienst")
+        .with("auffaellig", "ja");
+        if let Some(s) = start {
+            f = f.with("start_typ", s.to_string());
+        }
+        out.findings.push(f);
+    }
+}
+
+/// Prüft, ob ein Dienst-`ImagePath` in einem vom Nutzer beschreibbaren oder
+/// sonst ungewöhnlichen Ort liegt (statt System32, SysWOW64, drivers, WinSxS).
+fn ungewoehnlicher_dienstpfad(image: &str) -> bool {
+    let lower = image.to_ascii_lowercase();
+    const VERDAECHTIG: [&str; 6] = [
+        "\\users\\",
+        "\\temp\\",
+        "\\appdata\\",
+        "\\programdata\\",
+        "\\downloads\\",
+        "\\public\\",
+    ];
+    if VERDAECHTIG.iter().any(|p| lower.contains(p)) {
+        return true;
+    }
+    // Dienste ohne Pfad-Referenz auf ein Systemverzeichnis, die aber eine
+    // ausführbare Datei starten, sind ebenfalls einen Blick wert.
+    let system = [
+        "\\windows\\system32",
+        "\\windows\\syswow64",
+        "\\windows\\",
+        "\\systemroot",
+    ];
+    (lower.contains(".exe") || lower.contains(".dll")) && !system.iter().any(|p| lower.contains(p))
 }
 
 fn run_keys(hive: &Hive, prefix: &str, ort: &str, out: &mut Outcome) {
@@ -535,6 +703,21 @@ mod tests {
             f.attributes.get("befehl").map(String::as_str),
             Some("C:\\evil.exe")
         );
+    }
+
+    #[test]
+    fn dienstpfad_bewertung() {
+        assert!(ungewoehnlicher_dienstpfad(
+            "C:\\Users\\ich\\AppData\\Local\\Temp\\svc.exe"
+        ));
+        assert!(ungewoehnlicher_dienstpfad("C:\\ProgramData\\x\\run.exe"));
+        assert!(ungewoehnlicher_dienstpfad("D:\\tools\\agent.exe"));
+        assert!(!ungewoehnlicher_dienstpfad(
+            "\\SystemRoot\\System32\\drivers\\disk.sys"
+        ));
+        assert!(!ungewoehnlicher_dienstpfad(
+            "C:\\Windows\\System32\\svchost.exe -k netsvcs"
+        ));
     }
 
     #[test]
