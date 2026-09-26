@@ -94,13 +94,13 @@ fn benutzer_aus_pfad(path: &str) -> String {
 
 /// Ausgewertete Verknüpfung.
 #[derive(Default)]
-struct Lnk {
-    target_path: String,
-    drive_serial: Option<u32>,
-    file_size: u32,
-    created: Option<i64>,
-    modified: Option<i64>,
-    accessed: Option<i64>,
+pub(crate) struct Lnk {
+    pub(crate) target_path: String,
+    pub(crate) drive_serial: Option<u32>,
+    pub(crate) file_size: u32,
+    pub(crate) created: Option<i64>,
+    pub(crate) modified: Option<i64>,
+    pub(crate) accessed: Option<i64>,
 }
 
 fn le_u32(b: &[u8], at: usize) -> Option<u32> {
@@ -141,7 +141,7 @@ fn cstr(b: &[u8], off: usize, unicode: bool) -> String {
 }
 
 /// Parst eine Shell-Link-Datei (MS-SHLLINK). `None` bei ungültigem Header.
-fn parse_lnk(data: &[u8]) -> Option<Lnk> {
+pub(crate) fn parse_lnk(data: &[u8]) -> Option<Lnk> {
     // ShellLinkHeader: 76 Byte, HeaderSize == 0x4C.
     if le_u32(data, 0)? != 0x4C || data.len() < 76 {
         return None;
