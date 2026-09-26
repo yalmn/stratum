@@ -115,6 +115,52 @@ stratum merged.dd -o report.json --bdp bdp.info -k eigene.toml
 
 Die eingebaute Liste ist ein neutraler Ausgangspunkt, kein fertiger Fallkatalog. Pro Fall lässt sich abschalten, was nicht passt (`aktiv = false`), und mit `--no-default-keywords` deaktiviert man sie ganz. Sensible oder fallbezogene Wortlisten gehören nicht in dieses Repository, sondern in die eigene Tabelle, die getrennt geführt wird. Name und Version der verwendeten Tabellen stehen im Report, damit nachvollziehbar bleibt, wonach gesucht wurde.
 
+## PowerShell-Verlauf und Ereignisquellen
+
+Der PowerShell-Analyzer liest `ConsoleHost_history.txt` sowie weitere
+`*_history.txt` unter PSReadLine-Verzeichnissen über den vorhandenen NTFS-Index.
+Er erfasst physische UTF-8-Zeilen, Profilzuordnung aus dem Pfad, Zeilennummer,
+Byte-Offset innerhalb der Datei, MFT-Nummer und Volume-Offset. Ein Verlaufseintrag
+belegt allein weder die Ausführung noch ihren Zeitpunkt oder Erfolg. Mehrzeilige
+Eingaben bleiben als einzelne Quellzeilen mit Fortsetzungsmarkierung erhalten.
+Abweichende, frei konfigurierte Dateinamen werden nicht automatisch erkannt.
+
+Grenzen: 16 MiB je Verlaufsdatei, 50.000 physische Zeilen, 64 KiB je Zeile.
+Überschreitungen und ungültiges UTF-8 erscheinen als Warnungen. Der Analyzer
+arbeitet derzeit auf den indizierten Live-NTFS-Volumes, nicht auf Schattenkopien.
+Die Standardpfade beschreibt die [PSReadLine-Dokumentation](https://learn.microsoft.com/en-us/powershell/module/psreadline/set-psreadlineoption).
+
+Die Timeline enthält alle unterstützten Zeitfelder eines Funds. `finding_index`
+verweist auf den Index im `findings`-Array desselben Reports; `time_key` benennt
+das ursprüngliche Zeitfeld. Diese Referenz gilt innerhalb dieses Reports und ist
+keine fallübergreifende Kennung. Papierkorb-, Registry- und LNK-Zeiten bleiben
+als unterschiedliche Ereignisarten erhalten. Zeitliche Nähe allein belegt
+keinen ursächlichen Zusammenhang.
+
+Dienste mit ImagePath und geplante Aufgaben bleiben auch bei gewöhnlichem
+Programmpfad erhalten. `auffaellig` ist eine Pfadheuristik für die Sichtung und
+keine Aussage über Schadsoftware. Dadurch kann die Zahl der Persistenzfunde
+steigen; eine spätere Oberfläche kann die Bewertung unabhängig filtern.
+
+## Weiterer Ausbau
+
+Geplant, noch nicht implementiert:
+
+- Weitere Windows-Artefakte: USN/MFT, SRUM, ActivitiesCache, WebCache.
+- Dateibasierte Analyse von Schattenkopien.
+- Linux-Dateisysteme und Serviceanalysen für Web, Datenbanken, Authentifizierung,
+  VPN und Gateways.
+- Chat-Artefakte, unter anderem WhatsApp, Signal und Threema. Erkennung,
+  unterstützte Formate und Verfügbarkeit erforderlicher Schlüssel getrennt berichten.
+- Browseroberfläche mit Dateiexplorer und quellenbezogener Fallauswertung.
+- Protokollierung von Analystenaktionen mit Fall, Identität, Zeitpunkt, Quelle,
+  Aktion und Ergebnis; Untersuchungszeit getrennt von Artefaktzeiten.
+- Promptgestützte Abfragen und Korrelationen mit Verweisen auf die zugrunde
+  liegenden Funde. Vermutungen getrennt von belegten Beziehungen darstellen.
+
+GUI, Protokollierung und Korrelationsmodell werden vor ihrer Umsetzung gesondert
+abgestimmt. Die Analyselogik bleibt unabhängig von der Oberfläche.
+
 ## Report-Integrität
 
 Beim Schreiben in eine Datei (`-o`) legt stratum neben dem Report eine
@@ -142,6 +188,16 @@ Die Fuzz-Targets liegen unter `fuzz/` und brauchen eine nightly-Toolchain:
 cargo install cargo-fuzz
 cargo +nightly fuzz run hive
 ```
+
+Der PowerShell-Test gegen ein erzeugtes NTFS-Volume benötigt `mkntfs` und
+`ntfscp`. Er ist explizit auszuführen und schlägt bei fehlenden Werkzeugen fehl:
+
+```sh
+cargo test -p stratum-analysis --test powershell_ntfs -- --ignored
+```
+
+Der zusätzliche Mini-Image-Test prüft read-only Zugriff, Dateipositionen und
+Serialisierung ohne externe Werkzeuge. Das Fuzz-Target heißt `powershell`.
 
 ## Lizenz
 

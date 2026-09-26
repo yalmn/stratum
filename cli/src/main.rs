@@ -21,8 +21,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use stratum_analysis::{
     run_all, AnalysisContext, Analyzer, BamAnalyzer, BrowserAnalyzer, DpapiAnalyzer, DpapiInput,
     EventLogAnalyzer, FilePersistenceAnalyzer, JumpListAnalyzer, KeywordAnalyzer, LnkAnalyzer,
-    LsaAnalyzer, NtfsTarget, PersistenceAnalyzer, PrefetchAnalyzer, ProgramExecutionAnalyzer,
-    RecycleBinAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
+    LsaAnalyzer, NtfsTarget, PersistenceAnalyzer, PowerShellHistoryAnalyzer, PrefetchAnalyzer,
+    ProgramExecutionAnalyzer, RecycleBinAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer,
+    VssAnalyzer,
 };
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
@@ -273,6 +274,7 @@ fn main() -> Result<()> {
         Box::new(RecycleBinAnalyzer),
         Box::new(LnkAnalyzer),
         Box::new(JumpListAnalyzer),
+        Box::new(PowerShellHistoryAnalyzer),
     ];
 
     let mut keyword_bar = None;
