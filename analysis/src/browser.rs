@@ -155,7 +155,16 @@ fn process<R: std::io::Read + std::io::Seek>(
 ) {
     let data = match vol.read_file_by_record(record, path) {
         Ok(Some(f)) => f.data,
-        _ => return,
+        Ok(None) => {
+            out.warnings
+                .push(format!("{path}: Verlauf-Datei ohne Dateninhalt"));
+            return;
+        }
+        Err(e) => {
+            out.warnings
+                .push(format!("{path}: Verlauf-Datei nicht lesbar: {e}"));
+            return;
+        }
     };
     // Aktuelle Eintraege stehen oft in der WAL-Datei; diese (und -shm) mitlesen,
     // damit sie beim Oeffnen eingespielt werden.
@@ -171,6 +180,8 @@ fn process<R: std::io::Read + std::io::Seek>(
         .map(|f| f.data);
     match read_history(&data, wal.as_deref(), shm.as_deref(), query) {
         Ok(rows) => {
+            out.findings
+                .push(summary_finding(path, browser, rows.len(), wal.is_some()));
             for (url, title, unix) in rows {
                 let mut f = Finding::new("browser", url, path)
                     .with("art", "verlauf")
@@ -190,6 +201,21 @@ fn process<R: std::io::Read + std::io::Seek>(
             .warnings
             .push(format!("{path}: Verlauf nicht lesbar: {e}")),
     }
+}
+
+/// Fund über die geprüfte Verlauf-Datenbank. Wird auch bei 0 Einträgen
+/// erzeugt, damit im Bericht steht, dass die Datenbank gefunden und gelesen
+/// wurde.
+fn summary_finding(path: &str, browser: &str, rows: usize, has_wal: bool) -> Finding {
+    let mut f = Finding::new("browser", "Verlauf-Datenbank geprüft", path)
+        .with("art", "verlauf_db")
+        .with("browser", browser)
+        .with("eintraege", rows.to_string())
+        .with("wal", if has_wal { "ja" } else { "nein" });
+    if rows >= MAX_ROWS {
+        f = f.with("gekappt_bei", MAX_ROWS.to_string());
+    }
+    f
 }
 
 /// Schreibt die Datenbank-Bytes (samt WAL/SHM, falls vorhanden) in ein
@@ -352,6 +378,17 @@ mod tests {
         .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].2, Some(1_700_000_000));
+    }
+
+    #[test]
+    fn leere_datenbank_wird_gemeldet() {
+        let f = summary_finding("Users\\a\\History", "edge", 0, true);
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("verlauf_db"));
+        assert!(json.contains("\"eintraege\":\"0\""));
+        assert!(!json.contains("gekappt_bei"));
+        let voll = serde_json::to_string(&summary_finding("x", "chrome", MAX_ROWS, false)).unwrap();
+        assert!(voll.contains("gekappt_bei"));
     }
 
     #[test]
