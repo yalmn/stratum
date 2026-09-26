@@ -475,6 +475,7 @@ impl Analyzer for UserActivityAnalyzer {
                         word_wheel(&hive, user, &mut out);
                         recent_docs(&hive, user, &mut out);
                         last_visited_mru(&hive, user, &mut out);
+                        opensave_mru(&hive, user, &mut out);
                     }
                     Err(e) => out
                         .warnings
@@ -680,6 +681,117 @@ fn last_visited_mru(hive: &Hive, user: &str, out: &mut Outcome) {
     }
 }
 
+/// Öffnen-/Speichern-Dialog: `ComDlg32\OpenSavePidlMRU`. Je Endung ein
+/// Unterschlüssel, dessen Werte reine PIDLs (ITEMIDLIST) sind. Aus dem letzten
+/// Shell-Element wird der Dateiname gelesen.
+fn opensave_mru(hive: &Hive, user: &str, out: &mut Outcome) {
+    const PATH: &str =
+        "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\ComDlg32\\OpenSavePidlMRU";
+    let Ok(Some(root)) = hive.open_key(PATH) else {
+        return;
+    };
+    let Ok(exts) = root.subkeys() else { return };
+    for ext in exts {
+        let Ok(values) = ext.values() else { continue };
+        let zeit = ft_unix(ext.last_written());
+        for v in values {
+            if v.name().eq_ignore_ascii_case("MRUListEx") {
+                continue;
+            }
+            let Some(name) = pidl_last_name(v.data()) else {
+                continue;
+            };
+            let mut f = Finding::new(
+                "useraktivitaet",
+                name,
+                format!("HKCU {user}\\OpenSavePidlMRU\\{}", ext.name()),
+            )
+            .with("art", "dialog_datei")
+            .with("benutzer", user);
+            if let Some(z) = zeit {
+                f = f.with("key_letzte_aenderung_unix", z.to_string());
+            }
+            out.findings.push(f);
+        }
+    }
+}
+
+/// Liest den Dateinamen aus dem letzten Element einer PIDL (ITEMIDLIST). Bevorzugt
+/// den Unicode-Langnamen aus dem `0xBEEF0004`-Erweiterungsblock, sonst den
+/// ANSI-Namen des Shell-Elements. `None`, wenn nichts Brauchbares gefunden wird.
+fn pidl_last_name(pidl: &[u8]) -> Option<String> {
+    // SHITEMID-Kette ablaufen und das letzte nicht-leere Element behalten.
+    let mut pos = 0usize;
+    let mut last: Option<&[u8]> = None;
+    while pos + 2 <= pidl.len() {
+        let size = u16::from_le_bytes([pidl[pos], pidl[pos + 1]]) as usize;
+        if size < 2 {
+            break; // Abschluss (cb == 0)
+        }
+        let end = pos + size;
+        if end > pidl.len() {
+            break;
+        }
+        last = Some(&pidl[pos..end]);
+        pos = end;
+    }
+    let item = last?;
+
+    // Unicode-Langname aus dem BEEF0004-Block (Signatur 04 00 EF BE).
+    if let Some(name) = beef_long_name(item) {
+        return Some(name);
+    }
+    // Fallback: ANSI-Name eines Datei-/Ordner-Elements ab Offset 14.
+    if item.len() > 14 && matches!(item.get(2), Some(0x31 | 0x32 | 0xb1 | 0x35 | 0x36)) {
+        let ansi: Vec<u8> = item[14..].iter().copied().take_while(|&c| c != 0).collect();
+        if !ansi.is_empty() {
+            return Some(String::from_utf8_lossy(&ansi).into_owned());
+        }
+    }
+    None
+}
+
+/// Sucht im Shell-Element den `0xBEEF0004`-Block und liest daraus den ersten
+/// null-terminierten UTF-16LE-Namen (den Langnamen der Datei).
+fn beef_long_name(item: &[u8]) -> Option<String> {
+    let sig = [0x04, 0x00, 0xEF, 0xBE];
+    let mut p = None;
+    for i in 0..item.len().saturating_sub(4) {
+        if item[i..i + 4] == sig {
+            p = Some(i);
+            break;
+        }
+    }
+    let sig_pos = p?;
+    // Nach der Signatur folgen versionsabhängige Festfelder, dann der Unicode-
+    // Name. Ab der Signatur an geraden Offsets die erste plausible
+    // UTF-16-Zeichenkette suchen (Buchstabe, Ziffer oder Punkt am Anfang).
+    let after = sig_pos + 4;
+    let mut off = after;
+    while off + 2 <= item.len() {
+        let u = u16::from_le_bytes([item[off], item[off + 1]]);
+        let c = char::from_u32(u as u32);
+        let plausibel = c
+            .map(|c| c.is_alphanumeric() || matches!(c, '.' | '_' | '-' | '~' | ' '))
+            .unwrap_or(false);
+        if plausibel {
+            let units: Vec<u16> = item[off..]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&u| u != 0)
+                .collect();
+            if units.len() >= 2 {
+                let s = String::from_utf16_lossy(&units);
+                if s.chars().any(|c| c.is_alphanumeric()) {
+                    return Some(s);
+                }
+            }
+        }
+        off += 2;
+    }
+    None
+}
+
 /// Liest eine führende UTF-16LE-Zeichenkette (bis zur Doppel-Null) aus Rohdaten.
 fn utf16_prefix(data: &[u8]) -> String {
     let units: Vec<u16> = data
@@ -805,6 +917,56 @@ mod tests {
             f.attributes.get("befehl").map(String::as_str),
             Some("C:\\evil.exe")
         );
+    }
+
+    #[test]
+    fn pidl_langname_aus_beef() {
+        // Ein Datei-Shell-Element mit ANSI-Kurzname und BEEF0004-Langname.
+        let mut item = Vec::new();
+        let name_ansi = b"GEHEIM~1.DOC\0";
+        let long: Vec<u8> = "Geheim Bericht.docx"
+            .encode_utf16()
+            .chain([0])
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        // Kopf: size(2, spaeter), type=0x32, unbekannt, groesse, datum, zeit, attr
+        let mut body = vec![0x32, 0x00];
+        body.extend_from_slice(&0u32.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(&0u16.to_le_bytes());
+        body.extend_from_slice(name_ansi); // ANSI ab Offset 14
+                                           // BEEF0004-Block
+        body.extend_from_slice(&[0x2c, 0x00]); // BlockSize
+        body.extend_from_slice(&[0x09, 0x00]); // Version
+        body.extend_from_slice(&[0x04, 0x00, 0xEF, 0xBE]); // Signatur
+        body.extend_from_slice(&[0u8; 16]); // Festfelder (Datum etc.)
+        body.extend_from_slice(&long); // Unicode-Langname
+        let size = (body.len() + 2) as u16;
+        item.extend_from_slice(&size.to_le_bytes());
+        item.extend_from_slice(&body);
+        // PIDL: dieses Element + Abschluss (cb=0).
+        let mut pidl = item.clone();
+        pidl.extend_from_slice(&[0, 0]);
+
+        assert_eq!(
+            pidl_last_name(&pidl).as_deref(),
+            Some("Geheim Bericht.docx")
+        );
+    }
+
+    #[test]
+    fn pidl_ansi_fallback() {
+        // Element ohne BEEF-Block: ANSI-Name ab Offset 14 (Typ@2, Unbekannt@3,
+        // dann Groesse/Datum/Zeit/Attribute = 10 Byte, dann der Name).
+        let mut body = vec![0x32, 0x00];
+        body.extend_from_slice(&[0u8; 10]);
+        body.extend_from_slice(b"datei.txt\0");
+        let size = (body.len() + 2) as u16;
+        let mut pidl = size.to_le_bytes().to_vec();
+        pidl.extend_from_slice(&body);
+        pidl.extend_from_slice(&[0, 0]);
+        assert_eq!(pidl_last_name(&pidl).as_deref(), Some("datei.txt"));
     }
 
     #[test]
