@@ -77,6 +77,12 @@ struct Cli {
     /// (dann wird nur gesucht, wenn eine eigene Tabelle mit -k angegeben ist).
     #[arg(long)]
     no_default_keywords: bool,
+
+    /// Eine einzelne Datei aus dem Image extrahieren und beenden, ohne Analyse.
+    /// Zwei Werte: der NTFS-Pfad im Image und die Zieldatei.
+    /// Beispiel: --dump "Windows/System32/config/SAM" /tmp/SAM
+    #[arg(long, num_args = 2, value_names = ["NTFS_PFAD", "ZIEL"])]
+    dump: Option<Vec<String>>,
 }
 
 /// Mitgelieferte Standard-Begriffstabelle, in das Programm eingebaut.
@@ -87,6 +93,11 @@ fn main() -> Result<()> {
 
     let img = ImageReader::open(&cli.image)
         .with_context(|| format!("Image nicht lesbar: {}", cli.image.display()))?;
+
+    // Schnellmodus: eine Datei extrahieren und beenden (keine Analyse).
+    if let Some(d) = &cli.dump {
+        return run_dump(&img, cli.bdp.as_deref(), &d[0], std::path::Path::new(&d[1]));
+    }
 
     let mut warnings = Vec::new();
 
@@ -270,6 +281,54 @@ fn bytes_bar(len: u64, label: &str) -> ProgressBar {
         pb.set_style(style.progress_chars("=>-"));
     }
     pb
+}
+
+/// Extrahiert eine einzelne Datei aus dem Image und schreibt sie auf die Platte.
+fn run_dump(
+    img: &ImageReader,
+    bdp: Option<&std::path::Path>,
+    ntfs_path: &str,
+    out: &std::path::Path,
+) -> Result<()> {
+    let targets: Vec<NtfsTarget> = match bdp {
+        Some(p) => {
+            let b = bdp::load(p)?;
+            vec![NtfsTarget {
+                index: u32::MAX,
+                offset: b.offset_bytes,
+                size: b.size_bytes,
+            }]
+        }
+        None => scan_partitions(img)
+            .partitions
+            .iter()
+            .filter(|p| p.fs_hint == FsHint::Ntfs || p.typ == stratum_core::PartitionType::Volume)
+            .map(|p| NtfsTarget {
+                index: p.index,
+                offset: p.start_offset,
+                size: p.size_bytes,
+            })
+            .collect(),
+    };
+
+    for t in &targets {
+        let mut vol = match stratum_ntfs::NtfsVolume::open(img, t.offset, t.size) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Ok(Some(file)) = vol.read_file(ntfs_path) {
+            std::fs::write(out, &file.data)
+                .with_context(|| format!("Zieldatei nicht schreibbar: {}", out.display()))?;
+            eprintln!(
+                "[+] {} Bytes geschrieben: {} (aus Offset {})",
+                file.data.len(),
+                out.display(),
+                t.offset
+            );
+            return Ok(());
+        }
+    }
+    anyhow::bail!("Datei '{ntfs_path}' in keiner NTFS-Partition gefunden");
 }
 
 /// Baut den Keyword-Analyzer aus der mitgelieferten und den eigenen
