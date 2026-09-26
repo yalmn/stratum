@@ -474,6 +474,7 @@ impl Analyzer for UserActivityAnalyzer {
                         typed_paths(&hive, user, &mut out);
                         word_wheel(&hive, user, &mut out);
                         recent_docs(&hive, user, &mut out);
+                        last_visited_mru(&hive, user, &mut out);
                     }
                     Err(e) => out
                         .warnings
@@ -637,6 +638,40 @@ fn recent_docs(hive: &Hive, user: &str, out: &mut Outcome) {
             let mut f = Finding::new("useraktivitaet", name, format!("HKCU {user}\\{label}"))
                 .with("art", "recent_doc")
                 .with("benutzer", user);
+            if let Some(z) = zeit {
+                f = f.with("key_letzte_aenderung_unix", z.to_string());
+            }
+            out.findings.push(f);
+        }
+    }
+}
+
+/// Öffnen-/Speichern-Dialog: `ComDlg32\LastVisitedPidlMRU` (und die ältere
+/// `LastVisitedMRU`). Jeder Wert beginnt mit dem Namen des Programms, mit dem
+/// eine Datei geöffnet oder gespeichert wurde, als UTF-16LE.
+fn last_visited_mru(hive: &Hive, user: &str, out: &mut Outcome) {
+    for key_name in ["LastVisitedPidlMRU", "LastVisitedMRU"] {
+        let path = format!("{EXPLORER}\\ComDlg32\\{key_name}");
+        let Ok(Some(key)) = hive.open_key(&path) else {
+            continue;
+        };
+        let Ok(values) = key.values() else { continue };
+        let zeit = ft_unix(key.last_written());
+        for v in values {
+            if v.name().eq_ignore_ascii_case("MRUListEx") {
+                continue;
+            }
+            let prog = utf16_prefix(v.data());
+            if prog.is_empty() {
+                continue;
+            }
+            let mut f = Finding::new(
+                "useraktivitaet",
+                prog,
+                format!("HKCU {user}\\ComDlg32\\{key_name}"),
+            )
+            .with("art", "dialog_programm")
+            .with("benutzer", user);
             if let Some(z) = zeit {
                 f = f.with("key_letzte_aenderung_unix", z.to_string());
             }
