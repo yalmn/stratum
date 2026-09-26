@@ -99,6 +99,12 @@ struct Cli {
     /// hex), z. B. aus mimikatz oder impacket.
     #[arg(long, value_name = "HEX128")]
     dpapi_masterkey: Option<String>,
+
+    /// Firefox-Hauptpasswort, um gespeicherte Firefox-Passwörter zu
+    /// entschlüsseln. Ohne Angabe wird ein leeres Hauptpasswort angenommen (der
+    /// Normalfall).
+    #[arg(long, value_name = "PASSWORT")]
+    firefox_password: Option<String>,
 }
 
 /// Wandelt eine Hex-Zeichenkette fester Länge in Bytes; Fehler mit Kontext.
@@ -212,6 +218,7 @@ fn main() -> Result<()> {
     let dpapi = dpapi_from_cli(&cli)?;
     let mut ctx = AnalysisContext::build(&img, targets.clone());
     ctx.dpapi = dpapi;
+    ctx.firefox_password = cli.firefox_password.clone();
     warnings.extend(ctx.warnings.iter().cloned());
     if let Some(v) = ctx.volumes.first() {
         eprintln!("[+] Pfad-Index: {} Dateien", v.files.len());

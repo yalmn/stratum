@@ -21,6 +21,7 @@
 mod crypto;
 pub mod dpapi;
 mod lsa;
+pub mod nss;
 mod sam;
 
 use serde::Serialize;

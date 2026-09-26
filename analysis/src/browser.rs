@@ -8,14 +8,16 @@
 //! Gespeicherte Passwörter (Chromium `Login Data`) sind mit DPAPI und AES-GCM
 //! verschlüsselt. Wird ein Benutzergeheimnis übergeben (siehe [`DpapiInput`]),
 //! entschlüsselt das Modul sie über [`stratum_creds::dpapi`]; ohne Geheimnis
-//! bleibt es bei Anzahl und Hinweis. Firefox (`logins.json` über key4.db) folgt
-//! einem anderen Verfahren und bleibt einer späteren Stufe vorbehalten.
+//! bleibt es bei Anzahl und Hinweis. Firefox-Passwörter (`logins.json` über
+//! `key4.db`) werden über [`stratum_creds::nss`] entschlüsselt; ohne gesetztes
+//! Hauptpasswort (der Normalfall) genügt der Standardweg, sonst per
+//! `firefox_password`.
 
 use rusqlite::{Connection, OpenFlags};
 
 use stratum_ntfs::NtfsVolume;
 
-use crate::{AnalysisContext, Analyzer, DpapiInput, Finding, FsIndex, Outcome};
+use crate::{AnalysisContext, Analyzer, DpapiInput, FileEntry, Finding, FsIndex, Outcome};
 
 /// Obergrenze für Verlaufseinträge je Datenbank.
 const MAX_ROWS: usize = 20_000;
@@ -141,24 +143,9 @@ impl Analyzer for BrowserAnalyzer {
                     ));
                 }
             }
+            let firefox_pw = ctx.firefox_password.as_deref().unwrap_or("");
             for e in v.by_name("logins.json") {
-                if let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) {
-                    let n = f
-                        .data
-                        .windows(r#""encryptedUsername""#.len())
-                        .filter(|w| w == br#""encryptedUsername""#)
-                        .count();
-                    out.findings.push(
-                        Finding::new("browser", "gespeicherte Zugangsdaten", &e.path)
-                            .with("art", "passwoerter")
-                            .with("browser", "firefox")
-                            .with("anzahl", n.to_string())
-                            .with(
-                                "hinweis",
-                                "verschluesselt (key4.db), Hauptpasswort/Schluessel noetig",
-                            ),
-                    );
-                }
+                firefox_logins(&mut vol, v, e, firefox_pw, &mut out);
             }
         }
         out
@@ -322,6 +309,151 @@ fn chromium_keys<R: std::io::Read + std::io::Seek>(
         }
     }
     keys
+}
+
+/// Ein Firefox-Login-Eintrag aus `logins.json`.
+#[derive(serde::Deserialize)]
+struct FirefoxLogin {
+    hostname: Option<String>,
+    #[serde(rename = "encryptedUsername")]
+    encrypted_username: Option<String>,
+    #[serde(rename = "encryptedPassword")]
+    encrypted_password: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct FirefoxLogins {
+    logins: Vec<FirefoxLogin>,
+}
+
+/// Liest den Master-Schlüssel aus einer `key4.db` (als Bytes) mit dem
+/// Hauptpasswort.
+fn firefox_master_key(key4db: &[u8], primary_pw: &str) -> Result<Vec<u8>, String> {
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let path = dir.path().join("key4.db");
+    std::fs::write(&path, key4db).map_err(|e| e.to_string())?;
+    let uri = format!("file:{}?immutable=1", path.display());
+    let conn = rusqlite::Connection::open_with_flags(
+        uri,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| e.to_string())?;
+    let (global_salt, item2): (Vec<u8>, Vec<u8>) = conn
+        .query_row(
+            "SELECT item1, item2 FROM metaData WHERE id = 'password'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let a11: Vec<u8> = conn
+        .query_row(
+            "SELECT a11 FROM nssPrivate WHERE a102 = ?1",
+            [stratum_creds::nss::CKA_ID.as_slice()],
+            |r| r.get(0),
+        )
+        .map_err(|e| e.to_string())?;
+    stratum_creds::nss::master_key(&global_salt, &item2, &a11, primary_pw)
+        .map_err(|e| e.to_string())
+}
+
+/// Wertet ein Firefox-`logins.json` aus: liest die zugehörige `key4.db` im selben
+/// Profilordner, leitet den Master-Schlüssel ab und entschlüsselt die Einträge.
+fn firefox_logins<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
+    v: &FsIndex,
+    entry: &FileEntry,
+    primary_pw: &str,
+    out: &mut Outcome,
+) {
+    let Ok(Some(f)) = vol.read_file_by_record(entry.mft_record, &entry.path) else {
+        return;
+    };
+    let Ok(parsed) = serde_json::from_slice::<FirefoxLogins>(&f.data) else {
+        return;
+    };
+    let anzahl = parsed.logins.len();
+
+    // key4.db im selben Profilordner suchen.
+    let dir = entry.path.rsplit_once('\\').map(|(d, _)| d).unwrap_or("");
+    let key4 = v
+        .by_name("key4.db")
+        .find(|k| k.path.rsplit_once('\\').map(|(d, _)| d).unwrap_or("") == dir);
+    let master = key4.and_then(|k| {
+        vol.read_file_by_record(k.mft_record, &k.path)
+            .ok()
+            .flatten()
+            .map(|kf| firefox_master_key(&kf.data, primary_pw))
+    });
+
+    let master = match master {
+        Some(Ok(m)) => m,
+        other => {
+            // Kein Master-Schlüssel: nur Bestandsaufnahme.
+            let hinweis = match other {
+                Some(Err(e)) if e.contains("Hauptpasswort") => {
+                    "verschluesselt (key4.db), Hauptpasswort noetig"
+                }
+                Some(Err(_)) => "verschluesselt (key4.db), Schluessel nicht ableitbar",
+                None => "verschluesselt (key4.db), key4.db nicht gefunden",
+                _ => unreachable!(),
+            };
+            out.findings.push(
+                Finding::new("browser", "gespeicherte Zugangsdaten", &entry.path)
+                    .with("art", "passwoerter")
+                    .with("browser", "firefox")
+                    .with("anzahl", anzahl.to_string())
+                    .with("hinweis", hinweis),
+            );
+            return;
+        }
+    };
+
+    out.findings.push(
+        Finding::new("browser", "gespeicherte Zugangsdaten", &entry.path)
+            .with("art", "passwoerter")
+            .with("browser", "firefox")
+            .with("anzahl", anzahl.to_string())
+            .with(
+                "hinweis",
+                "verschluesselt (key4.db), Entschluesselung versucht",
+            ),
+    );
+
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let mut entschluesselt = 0usize;
+    for login in &parsed.logins {
+        let (Some(u), Some(p)) = (&login.encrypted_username, &login.encrypted_password) else {
+            continue;
+        };
+        let (Ok(ub), Ok(pb)) = (b64.decode(u), b64.decode(p)) else {
+            continue;
+        };
+        let (Ok(user), Ok(pass)) = (
+            stratum_creds::nss::decrypt_login(&ub, &master),
+            stratum_creds::nss::decrypt_login(&pb, &master),
+        ) else {
+            continue;
+        };
+        entschluesselt += 1;
+        let mut fd = Finding::new("browser", "gespeichertes Passwort", &entry.path)
+            .with("art", "passwort_klartext")
+            .with("browser", "firefox")
+            .with("url", login.hostname.clone().unwrap_or_default())
+            .with("passwort", pass);
+        if !user.is_empty() {
+            fd = fd.with("benutzername", user);
+        }
+        out.findings.push(fd);
+    }
+    if entschluesselt < anzahl {
+        out.warnings.push(format!(
+            "{}: {} von {} Firefox-Passwoertern nicht entschluesselbar",
+            entry.path,
+            anzahl - entschluesselt,
+            anzahl
+        ));
+    }
 }
 
 #[derive(Clone, Copy)]

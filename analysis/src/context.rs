@@ -48,6 +48,8 @@ pub struct AnalysisContext<'a> {
     pub warnings: Vec<String>,
     /// Optionales Geheimnis zum Entschlüsseln benutzergebundener DPAPI-Daten.
     pub dpapi: Option<DpapiInput>,
+    /// Firefox-Hauptpasswort (leer, falls keins gesetzt ist).
+    pub firefox_password: Option<String>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -61,6 +63,7 @@ impl<'a> AnalysisContext<'a> {
             volumes: Vec::new(),
             warnings: Vec::new(),
             dpapi: None,
+            firefox_password: None,
         }
     }
 
@@ -92,6 +95,7 @@ impl<'a> AnalysisContext<'a> {
             volumes,
             warnings,
             dpapi: None,
+            firefox_password: None,
         }
     }
 }

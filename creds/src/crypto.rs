@@ -152,6 +152,27 @@ pub fn aes128_cbc_encrypt(key: &[u8; 16], iv: &[u8; 16], data: &[u8]) -> Vec<u8>
         .collect()
 }
 
+/// 3DES (EDE3) im CBC-Modus, entschlüsselt ganze Blöcke ohne Padding.
+pub fn tdes_cbc_decrypt(key: &[u8; 24], iv: &[u8; 8], data: &[u8]) -> Vec<u8> {
+    use cbc::cipher::consts::U24;
+    use des::TdesEde3;
+    let mut dec =
+        cbc::Decryptor::<TdesEde3>::new(&Array::<u8, U24>::from(*key), &Array::<u8, U8>::from(*iv));
+    let mut blocks: Vec<Array<u8, U8>> = data
+        .chunks_exact(8)
+        .map(|c| {
+            let mut a = Array::<u8, U8>::default();
+            a.copy_from_slice(c);
+            a
+        })
+        .collect();
+    dec.decrypt_blocks(&mut blocks);
+    blocks
+        .iter()
+        .flat_map(|b| b.as_slice().iter().copied())
+        .collect()
+}
+
 /// AES-256 im CBC-Modus, entschlüsselt ganze Blöcke ohne Padding.
 pub fn aes256_cbc_decrypt(key: &[u8; 32], iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
     let mut dec =
