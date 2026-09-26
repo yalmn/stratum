@@ -23,6 +23,10 @@ pub enum LsaError {
     /// Eine LSA-Struktur ist zu kurz.
     #[error("LSA-Struktur zu kurz")]
     TooShort,
+    /// Der entschlüsselte PolEKList-Inhalt ist unplausibel (falscher Bootkey
+    /// oder beschädigter Hive).
+    #[error("PolEKList nicht entschlüsselbar (Bootkey passt nicht)")]
+    BadKey,
 }
 
 /// Ein entschlüsseltes LSA-Secret.
@@ -43,7 +47,18 @@ pub fn lsa_key(security: &Hive, bootkey: &[u8; 16]) -> Result<[u8; 32], LsaError
         .and_then(|k| k.value("").ok().flatten())
         .ok_or(LsaError::NoPolEkList)?;
     let enc = &pol.data()[28..]; // EncryptedData ab Offset 28 der LSA_SECRET-Struktur
-    let plain = decrypt_secret(enc, bootkey_as_key(bootkey))?;
+                                 // Der Bootkey geht mit seinen 16 Byte in die Ableitung, ohne Auffüllen.
+    let plain = decrypt_secret(enc, bootkey)?;
+    // Plausibilität: Mit falschem Bootkey steht im Längenfeld Zufall. Ohne
+    // diese Prüfung entstünde ein unbrauchbarer Schlüssel und alle Secrets
+    // fielen stillschweigend weg.
+    let len = plain
+        .get(0..4)
+        .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]) as usize)
+        .ok_or(LsaError::TooShort)?;
+    if len < 84 || len > plain.len().saturating_sub(16) {
+        return Err(LsaError::BadKey);
+    }
     // LSA_SECRET_BLOB: Length(4) Unknown(12) Secret(:). Der LSA-Schluessel liegt
     // in Secret ab Offset 52 (also plainText[68..100]).
     let key = plain.get(68..100).ok_or(LsaError::TooShort)?;
@@ -73,7 +88,7 @@ pub fn secrets(security: &Hive, lsa_key: &[u8; 32]) -> Vec<Secret> {
         if data.len() < 32 {
             continue;
         }
-        if let Ok(plain) = decrypt_secret(&data[28..], *lsa_key) {
+        if let Ok(plain) = decrypt_secret(&data[28..], lsa_key) {
             // Der eigentliche Wert steht in der LSA_SECRET_BLOB ab Offset 16,
             // seine Laenge im Length-Feld.
             if let Some(value) = blob_secret(&plain) {
@@ -153,12 +168,13 @@ pub fn cached_logons(security: &Hive, nklm: &[u8]) -> Vec<CachedLogon> {
 
 /// AES-Entschlüsselung einer LSA_SECRET-EncryptedData mit dem Schema
 /// `tmpKey = SHA256(key, enc[0..32], 1000x)`, dann AES-256 (ECB-artig) über
-/// `enc[32..]`.
-fn decrypt_secret(enc: &[u8], key: [u8; 32]) -> Result<Vec<u8>, LsaError> {
+/// `enc[32..]`. `key` ist der Bootkey (16 Byte) oder der LSA-Schlüssel
+/// (32 Byte) und wird in seiner tatsächlichen Länge gehasht.
+fn decrypt_secret(enc: &[u8], key: &[u8]) -> Result<Vec<u8>, LsaError> {
     if enc.len() < 32 {
         return Err(LsaError::TooShort);
     }
-    let tmp = sha256_rounds(&key, &enc[..32], 1000);
+    let tmp = sha256_rounds(key, &enc[..32], 1000);
     Ok(aes256_ecb_decrypt(&tmp, &enc[32..]))
 }
 
@@ -167,15 +183,6 @@ fn blob_secret(plain: &[u8]) -> Option<Vec<u8>> {
     let len = u32::from_le_bytes(plain.get(0..4)?.try_into().ok()?) as usize;
     let secret = plain.get(16..16 + len)?;
     Some(secret.to_vec())
-}
-
-/// Der 16-Byte-Bootkey wird für die erste SHA-256-Ableitung auf 32 Byte
-/// erweitert, indem er verwendet wird, wie Impacket ihn übergibt (nur die
-/// ersten 16 Byte zählen; die Ableitung nutzt ihn als Schlüssel-Präfix).
-fn bootkey_as_key(bootkey: &[u8; 16]) -> [u8; 32] {
-    let mut k = [0u8; 32];
-    k[..16].copy_from_slice(bootkey);
-    k
 }
 
 #[cfg(test)]
@@ -196,9 +203,7 @@ mod tests {
             blob.push(0);
         }
         let salt = [0x11u8; 32];
-        let mut key32 = [0u8; 32];
-        key32[..16].copy_from_slice(bootkey);
-        let tmp = sha256_rounds(&key32, &salt, 1000);
+        let tmp = sha256_rounds(bootkey, &salt, 1000);
         let enc = aes256_ecb_encrypt(&tmp, &blob);
         // LSA_SECRET: 28 Byte Kopf + salt(32) + enc.
         let mut out = vec![0u8; 28];
@@ -213,19 +218,14 @@ mod tests {
         let target = [0x42u8; 32];
         let pol = build_poleklist(&bootkey, &target);
         // decrypt_secret + Offset 68..100 muss den Zielschluessel liefern.
-        let key32 = {
-            let mut k = [0u8; 32];
-            k[..16].copy_from_slice(&bootkey);
-            k
-        };
-        let plain = decrypt_secret(&pol[28..], key32).unwrap();
+        let plain = decrypt_secret(&pol[28..], &bootkey).unwrap();
         assert_eq!(&plain[68..100], &target);
     }
 
     #[test]
     fn zu_kurz() {
         assert!(matches!(
-            decrypt_secret(&[0u8; 10], [0; 32]),
+            decrypt_secret(&[0u8; 10], &[0; 32]),
             Err(LsaError::TooShort)
         ));
     }

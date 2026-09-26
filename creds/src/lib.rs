@@ -178,7 +178,9 @@ mod builder;
 mod tests {
     use super::*;
     use crate::builder::HiveBuilder;
-    use crate::crypto::{aes128_cbc_encrypt, des_encrypt_block, sid_to_keys};
+    use crate::crypto::{
+        aes128_cbc_encrypt, aes256_ecb_encrypt, des_encrypt_block, sha256_rounds, sid_to_keys,
+    };
 
     const REG_DWORD: u32 = 4;
     const REG_BINARY: u32 = 3;
@@ -326,6 +328,75 @@ mod tests {
         assert_eq!(alice.username, "alice");
         assert!(alice.has_password);
         assert_eq!(alice.nt_hash, "31d6cfe0d16ae931b73c59d7e0c089c0");
+    }
+
+    /// Verschlüsselt einen Wert als LSA_SECRET, wie Windows ihn ablegt:
+    /// 28 Byte Kopf, 32 Byte Salz, dann AES-256 über den LSA_SECRET_BLOB.
+    fn lsa_secret(key: &[u8], payload: &[u8]) -> Vec<u8> {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&[0u8; 12]);
+        blob.extend_from_slice(payload);
+        while !blob.len().is_multiple_of(16) {
+            blob.push(0);
+        }
+        let salt = [0x37u8; 32];
+        let tmp = sha256_rounds(key, &salt, 1000);
+        let mut out = vec![0u8; 28];
+        out.extend_from_slice(&salt);
+        out.extend_from_slice(&aes256_ecb_encrypt(&tmp, &blob));
+        out
+    }
+
+    /// SECURITY-Hive mit PolEKList (LSA-Schlüssel mit dem Bootkey
+    /// verschlüsselt) und einem Secret `DPAPI_SYSTEM`.
+    fn build_security(bootkey: &[u8; 16], lsa_key: &[u8; 32], secret: &[u8]) -> Vec<u8> {
+        // Im PolEKList-Blob liegt der LSA-Schlüssel bei Secret[52..84].
+        let mut pol_payload = vec![0u8; 84];
+        pol_payload[52..84].copy_from_slice(lsa_key);
+
+        let mut b = HiveBuilder::new();
+        let pol_val = b.vk("", REG_BINARY, &lsa_secret(bootkey, &pol_payload));
+        let pol = b.key("PolEKList", None, &[pol_val]);
+        let cur_val = b.vk("", REG_BINARY, &lsa_secret(lsa_key, secret));
+        let curr = b.key("CurrVal", None, &[cur_val]);
+        let curr_list = b.lh(&[curr]);
+        let dpapi = b.key_with_list("DPAPI_SYSTEM", curr_list, 1, &[]);
+        let sec_list = b.lh(&[dpapi]);
+        let secrets = b.key_with_list("Secrets", sec_list, 1, &[]);
+        let policy_list = b.lh(&[pol, secrets]);
+        let policy = b.key_with_list("Policy", policy_list, 2, &[]);
+        let root_list = b.lh(&[policy]);
+        let root = b.key_with_list("ROOT", root_list, 1, &[]);
+        b.finish(root)
+    }
+
+    #[test]
+    fn lsa_secret_ende_zu_ende() {
+        let bootkey: [u8; 16] = std::array::from_fn(|i| i as u8 + 1);
+        let lsa_key = [0xa5u8; 32];
+        let wert = b"\x01\x00\x00\x00geheimer-dpapi-wert";
+        let system = build_system(&bootkey);
+        let security = build_security(&bootkey, &lsa_key, wert);
+        let secrets = extract_lsa_secrets(
+            &Hive::parse(&system).unwrap(),
+            &Hive::parse(&security).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(secrets.len(), 1);
+        assert_eq!(secrets[0].name, "DPAPI_SYSTEM");
+        assert_eq!(secrets[0].value, wert);
+    }
+
+    #[test]
+    fn falscher_bootkey_meldet_fehler_statt_leerer_liste() {
+        let system = build_system(&[0x11u8; 16]);
+        let security = build_security(&[0x22u8; 16], &[0xa5u8; 32], b"x");
+        let r = extract_lsa_secrets(
+            &Hive::parse(&system).unwrap(),
+            &Hive::parse(&security).unwrap(),
+        );
+        assert!(matches!(r, Err(CredsError::Missing(_))));
     }
 
     #[test]
