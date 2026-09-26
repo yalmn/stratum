@@ -16,6 +16,7 @@
 #![warn(missing_docs)]
 
 mod error;
+pub mod lznt1;
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -335,6 +336,9 @@ enum RunPlan {
     /// Nicht-residente Läufe: (physischer Offset im Volume, belegte Länge).
     /// `None` als Offset bedeutet einen spärlichen Lauf (mit Nullen zu füllen).
     Runs(Vec<(Option<u64>, u64)>),
+    /// Nicht-residente Läufe eines NTFS-komprimierten Stroms (LZNT1). Werden
+    /// einheitenweise entpackt statt roh zusammengesetzt.
+    CompressedRuns(Vec<(Option<u64>, u64)>),
     /// Residente Daten: (physischer Offset, Länge).
     Resident(u64, u64),
     /// Rückfall auf den eingebauten Leser (nur seltene Restfälle).
@@ -402,14 +406,19 @@ fn read_data<R: Read + Seek>(
                 if debug {
                     let sparse = runs.iter().filter(|(p, _)| p.is_none()).count();
                     eprintln!(
-                        "[stratum] $DATA nicht-resident: {} Lauf/Laeufe ({sparse} spaerlich), {file_size} Bytes",
+                        "[stratum] $DATA nicht-resident{}: {} Lauf/Laeufe ({sparse} spaerlich), {file_size} Bytes",
+                        if compressed { " (LZNT1)" } else { "" },
                         runs.len()
                     );
                     for (i, (pos, len)) in runs.iter().enumerate() {
                         eprintln!("[stratum]   Lauf {i}: pos={pos:?} len={len}");
                     }
                 }
-                RunPlan::Runs(runs)
+                if compressed {
+                    RunPlan::CompressedRuns(runs)
+                } else {
+                    RunPlan::Runs(runs)
+                }
             }
             NtfsAttributeValue::Resident(ref res) => match res.data_position().value() {
                 Some(p) => {
@@ -425,11 +434,16 @@ fn read_data<R: Read + Seek>(
                 let runs = collect_attribute_list_runs(ntfs, fs, file)?;
                 if debug {
                     eprintln!(
-                        "[stratum] $DATA ueber Attributliste: {} Lauf/Laeufe, {file_size} Bytes",
+                        "[stratum] $DATA ueber Attributliste{}: {} Lauf/Laeufe, {file_size} Bytes",
+                        if compressed { " (LZNT1)" } else { "" },
                         runs.len()
                     );
                 }
-                RunPlan::Runs(runs)
+                if compressed {
+                    RunPlan::CompressedRuns(runs)
+                } else {
+                    RunPlan::Runs(runs)
+                }
             }
         }
     };
@@ -465,6 +479,9 @@ fn read_data<R: Read + Seek>(
             }
             buf.truncate(cap);
         }
+        RunPlan::CompressedRuns(runs) => {
+            buf = assemble_compressed(&runs, fs, u64::from(ntfs.cluster_size()), file_size)?;
+        }
         RunPlan::Resident(p, len) => {
             let len = usize::try_from(len).unwrap_or(0);
             buf.resize(len, 0);
@@ -478,6 +495,92 @@ fn read_data<R: Read + Seek>(
         }
     }
     Ok(buf)
+}
+
+/// Setzt einen NTFS-komprimierten (LZNT1) `$DATA`-Strom aus seinen Datenläufen
+/// zusammen und entpackt ihn.
+///
+/// NTFS komprimiert in Einheiten zu 16 Clustern. Innerhalb einer Einheit liegen
+/// die belegten (komprimierten) Cluster vorn, die durch die Kompression
+/// eingesparten Cluster als spärlicher Lauf dahinter. Eine vollständig belegte
+/// Einheit ist unkomprimiert abgelegt (roh übernehmen), eine vollständig
+/// spärliche Einheit ist eine reine Nullfolge, sonst wird sie mit LZNT1
+/// entpackt. Die Zuordnung der Läufe zu Einheiten erfolgt über die logische
+/// Position (VCN), da ein Lauf Einheitengrenzen überspannen kann.
+fn assemble_compressed<R: Read + Seek>(
+    runs: &[(Option<u64>, u64)],
+    fs: &mut R,
+    cluster_size: u64,
+    file_size: u64,
+) -> Result<Vec<u8>, NtfsVolumeError> {
+    // NTFS-Kompressionseinheit = 16 Cluster (einziger von NTFS genutzte Wert;
+    // Kompression ist nur bei Clustergröße bis 4 KiB zulässig).
+    let cu_size = cluster_size.saturating_mul(16);
+    if cu_size == 0 {
+        return Ok(Vec::new());
+    }
+
+    let allocated: u64 = runs.iter().map(|(_, len)| *len).sum();
+    let alloc_usize = usize::try_from(allocated).unwrap_or(0);
+    let mut raw = vec![0u8; alloc_usize];
+    let num_units = allocated.div_ceil(cu_size) as usize;
+    let mut real_per_unit = vec![0u64; num_units];
+
+    // Rohpuffer der allozierten Daten füllen und je Einheit die Zahl belegter
+    // (nicht spärlicher) Bytes zählen.
+    let mut off: u64 = 0;
+    for (pos, len) in runs {
+        let len = *len;
+        if let Some(p) = pos {
+            let start = usize::try_from(off).unwrap_or(0);
+            let n = usize::try_from(len).unwrap_or(0);
+            if start.saturating_add(n) <= raw.len() && fs.seek(SeekFrom::Start(*p)).is_ok() {
+                let _ = fs.read_exact(&mut raw[start..start + n]);
+            }
+            let mut b = off;
+            let e = off + len;
+            while b < e {
+                let u = (b / cu_size) as usize;
+                let unit_end = (b / cu_size + 1) * cu_size;
+                let take = e.min(unit_end) - b;
+                if let Some(slot) = real_per_unit.get_mut(u) {
+                    *slot += take;
+                }
+                b += take;
+            }
+        }
+        off += len;
+    }
+
+    let cap = usize::try_from(file_size).unwrap_or(0);
+    let mut out = Vec::with_capacity(cap);
+    for (u, &real) in real_per_unit.iter().enumerate() {
+        let start = u as u64 * cu_size;
+        let this = cu_size.min(allocated - start);
+        let s = usize::try_from(start).unwrap_or(0);
+        let t = usize::try_from(this).unwrap_or(0);
+        let unit_raw = &raw[s..s + t];
+
+        if real == 0 {
+            // Vollständig spärliche Einheit: reine Nullfolge.
+            out.resize(out.len() + t, 0);
+        } else if real >= this {
+            // Vollständig belegt: unkomprimiert abgelegt, roh übernehmen.
+            out.extend_from_slice(unit_raw);
+        } else {
+            // Komprimierte Einheit: nur die belegten Bytes entpacken.
+            let r = usize::try_from(real).unwrap_or(0);
+            let before = out.len();
+            lznt1::decompress(&unit_raw[..r], &mut out)?;
+            // Nicht-letzte Einheiten müssen exakt eine Einheitenlänge liefern;
+            // bei Abweichung (defensiv gegen fehlerhafte Daten) angleichen.
+            if u + 1 < num_units && out.len() - before != t {
+                out.resize(before + t, 0);
+            }
+        }
+    }
+    out.truncate(cap);
+    Ok(out)
 }
 
 /// Sammelt die Datenläufe eines über eine Attributliste verteilten
