@@ -294,10 +294,77 @@ impl Analyzer for UsbAnalyzer {
                     );
                 }
             }
+            mounted_devices(&hive, &mut out);
+            for (user, ubytes) in &inst.ntuser {
+                if let Ok(uhive) = Hive::parse(ubytes) {
+                    mount_points2(&uhive, user, &mut out);
+                }
+            }
             out.tag_origin(before, &inst.origin);
         }
         out
     }
+}
+
+/// `MountedDevices` (SYSTEM-Wurzel): ordnet Laufwerksbuchstaben und Volumes den
+/// Geräten zu. Für Wechseldatenträger enthält der Wert eine Textreferenz auf das
+/// USBSTOR-Gerät; nur solche werden gemeldet (Festplatten sind reine Signaturen).
+fn mounted_devices(hive: &Hive, out: &mut Outcome) {
+    let Ok(Some(key)) = hive.open_key("MountedDevices") else {
+        return;
+    };
+    let Ok(values) = key.values() else { return };
+    for v in values {
+        let text = utf16_prefix_lossy(v.data());
+        let up = text.to_ascii_uppercase();
+        if !(up.contains("USBSTOR") || up.contains("USB#")) {
+            continue;
+        }
+        out.findings.push(
+            Finding::new("usb", v.name(), "SYSTEM\\MountedDevices")
+                .with("art", "mounted_device")
+                .with(
+                    "geraet",
+                    text.trim_matches(|c: char| c.is_control()).to_string(),
+                ),
+        );
+    }
+}
+
+/// `MountPoints2` (NTUSER): Volumes und Netzlaufwerke, die der Benutzer
+/// eingebunden hat. Die Unterschlüsselnamen sind Volume-GUIDs, Laufwerks-
+/// buchstaben oder `##server#share`; die Änderungszeit gibt den letzten Zugriff.
+fn mount_points2(hive: &Hive, user: &str, out: &mut Outcome) {
+    const PATH: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\MountPoints2";
+    let Ok(Some(key)) = hive.open_key(PATH) else {
+        return;
+    };
+    let Ok(subs) = key.subkeys() else { return };
+    for s in subs {
+        let name = s.name();
+        // CPC/Steuer-Unterschlüssel überspringen.
+        if name.eq_ignore_ascii_case("CPC") || name.is_empty() {
+            continue;
+        }
+        let mut f = Finding::new("usb", name, format!("HKCU {user}\\MountPoints2"))
+            .with("art", "mount_point")
+            .with("benutzer", user);
+        if let Some(z) = ft_unix(s.last_written()) {
+            f = f.with("letzter_zugriff_unix", z.to_string());
+        }
+        out.findings.push(f);
+    }
+}
+
+/// Wie [`utf16_prefix`], aber ersetzt keine Datenreste und liefert auch bei
+/// eingebetteten Nullen brauchbaren Text (für MountedDevices-Werte).
+fn utf16_prefix_lossy(data: &[u8]) -> String {
+    let units: Vec<u16> = data
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .filter(|&u| u != 0)
+        .collect();
+    String::from_utf16_lossy(&units)
 }
 
 // Programmausführung: BAM/DAM
