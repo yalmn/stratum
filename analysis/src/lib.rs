@@ -15,6 +15,7 @@
 
 mod browser;
 mod context;
+mod dpapi;
 mod eventlog;
 mod finding;
 mod fsindex;
@@ -35,6 +36,7 @@ mod builder;
 
 pub use browser::BrowserAnalyzer;
 pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
+pub use dpapi::DpapiAnalyzer;
 pub use eventlog::EventLogAnalyzer;
 pub use finding::Finding;
 pub use fsindex::{FileEntry, FsIndex};

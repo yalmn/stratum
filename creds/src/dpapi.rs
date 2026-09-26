@@ -109,12 +109,26 @@ pub fn masterkey_file_guid(file: &[u8]) -> Result<String, DpapiError> {
 }
 
 /// Entschlüsselt den Masterkey aus einer MasterKeyFile mit Passwort-Hash und
-/// SID. Liefert die 64 Byte des Masterkeys.
+/// SID (benutzergebundener Pfad). Liefert die 64 Byte des Masterkeys.
 pub fn decrypt_masterkey(
     file: &[u8],
     sid: &str,
     pwd_sha1: &[u8; 20],
 ) -> Result<[u8; 64], DpapiError> {
+    decrypt_masterkey_with_prekey(file, &prekey(pwd_sha1, sid))
+}
+
+/// Entschlüsselt einen System-Masterkey mit einem der beiden 20-Byte-Schlüssel
+/// aus `DPAPI_SYSTEM` (Maschinen- oder Benutzerschlüssel). System-Masterkeys
+/// liegen unter `Windows\System32\Microsoft\Protect\S-1-5-18` und brauchen kein
+/// Benutzerpasswort; der Schlüssel ist der Vorschlüssel selbst.
+pub fn decrypt_system_masterkey(file: &[u8], key: &[u8; 20]) -> Result<[u8; 64], DpapiError> {
+    decrypt_masterkey_with_prekey(file, key)
+}
+
+/// Gemeinsamer Kern: entschlüsselt den Masterkey einer MasterKeyFile mit einem
+/// bereits abgeleiteten 20-Byte-Vorschlüssel.
+fn decrypt_masterkey_with_prekey(file: &[u8], pre: &[u8; 20]) -> Result<[u8; 64], DpapiError> {
     let mk_len = le_u64(file, 100).ok_or(DpapiError::TooShort("Masterkey-Längen"))? as usize;
     let blob = file
         .get(MK_HEADER..MK_HEADER + mk_len)
@@ -138,12 +152,10 @@ pub fn decrypt_masterkey(
         });
     }
 
-    let pre = prekey(pwd_sha1, sid);
-
     // PBKDF2-HMAC-SHA512 über den Vorschlüssel, Salt = Masterkey-Salt.
     // 32 Byte AES-Schlüssel + 16 Byte IV.
     let mut derived = [0u8; 48];
-    pbkdf2::pbkdf2_hmac::<Sha512>(&pre, salt, rounds, &mut derived);
+    pbkdf2::pbkdf2_hmac::<Sha512>(pre, salt, rounds, &mut derived);
     let aes_key: [u8; 32] = derived[..32].try_into().unwrap();
     let iv: [u8; 16] = derived[32..48].try_into().unwrap();
 
@@ -159,7 +171,7 @@ pub fn decrypt_masterkey(
     let key = &plain[plain.len() - 64..];
 
     // Prüf-HMAC: encKey = HMAC-SHA512(pre, hmacSalt); erwartet = HMAC-SHA512(encKey, key).
-    let mut m1 = Hmac::<Sha512>::new_from_slice(&pre).expect("HMAC-Schlüssel");
+    let mut m1 = Hmac::<Sha512>::new_from_slice(pre).expect("HMAC-Schlüssel");
     m1.update(hmac_salt);
     let enc_key = m1.finalize().into_bytes();
     let mut m2 = Hmac::<Sha512>::new_from_slice(&enc_key).expect("HMAC-Schlüssel");
@@ -310,15 +322,13 @@ mod tests {
     // Produktionspfad).
     fn build_masterkey_file(
         masterkey: &[u8; 64],
-        sid: &str,
-        pwd_sha1: &[u8; 20],
+        pre: &[u8; 20],
         salt: &[u8; 16],
         rounds: u32,
     ) -> Vec<u8> {
-        let pre = prekey(pwd_sha1, sid);
         // Prüf-HMAC über hmacSalt und Masterkey.
         let hmac_salt = [0x22u8; 16];
-        let mut m1 = Hmac::<Sha512>::new_from_slice(&pre).unwrap();
+        let mut m1 = Hmac::<Sha512>::new_from_slice(pre).unwrap();
         m1.update(&hmac_salt);
         let enc_key = m1.finalize().into_bytes();
         let mut m2 = Hmac::<Sha512>::new_from_slice(&enc_key).unwrap();
@@ -334,7 +344,7 @@ mod tests {
         }
 
         let mut derived = [0u8; 48];
-        pbkdf2::pbkdf2_hmac::<Sha512>(&pre, salt, rounds, &mut derived);
+        pbkdf2::pbkdf2_hmac::<Sha512>(pre, salt, rounds, &mut derived);
         let aes_key: [u8; 32] = derived[..32].try_into().unwrap();
         let iv: [u8; 16] = derived[32..48].try_into().unwrap();
         let enc = aes256_cbc_encrypt(&aes_key, &iv, &plain);
@@ -360,16 +370,35 @@ mod tests {
         let masterkey: [u8; 64] = std::array::from_fn(|i| (i * 7) as u8);
         let sid = "S-1-5-21-111-222-333-1001";
         let pwd_sha1 = sha1_password("KennwortÖ123");
-        let file = build_masterkey_file(&masterkey, sid, &pwd_sha1, &[0x11; 16], 8000);
+        let file = build_masterkey_file(&masterkey, &prekey(&pwd_sha1, sid), &[0x11; 16], 8000);
         let got = decrypt_masterkey(&file, sid, &pwd_sha1).unwrap();
         assert_eq!(got, masterkey);
+    }
+
+    #[test]
+    fn system_masterkey_round_trip() {
+        // System-Pfad: der 20-Byte-Schlüssel aus DPAPI_SYSTEM ist selbst der
+        // Vorschlüssel, keine SID-Ableitung.
+        let masterkey: [u8; 64] = std::array::from_fn(|i| (i as u8) ^ 0x5a);
+        let key = [0x3cu8; 20];
+        let file = build_masterkey_file(&masterkey, &key, &[0x44; 16], 12000);
+        assert_eq!(decrypt_system_masterkey(&file, &key).unwrap(), masterkey);
+        assert_eq!(
+            decrypt_system_masterkey(&file, &[0u8; 20]),
+            Err(DpapiError::BadHmac)
+        );
     }
 
     #[test]
     fn falsches_passwort_meldet_hmac_fehler() {
         let masterkey = [0x42u8; 64];
         let sid = "S-1-5-21-1-2-3-1001";
-        let file = build_masterkey_file(&masterkey, sid, &sha1_password("richtig"), &[7; 16], 4000);
+        let file = build_masterkey_file(
+            &masterkey,
+            &prekey(&sha1_password("richtig"), sid),
+            &[7; 16],
+            4000,
+        );
         let r = decrypt_masterkey(&file, sid, &sha1_password("falsch"));
         assert_eq!(r, Err(DpapiError::BadHmac));
     }

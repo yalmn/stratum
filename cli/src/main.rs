@@ -19,9 +19,10 @@ use clap::Parser;
 use indicatif::{ProgressBar, ProgressStyle};
 
 use stratum_analysis::{
-    run_all, AnalysisContext, Analyzer, BrowserAnalyzer, DpapiInput, EventLogAnalyzer,
-    KeywordAnalyzer, LsaAnalyzer, NtfsTarget, PersistenceAnalyzer, PrefetchAnalyzer,
-    ProgramExecutionAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
+    run_all, AnalysisContext, Analyzer, BrowserAnalyzer, DpapiAnalyzer, DpapiInput,
+    EventLogAnalyzer, KeywordAnalyzer, LsaAnalyzer, NtfsTarget, PersistenceAnalyzer,
+    PrefetchAnalyzer, ProgramExecutionAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer,
+    VssAnalyzer,
 };
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
@@ -259,6 +260,7 @@ fn main() -> Result<()> {
         Box::new(VssAnalyzer),
         Box::new(ProgramExecutionAnalyzer),
         Box::new(LsaAnalyzer),
+        Box::new(DpapiAnalyzer),
     ];
 
     let mut keyword_bar = None;
