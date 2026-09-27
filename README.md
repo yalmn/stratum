@@ -135,7 +135,10 @@ verweist auf den Index im `findings`-Array desselben Reports; `time_key` benennt
 das ursprüngliche Zeitfeld. Diese Referenz gilt innerhalb dieses Reports und ist
 keine fallübergreifende Kennung. Papierkorb-, Registry- und LNK-Zeiten bleiben
 als unterschiedliche Ereignisarten erhalten. Zeitliche Nähe allein belegt
-keinen ursächlichen Zusammenhang.
+keinen ursächlichen Zusammenhang. LNK-Zielzeiten, die genau der DOS-Epoche
+(1980-01-01 00:00 Ortszeit) entsprechen, sind Platzhalter ohne echte
+Zeitangabe, etwa bei der Wurzel eines FAT-Laufwerks. Sie stehen als
+`*_platzhalter_unix` im Fund und nicht in der Timeline.
 
 Dienste mit ImagePath und geplante Aufgaben bleiben auch bei gewöhnlichem
 Programmpfad erhalten. `auffaellig` ist eine Heuristik für die Sichtung und

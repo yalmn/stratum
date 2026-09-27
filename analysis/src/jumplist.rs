@@ -132,16 +132,7 @@ fn lnk_finding(
     if link.file_size > 0 {
         fd = fd.with("zielgroesse", link.file_size.to_string());
     }
-    for (k, t) in [
-        ("ziel_erstellt_unix", link.created),
-        ("ziel_geaendert_unix", link.modified),
-        ("ziel_zugriff_unix", link.accessed),
-    ] {
-        if let Some(z) = t {
-            fd = fd.with(k, z.to_string());
-        }
-    }
-    fd
+    crate::lnk::with_target_times(fd, link)
 }
 
 fn benutzer_aus_pfad(path: &str) -> String {

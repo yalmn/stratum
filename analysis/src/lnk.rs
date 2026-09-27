@@ -55,7 +55,7 @@ impl Analyzer for LnkAnalyzer {
                     fd = fd.with("benutzer", benutzer);
                 }
                 if !link.target_path.is_empty() {
-                    fd = fd.with("zielpfad", link.target_path);
+                    fd = fd.with("zielpfad", link.target_path.as_str());
                 }
                 if let Some(s) = link.drive_serial {
                     fd = fd.with("laufwerk_seriennummer", format!("{s:08x}"));
@@ -63,20 +63,48 @@ impl Analyzer for LnkAnalyzer {
                 if link.file_size > 0 {
                     fd = fd.with("zielgroesse", link.file_size.to_string());
                 }
-                for (k, t) in [
-                    ("ziel_erstellt_unix", link.created),
-                    ("ziel_geaendert_unix", link.modified),
-                    ("ziel_zugriff_unix", link.accessed),
-                ] {
-                    if let Some(z) = t {
-                        fd = fd.with(k, z.to_string());
-                    }
-                }
-                out.findings.push(fd);
+                out.findings.push(with_target_times(fd, &link));
             }
         }
         out
     }
+}
+
+/// 1980-01-01 00:00 UTC, Beginn der DOS-Zeitrechnung.
+const DOS_EPOCH_UTC: i64 = 315_532_800;
+
+/// Erkennt die DOS-Epoche in Ortszeit (UTC-12 bis UTC+14, Versatz in
+/// Viertelstunden). Windows trägt sie ein, wenn das Ziel keine eigene Zeit hat,
+/// etwa bei der Wurzel eines FAT-Laufwerks.
+fn is_dos_epoch_placeholder(unix: i64) -> bool {
+    let diff = unix - DOS_EPOCH_UTC;
+    (-14 * 3600..=12 * 3600).contains(&diff) && diff % 900 == 0
+}
+
+/// Ergänzt die Zielzeiten. Platzhalter der DOS-Epoche bleiben als Rohwert
+/// erhalten, landen aber nicht unter den Zeitschlüsseln der Timeline.
+pub(crate) fn with_target_times(mut fd: Finding, link: &Lnk) -> Finding {
+    let mut placeholder = false;
+    for (k, t) in [
+        ("ziel_erstellt", link.created),
+        ("ziel_geaendert", link.modified),
+        ("ziel_zugriff", link.accessed),
+    ] {
+        let Some(z) = t else { continue };
+        if is_dos_epoch_placeholder(z) {
+            placeholder = true;
+            fd = fd.with(format!("{k}_platzhalter_unix"), z.to_string());
+        } else {
+            fd = fd.with(format!("{k}_unix"), z.to_string());
+        }
+    }
+    if placeholder {
+        fd = fd.with(
+            "ziel_zeiten_hinweis",
+            "DOS-Epoche 1980-01-01 00:00 Ortszeit, keine echte Zeitangabe des Ziels",
+        );
+    }
+    fd
 }
 
 /// Der Benutzername aus einem Pfad `Users\<name>\...`.
@@ -263,5 +291,26 @@ mod tests {
         assert_eq!(link.drive_serial, Some(0xABCD1234));
         assert_eq!(link.file_size, 4096);
         assert!(link.created.unwrap() > 1_700_000_000);
+    }
+
+    #[test]
+    fn dos_epoche_ist_kein_zeitpunkt() {
+        // Echter Wert aus einem USB-Laufwerk-LNK (UTC+2).
+        assert!(is_dos_epoch_placeholder(315_525_600));
+        assert!(is_dos_epoch_placeholder(DOS_EPOCH_UTC));
+        assert!(!is_dos_epoch_placeholder(DOS_EPOCH_UTC + 61));
+        assert!(!is_dos_epoch_placeholder(1_700_000_000));
+        let link = Lnk {
+            created: Some(315_525_600),
+            modified: Some(1_700_000_000),
+            ..Lnk::default()
+        };
+        let f = with_target_times(Finding::new("useraktivitaet", "x", "q"), &link);
+        assert_eq!(f.attributes["ziel_erstellt_platzhalter_unix"], "315525600");
+        assert!(!f.attributes.contains_key("ziel_erstellt_unix"));
+        assert_eq!(f.attributes["ziel_geaendert_unix"], "1700000000");
+        let tl = crate::build_timeline(&[f]);
+        assert_eq!(tl.len(), 1);
+        assert_eq!(tl[0].unix, 1_700_000_000);
     }
 }
