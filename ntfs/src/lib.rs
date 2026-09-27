@@ -106,6 +106,30 @@ pub struct WalkEntry {
     pub is_directory: bool,
 }
 
+/// Ein Verzeichnis, dessen Einträge der Durchlauf nicht lesen konnte.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedDir {
+    /// Pfad des Verzeichnisses (leer für die Wurzel).
+    pub path: String,
+    /// MFT-Datensatznummer.
+    pub mft_record: u64,
+    /// Fehlermeldung.
+    pub error: String,
+}
+
+/// Ergebnis eines Durchlaufs mit allem, was dabei nicht erfasst werden konnte.
+#[derive(Debug, Clone, Default)]
+pub struct WalkResult {
+    /// Alle erreichten Dateien und Verzeichnisse.
+    pub entries: Vec<WalkEntry>,
+    /// Verzeichnisse, deren Inhalt fehlt, weil ihr Index nicht lesbar war.
+    pub skipped: Vec<SkippedDir>,
+    /// Verzeichnisse, die wegen der Tiefengrenze nicht betreten wurden.
+    pub depth_limited: u64,
+    /// Ob die Obergrenze der Einträge erreicht wurde.
+    pub truncated: bool,
+}
+
 /// Die vier NTFS-Zeitstempel als FILETIME (100-ns-Schritte seit 1601, UTC).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct NtfsTimes {
@@ -368,11 +392,18 @@ impl<R: Read + Seek> NtfsVolume<R> {
     /// Verzeichnisse werden nicht erneut betreten (Zyklenschutz), die Tiefe und
     /// die Gesamtzahl der Einträge sind begrenzt.
     pub fn walk(&mut self) -> Result<Vec<WalkEntry>, NtfsVolumeError> {
+        Ok(self.walk_report()?.entries)
+    }
+
+    /// Wie [`walk`](Self::walk), meldet aber zusätzlich unlesbare Verzeichnisse
+    /// und erreichte Grenzen, statt sie stillschweigend zu übergehen.
+    pub fn walk_report(&mut self) -> Result<WalkResult, NtfsVolumeError> {
         let ntfs = &self.ntfs;
         let fs = &mut self.fs;
         let root = ntfs.root_directory(fs)?.file_record_number();
 
-        let mut out = Vec::new();
+        let mut result = WalkResult::default();
+        let out = &mut result.entries;
         let mut visited = std::collections::HashSet::new();
         visited.insert(root);
         // Iterativer Durchlauf (Stack), damit die Rekursionstiefe nicht den
@@ -380,12 +411,24 @@ impl<R: Read + Seek> NtfsVolume<R> {
         let mut stack: Vec<(u64, String, usize)> = vec![(root, String::new(), 0)];
 
         while let Some((dir_rec, prefix, depth)) = stack.pop() {
-            if depth >= MAX_WALK_DEPTH || out.len() >= MAX_WALK_ENTRIES {
+            if out.len() >= MAX_WALK_ENTRIES {
+                result.truncated = true;
+                break;
+            }
+            if depth >= MAX_WALK_DEPTH {
+                result.depth_limited += 1;
                 continue;
             }
             let children = match list_children(ntfs, fs, dir_rec) {
                 Ok(c) => c,
-                Err(_) => continue, // beschädigtes Verzeichnis überspringen
+                Err(e) => {
+                    result.skipped.push(SkippedDir {
+                        path: prefix,
+                        mft_record: dir_rec,
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
             };
             for c in children {
                 let path = if prefix.is_empty() {
@@ -404,11 +447,12 @@ impl<R: Read + Seek> NtfsVolume<R> {
                     is_directory: c.is_directory,
                 });
                 if out.len() >= MAX_WALK_ENTRIES {
+                    result.truncated = true;
                     break;
                 }
             }
         }
-        Ok(out)
+        Ok(result)
     }
 }
 

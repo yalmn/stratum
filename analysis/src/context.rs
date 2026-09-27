@@ -80,7 +80,14 @@ impl<'a> AnalysisContext<'a> {
         let mut warnings = Vec::new();
         for &target in &ntfs_targets {
             match FsIndex::build(img, target) {
-                Ok(idx) => volumes.push(idx),
+                Ok(idx) => {
+                    warnings.extend(
+                        idx.warnings
+                            .iter()
+                            .map(|w| format!("Pfad-Index Offset {}: {w}", target.offset)),
+                    );
+                    volumes.push(idx);
+                }
                 Err(e) => warnings.push(format!(
                     "Pfad-Index für Offset {} nicht erstellbar: {e}",
                     target.offset

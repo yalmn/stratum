@@ -326,6 +326,7 @@ mod tests {
             },
             files: vec![entry("b.txt"), entry("a.txt")],
             directories: vec![entry("ordner")],
+            warnings: Vec::new(),
         };
         let s = write_catalog(&img, &[v], &mut out).unwrap();
         assert_eq!(

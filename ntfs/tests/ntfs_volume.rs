@@ -119,7 +119,12 @@ fn liest_datei_und_verzeichnis() {
     assert!(names.contains(&"notiz.txt"), "gefunden: {names:?}");
 
     // Vollständiger Durchlauf und Lesen über die MFT-Nummer.
+    let report = vol.walk_report().unwrap();
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert!(!report.truncated);
+    assert_eq!(report.depth_limited, 0);
     let walked = vol.walk().unwrap();
+    assert_eq!(walked, report.entries);
     let notiz = walked
         .iter()
         .find(|e| e.path.eq_ignore_ascii_case("notiz.txt"))

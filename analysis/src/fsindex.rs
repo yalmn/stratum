@@ -33,7 +33,12 @@ pub struct FsIndex {
     pub files: Vec<FileEntry>,
     /// Alle Verzeichnisse des Bereichs (für den Dateikatalog).
     pub directories: Vec<FileEntry>,
+    /// Was der Durchlauf nicht erfassen konnte (unlesbare Verzeichnisse, Grenzen).
+    pub warnings: Vec<String>,
 }
+
+/// Höchstzahl einzeln gemeldeter unlesbarer Verzeichnisse je Volume.
+const MAX_LISTED_SKIPS: usize = 50;
 
 impl FsIndex {
     /// Baut den Index für einen NTFS-Bereich auf.
@@ -41,7 +46,34 @@ impl FsIndex {
         let mut vol = NtfsVolume::open(img, target.offset, target.size)?;
         let mut files = Vec::new();
         let mut directories = Vec::new();
-        for e in vol.walk()? {
+        let walk = vol.walk_report()?;
+        let mut warnings = Vec::new();
+        for d in walk.skipped.iter().take(MAX_LISTED_SKIPS) {
+            let path = if d.path.is_empty() { "\\" } else { &d.path };
+            warnings.push(format!(
+                "Verzeichnis {path} (MFT {}) nicht lesbar, Inhalt fehlt im Index: {}",
+                d.mft_record, d.error
+            ));
+        }
+        if walk.skipped.len() > MAX_LISTED_SKIPS {
+            warnings.push(format!(
+                "weitere {} Verzeichnisse nicht lesbar",
+                walk.skipped.len() - MAX_LISTED_SKIPS
+            ));
+        }
+        if walk.depth_limited > 0 {
+            warnings.push(format!(
+                "{} Verzeichnisse wegen der Tiefengrenze nicht betreten",
+                walk.depth_limited
+            ));
+        }
+        if walk.truncated {
+            warnings.push(format!(
+                "Index nach {} Einträgen abgeschnitten",
+                stratum_ntfs::MAX_WALK_ENTRIES
+            ));
+        }
+        for e in walk.entries {
             let entry = FileEntry {
                 path: e.path,
                 mft_record: e.mft_record,
@@ -58,6 +90,7 @@ impl FsIndex {
             target,
             files,
             directories,
+            warnings,
         })
     }
 
@@ -135,6 +168,7 @@ mod tests {
                 })
                 .collect(),
             directories: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
