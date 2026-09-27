@@ -57,3 +57,10 @@ path = "fuzz_targets/powershell.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "persistence"
+path = "fuzz_targets/persistence.rs"
+test = false
+doc = false
+bench = false

@@ -24,6 +24,7 @@ mod jumplist;
 mod keyword;
 mod lnk;
 mod lsa;
+mod pathrating;
 mod powershell;
 mod prefetch;
 mod programexec;
@@ -93,4 +94,14 @@ pub trait Analyzer: Sync {
 
     /// Führt die Analyse auf dem Kontext aus.
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome;
+}
+
+/// Einstiegspunkte für die Fuzz-Targets. Nicht Teil der stabilen API.
+#[doc(hidden)]
+pub mod fuzzing {
+    /// Wertet Aufgaben-XML und den Text zusätzlich als Dienstbefehl aus.
+    pub fn persistence_text(text: &str) {
+        let _ = crate::filepersist::task_actions(text);
+        let _ = crate::pathrating::rate_command(text);
+    }
 }

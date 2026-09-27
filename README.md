@@ -138,9 +138,23 @@ als unterschiedliche Ereignisarten erhalten. Zeitliche Nähe allein belegt
 keinen ursächlichen Zusammenhang.
 
 Dienste mit ImagePath und geplante Aufgaben bleiben auch bei gewöhnlichem
-Programmpfad erhalten. `auffaellig` ist eine Pfadheuristik für die Sichtung und
-keine Aussage über Schadsoftware. Dadurch kann die Zahl der Persistenzfunde
-steigen; eine spätere Oberfläche kann die Bewertung unabhängig filtern.
+Programmpfad erhalten. `auffaellig` ist eine Heuristik für die Sichtung und
+keine Aussage über Schadsoftware; `auffaellig_grund` nennt den Anlass.
+
+- `pfad_status`: `gewoehnlich` unterhalb des Windows-Verzeichnisses oder von
+  `Program Files`, `auffaellig` bei nutzerbeschreibbaren Orten (Users, AppData,
+  Temp, ProgramData, Windows\Temp), UNC-Pfaden, `..` oder Orten außerhalb der
+  Standardverzeichnisse, `unbestimmt` bei Programmen ohne Verzeichnis oder
+  unbekannten Umgebungsvariablen. Umgebungsvariablen wie `%SystemRoot%` und
+  `%ProgramFiles%` sowie `\??\`-Präfixe werden vorher aufgelöst.
+- Dienste: ein Systemwerkzeug (cmd, PowerShell, rundll32, mshta usw.) als
+  ImagePath gilt immer als auffällig. `unquotierter_pfad` kennzeichnet
+  unquotierte Pfade mit Leerzeichen.
+- Aufgaben: alle Exec- und ComHandler-Aktionen werden erfasst (`aktion`,
+  `weitere_befehle`, `com_handler`). ComHandler allein sind nicht auffällig.
+  Systemwerkzeuge sind in Windows-Aufgaben üblich und werden nur mit
+  auffälligen Argumenten markiert (URL, UNC, nutzerbeschreibbarer Pfad,
+  kodierter oder versteckter Aufruf).
 
 ## Weiterer Ausbau
 

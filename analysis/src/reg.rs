@@ -7,6 +7,7 @@
 
 use stratum_registry::Hive;
 
+use crate::pathrating::{rate_command, PathStatus};
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
 // Persistence (Autostart)
@@ -150,8 +151,8 @@ fn ifeo_debugger(hive: &Hive, out: &mut Outcome) {
     }
 }
 
-/// Dienste aus `SYSTEM\{CS}\Services`, deren `ImagePath` in einem für Systemdienste
-/// ungewöhnlichen Ort liegt. Alle Dienste bleiben für die spätere Sichtung erhalten.
+/// Alle Dienste aus `SYSTEM\{CS}\Services` mit `ImagePath`. Die Bewertung
+/// (siehe `pathrating`) steht getrennt im Fund, gefiltert wird nichts.
 fn services(hive: &Hive, out: &mut Outcome) {
     let cs = current_control_set(hive);
     let base = format!("{cs}\\Services");
@@ -168,7 +169,16 @@ fn services(hive: &Hive, out: &mut Outcome) {
         else {
             continue;
         };
-        let auffaellig = ungewoehnlicher_pfad(&image) || ist_lolbin(&image);
+        // Ein Dienst startet normalerweise ein eigenes Programm, keine Shell.
+        // Ein Systemwerkzeug als ImagePath ist daher schon für sich auffällig.
+        let rating = rate_command(&image);
+        let mut gruende = Vec::new();
+        if let PathStatus::Unusual(grund) = rating.path {
+            gruende.push(format!("pfad:{grund}"));
+        }
+        if rating.lolbin {
+            gruende.push("systemwerkzeug".to_string());
+        }
         let start = dienst
             .value("Start")
             .ok()
@@ -181,75 +191,19 @@ fn services(hive: &Hive, out: &mut Outcome) {
         )
         .with("befehl", image)
         .with("ort", "Dienst")
-        .with("auffaellig", if auffaellig { "ja" } else { "nein" });
+        .with("auffaellig", if gruende.is_empty() { "nein" } else { "ja" })
+        .with("pfad_status", rating.path.label());
+        if !gruende.is_empty() {
+            f = f.with("auffaellig_grund", gruende.join(","));
+        }
+        if rating.unquoted_space {
+            f = f.with("unquotierter_pfad", "ja");
+        }
         if let Some(s) = start {
             f = f.with("start_typ", s.to_string());
         }
         out.findings.push(f);
     }
-}
-
-/// Prüft, ob ein `ImagePath`/Befehl in einem vom Nutzer beschreibbaren oder
-/// sonst ungewöhnlichen Ort liegt (statt System32, SysWOW64, drivers, WinSxS).
-/// Umgebungsvariablen wie `%SystemRoot%` gelten als Systempfad.
-pub(crate) fn ungewoehnlicher_pfad(image: &str) -> bool {
-    let executable = executable(image);
-    let path = executable.replace('/', "\\").to_ascii_lowercase();
-    if path.split('\\').any(|part| part == "..") {
-        return true;
-    }
-    let relative = if path.as_bytes().get(1) == Some(&b':') {
-        &path[2..]
-    } else {
-        &path
-    };
-    let roots = [
-        "\\windows\\",
-        "\\systemroot\\",
-        "%systemroot%\\",
-        "%windir%\\",
-    ];
-    !roots.iter().any(|root| {
-        relative.strip_prefix(root).is_some_and(|rest| {
-            ["system32\\", "syswow64\\", "winsxs\\"]
-                .iter()
-                .any(|dir| rest.starts_with(dir))
-        })
-    })
-}
-
-/// Extrahiert einen ausführbaren Pfad; uneindeutige unquotierte Pfade bleiben auffällig.
-fn executable(command: &str) -> &str {
-    let command = command.trim();
-    if let Some(quoted) = command.strip_prefix('"') {
-        return quoted.split('"').next().unwrap_or(quoted);
-    }
-    command.split_whitespace().next().unwrap_or("")
-}
-
-/// Erkennt häufig missbrauchte Systemwerkzeuge anhand des vollständigen Dateinamens.
-pub(crate) fn ist_lolbin(command: &str) -> bool {
-    let path = executable(command).replace('/', "\\");
-    let name = path.rsplit('\\').next().unwrap_or("").to_ascii_lowercase();
-    matches!(
-        name.as_str(),
-        "powershell.exe"
-            | "powershell"
-            | "pwsh.exe"
-            | "pwsh"
-            | "cmd.exe"
-            | "cmd"
-            | "wscript.exe"
-            | "wscript"
-            | "cscript.exe"
-            | "cscript"
-            | "mshta.exe"
-            | "mshta"
-            | "rundll32.exe"
-            | "rundll32"
-            | "regsvr32.exe"
-            | "regsvr32"
-    )
 }
 
 fn run_keys(hive: &Hive, prefix: &str, ort: &str, out: &mut Outcome) {
@@ -1001,46 +955,6 @@ mod tests {
         pidl.extend_from_slice(&body);
         pidl.extend_from_slice(&[0, 0]);
         assert_eq!(pidl_last_name(&pidl).as_deref(), Some("datei.txt"));
-    }
-
-    #[test]
-    fn pfadbewertung_ignoriert_irrefuehrende_teilstrings() {
-        assert!(ungewoehnlicher_pfad(r"D:\system32_backup\svc.exe"));
-        assert!(ungewoehnlicher_pfad(r"C:\Program Files\tool\svc.exe"));
-        assert!(ungewoehnlicher_pfad(r"C:\Windows\System32\..\Temp\svc.exe"));
-        assert!(ungewoehnlicher_pfad(r"tool.ps1"));
-        assert!(!ungewoehnlicher_pfad(
-            r#""C:\Windows\System32\svchost.exe" -k netsvcs"#
-        ));
-        assert!(!ist_lolbin(r"C:\tools\notpowershell.exe"));
-        assert!(!ist_lolbin(
-            r"C:\Windows\System32\svchost.exe --note powershell"
-        ));
-        assert!(ist_lolbin(r#""C:\Windows\System32\cmd.exe" /c whoami"#));
-    }
-
-    #[test]
-    fn dienstpfad_bewertung() {
-        assert!(ungewoehnlicher_pfad(
-            "C:\\Users\\ich\\AppData\\Local\\Temp\\svc.exe"
-        ));
-        assert!(ungewoehnlicher_pfad("C:\\ProgramData\\x\\run.exe"));
-        assert!(ungewoehnlicher_pfad("D:\\tools\\agent.exe"));
-        assert!(!ungewoehnlicher_pfad(
-            "\\SystemRoot\\System32\\drivers\\disk.sys"
-        ));
-        assert!(!ungewoehnlicher_pfad(
-            "C:\\Windows\\System32\\svchost.exe -k netsvcs"
-        ));
-        // Umgebungsvariablen-Systempfade sind gewöhnlich (keine Fehlalarme).
-        assert!(!ungewoehnlicher_pfad(
-            "%SystemRoot%\\system32\\svchost.exe -k netsvcs"
-        ));
-        assert!(!ungewoehnlicher_pfad("%systemroot%\\System32\\alg.exe"));
-        assert!(ist_lolbin(
-            "%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
-        ));
-        assert!(!ist_lolbin("C:\\Windows\\System32\\svchost.exe"));
     }
 
     #[test]
