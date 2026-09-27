@@ -9,6 +9,7 @@ description = "NTFS-Zugriff (Datei per Pfad lesen) für stratum, aufbauend auf d
 stratum-core.workspace = true
 ntfs = "0.4.0"
 thiserror.workspace = true
+xpress-huffman = "0.1.3"
 
 [dev-dependencies]
 tempfile.workspace = true

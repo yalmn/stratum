@@ -110,7 +110,8 @@ fn scca_body(data: &[u8]) -> Body {
         // Größe gegen einen plausiblen Rahmen begrenzen (Schutz vor
         // manipulierten Headern).
         let size = size.min(16 * 1024 * 1024);
-        match xpress_huffman::decompress(&data[8..], size) {
+        // Gemeinsamer Helfer, der das letzte Symbol am Eingabeende nicht verliert.
+        match stratum_ntfs::wof::xpress_decompress(&data[8..], size) {
             Ok(body) if body.len() >= 8 && &body[4..8] == b"SCCA" => {
                 Body::Scca(body, "MAM (entpackt)")
             }

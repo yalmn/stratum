@@ -97,6 +97,10 @@ struct Line<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     hardlinks: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    reparse_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wof: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     mft_record_offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fehler: Option<String>,
@@ -150,6 +154,8 @@ fn line<'a>(
         attribute: Vec::new(),
         streams: Vec::new(),
         hardlinks: None,
+        reparse_tag: None,
+        wof: None,
         mft_record_offset: None,
         fehler: None,
         inhalt_fehler: None,
@@ -170,6 +176,8 @@ fn line<'a>(
                 })
                 .collect();
             l.hardlinks = Some(info.hard_links);
+            l.reparse_tag = info.reparse_tag.map(|t| format!("0x{t:08x}"));
+            l.wof = info.wof;
             l.mft_record_offset = info.record_offset;
         }
         Err(e) => {
@@ -287,6 +295,8 @@ mod tests {
                 name: "Zone.Identifier".into(),
                 size: 26,
             }],
+            reparse_tag: Some(0x8000_0017),
+            wof: Some("XPRESS8K"),
         };
         let json = serde_json::to_value(line(1_048_576, &e, false, Ok(info))).unwrap();
         assert_eq!(json["name"], "notiz.txt");
@@ -302,6 +312,8 @@ mod tests {
         );
         assert_eq!(json["streams"][0]["name"], "Zone.Identifier");
         assert_eq!(json["mft_record_offset"], 4096);
+        assert_eq!(json["reparse_tag"], "0x80000017");
+        assert_eq!(json["wof"], "XPRESS8K");
         assert!(json.get("fehler").is_none());
     }
 

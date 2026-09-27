@@ -1883,6 +1883,7 @@ dependencies = [
  "stratum-core",
  "tempfile",
  "thiserror 2.0.21",
+ "xpress-huffman",
 ]
 
 [[package]]

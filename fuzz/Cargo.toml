@@ -64,3 +64,10 @@ path = "fuzz_targets/persistence.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wof"
+path = "fuzz_targets/wof.rs"
+test = false
+doc = false
+bench = false

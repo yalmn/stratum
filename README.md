@@ -98,6 +98,11 @@ Zeiten stehen als ISO 8601 in UTC mit 100-ns-Auflösung. Abweichungen zwischen
 `si` und `fn` können auf nachträglich veränderte Zeitstempel hinweisen, sind
 aber für sich allein kein Beleg.
 
+Vom System komprimierte Dateien (WOF, etwa CompactOS) tragen `wof` mit dem
+Verfahren und `reparse_tag`. Beim Lesen entpackt stratum sie aus dem Strom
+`WofCompressedData` (XPRESS4K, XPRESS8K, XPRESS16K). LZX und WIM-gestützte Dateien
+werden nicht entpackt und als Fehler gemeldet, nie als leerer Inhalt.
+
 Der Katalog enthält nur Einträge, die über den Verzeichnisbaum erreichbar sind,
 keine gelöschten MFT-Datensätze. Er ist nach Volume und Pfad sortiert, so dass
 dasselbe Image immer dieselbe Datei ergibt. Der Report verweist unter `catalog`

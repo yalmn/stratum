@@ -57,7 +57,7 @@ struct Quelle<'a> {
     mft_record_offset: Option<u64>,
     #[serde(skip_serializing_if = "str::is_empty")]
     pfad: &'a str,
-    strom: &'a str,
+    strom: String,
 }
 
 #[derive(Serialize)]
@@ -116,7 +116,13 @@ pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path)
             mft_record: file.meta.mft_record,
             mft_record_offset: file.meta.record_offset,
             pfad: &file.meta.path,
-            strom: "$DATA (unbenannt)",
+            strom: match file.meta.wof {
+                Some(format) => format!(
+                    "{} entpackt ({format}), Größe laut unbenanntem $DATA",
+                    stratum_ntfs::wof::WOF_STREAM
+                ),
+                None => "$DATA (unbenannt)".to_string(),
+            },
         },
         inhalt: Inhalt {
             groesse_strom: file.meta.size,

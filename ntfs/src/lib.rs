@@ -17,6 +17,7 @@
 
 mod error;
 pub mod lznt1;
+pub mod wof;
 
 use std::io::{Cursor, Read, Seek, SeekFrom};
 
@@ -67,6 +68,8 @@ pub struct FileMeta {
     pub accessed: u64,
     /// Letzte Änderung des MFT-Datensatzes als FILETIME.
     pub mft_modified: u64,
+    /// WOF-Kompressionsverfahren, falls der Inhalt aus `WofCompressedData` entpackt wurde.
+    pub wof: Option<&'static str>,
 }
 
 /// Inhalt einer gelesenen Datei mitsamt Herkunft.
@@ -175,6 +178,10 @@ pub struct RecordInfo {
     pub data_size: Option<u64>,
     /// Benannte `$DATA`-Ströme.
     pub streams: Vec<NamedStream>,
+    /// Reparse-Tag, falls ein `$REPARSE_POINT` vorhanden ist.
+    pub reparse_tag: Option<u32>,
+    /// WOF-Kompressionsverfahren bei vom System komprimierten Dateien.
+    pub wof: Option<&'static str>,
 }
 
 /// Obergrenze für benannte Datenströme je Datensatz (Schutz vor Manipulation).
@@ -330,6 +337,8 @@ impl<R: Read + Seek> NtfsVolume<R> {
             fn_times: None,
             data_size: None,
             streams: Vec::new(),
+            reparse_tag: None,
+            wof: None,
         };
         let mut fn_is_dos = true;
         let mut attrs = file.attributes();
@@ -362,6 +371,17 @@ impl<R: Read + Seek> NtfsVolume<R> {
                         mft_modified: name.mft_record_modification_time().nt_timestamp(),
                         accessed: name.access_time().nt_timestamp(),
                     });
+                }
+                NtfsAttributeType::ReparsePoint if info.reparse_tag.is_none() => {
+                    let data = small_value(&attribute, fs)?;
+                    info.reparse_tag = data
+                        .get(..4)
+                        .map(|t| u32::from_le_bytes([t[0], t[1], t[2], t[3]]));
+                    // Unbekannte WOF-Varianten nur kennzeichnen, der Katalog bricht nicht ab.
+                    info.wof = match wof::parse_reparse(&data) {
+                        Ok(format) => format.map(wof::WofFormat::name),
+                        Err(_) => Some("unbekannt"),
+                    };
                 }
                 NtfsAttributeType::Data => {
                     let stream = attribute.name()?.to_string_lossy();
@@ -505,9 +525,64 @@ fn read_record<R: Read + Seek>(
         });
     }
 
-    let (data, stream_size) = read_data(ntfs, &file, fs, part_size)?;
-    let meta = file_meta(&file, path, part_offset, stream_size)?;
+    // Vom System komprimierte Dateien (WOF): der Inhalt steht in WofCompressedData,
+    // der unbenannte Strom trägt nur die Größe. Unbekannte Varianten ergeben einen
+    // Fehler, nie einen leeren oder falschen Inhalt.
+    let (data, stream_size, wof) = match wof_format(&file, fs)? {
+        Some(format) => {
+            let size = file
+                .data(fs, "")
+                .transpose()?
+                .map(|item| item.to_attribute().map(|a| a.value_length()))
+                .transpose()?
+                .unwrap_or(0);
+            let (stream, _) = read_data(ntfs, &file, fs, part_size, wof::WOF_STREAM)?;
+            let limit = usize::try_from(MAX_FILE_SIZE.min(part_size)).unwrap_or(usize::MAX);
+            let data = wof::decompress(&stream, format, size, limit)?;
+            (data, size, Some(format.name()))
+        }
+        None => {
+            let (data, size) = read_data(ntfs, &file, fs, part_size, "")?;
+            (data, size, None)
+        }
+    };
+    let mut meta = file_meta(&file, path, part_offset, stream_size)?;
+    meta.wof = wof;
     Ok(Some(FileData { meta, data }))
+}
+
+/// Liest den (kleinen) Wert eines Attributs, höchstens 64 KiB.
+fn small_value<R: Read + Seek>(
+    attribute: &ntfs::NtfsAttribute<'_, '_>,
+    fs: &mut R,
+) -> Result<Vec<u8>, NtfsVolumeError> {
+    let mut buf = Vec::new();
+    match attribute.value(fs)? {
+        NtfsAttributeValue::Resident(r) => {
+            buf.extend_from_slice(&r.data()[..r.data().len().min(65536)])
+        }
+        value => {
+            value.attach(fs).take(65536).read_to_end(&mut buf)?;
+        }
+    }
+    Ok(buf)
+}
+
+/// WOF-Verfahren einer Datei aus ihrem `$REPARSE_POINT`, sonst `None`.
+fn wof_format<R: Read + Seek>(
+    file: &NtfsFile<'_>,
+    fs: &mut R,
+) -> Result<Option<wof::WofFormat>, NtfsVolumeError> {
+    let mut attrs = file.attributes();
+    while let Some(item) = attrs.next(fs) {
+        let item = item?;
+        let attribute = item.to_attribute()?;
+        if attribute.ty()? == NtfsAttributeType::ReparsePoint {
+            let data = small_value(&attribute, fs)?;
+            return Ok(wof::parse_reparse(&data)?);
+        }
+    }
+    Ok(None)
 }
 
 /// Beschreibung eines Datenlaufs (Nutzdaten oder spärlich).
@@ -541,8 +616,9 @@ fn read_data<R: Read + Seek>(
     file: &NtfsFile<'_>,
     fs: &mut R,
     part_size: u64,
+    stream: &str,
 ) -> Result<(Vec<u8>, u64), NtfsVolumeError> {
-    let Some(item) = file.data(fs, "") else {
+    let Some(item) = file.data(fs, stream) else {
         return Ok((Vec::new(), 0));
     };
     let item = item?;
@@ -611,7 +687,7 @@ fn read_data<R: Read + Seek>(
             }
             NtfsAttributeValue::AttributeListNonResident(_) => {
                 // `value` haelt hier keinen fs-Borrow; der Sammler darf fs nutzen.
-                let runs = collect_attribute_list_runs(ntfs, fs, file)?;
+                let runs = collect_attribute_list_runs(ntfs, fs, file, stream)?;
                 if debug {
                     eprintln!(
                         "[stratum] $DATA ueber Attributliste{}: {} Lauf/Laeufe, {file_size} Bytes",
@@ -785,6 +861,7 @@ fn collect_attribute_list_runs<R: Read + Seek>(
     ntfs: &Ntfs,
     fs: &mut R,
     file: &NtfsFile<'_>,
+    stream: &str,
 ) -> Result<Vec<(Option<u64>, u64)>, NtfsVolumeError> {
     // Die $ATTRIBUTE_LIST unter den rohen Attributen des Basis-Datensatzes
     // suchen (sie wird nicht über die Liste selbst referenziert).
@@ -807,8 +884,13 @@ fn collect_attribute_list_runs<R: Read + Seek>(
         if !matches!(entry.ty(), Ok(NtfsAttributeType::Data)) {
             continue;
         }
-        // Nur der ungenannte Datenstrom, keine alternativen Datenströme (ADS).
-        if entry.name_length() != 0 {
+        // Nur der angefragte Datenstrom (leer = unbenannter Strom).
+        let matches = if stream.is_empty() {
+            entry.name_length() == 0
+        } else {
+            entry.name().to_string_lossy() == stream
+        };
+        if !matches {
             continue;
         }
         let entry_file = entry.to_file(ntfs, fs)?;
@@ -877,6 +959,7 @@ fn file_meta(
         modified: info.modification_time().nt_timestamp(),
         accessed: info.access_time().nt_timestamp(),
         mft_modified: info.mft_record_modification_time().nt_timestamp(),
+        wof: None,
     })
 }
 

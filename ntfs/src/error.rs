@@ -36,6 +36,10 @@ pub enum NtfsVolumeError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
+    /// Fehler beim Lesen einer vom System komprimierten Datei (WOF).
+    #[error(transparent)]
+    Wof(#[from] crate::wof::WofError),
+
     /// Fehler beim Entpacken eines NTFS-komprimierten (LZNT1) Datenstroms.
     #[error("LZNT1-Dekompression fehlgeschlagen: {0}")]
     Lznt1(#[from] crate::lznt1::Lznt1Error),

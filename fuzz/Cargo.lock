@@ -1890,6 +1890,7 @@ dependencies = [
  "ntfs",
  "stratum-core",
  "thiserror 2.0.21",
+ "xpress-huffman",
 ]
 
 [[package]]
