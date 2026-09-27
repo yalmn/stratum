@@ -95,6 +95,7 @@ fn liest_datei_und_verzeichnis() {
 
     let n = vol.read_file("notiz.txt").unwrap().unwrap();
     assert_eq!(n.data, b"hallo welt");
+    assert_eq!(n.meta.size, n.data.len() as u64);
 
     // Grosse, nicht-residente Datei byte-genau zuruecklesen (prueft die
     // Zusammensetzung der Datenlaeufe).
@@ -103,6 +104,7 @@ fn liest_datei_und_verzeichnis() {
         .unwrap()
         .expect("gross.bin fehlt");
     assert_eq!(g.data.len(), gross.len(), "Laenge muss exakt stimmen");
+    assert_eq!(g.meta.size, gross.len() as u64);
     assert_eq!(g.data, gross, "Inhalt muss byte-genau stimmen");
 
     // Nicht vorhanden.

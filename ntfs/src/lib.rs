@@ -326,8 +326,8 @@ fn read_record<R: Read + Seek>(
         });
     }
 
-    let meta = file_meta(&file, path, part_offset)?;
-    let data = read_data(ntfs, &file, fs, part_size)?;
+    let (data, stream_size) = read_data(ntfs, &file, fs, part_size)?;
+    let meta = file_meta(&file, path, part_offset, stream_size)?;
     Ok(Some(FileData { meta, data }))
 }
 
@@ -364,15 +364,16 @@ fn read_data<R: Read + Seek>(
     file: &NtfsFile<'_>,
     fs: &mut R,
     part_size: u64,
-) -> Result<Vec<u8>, NtfsVolumeError> {
+) -> Result<(Vec<u8>, u64), NtfsVolumeError> {
     let Some(item) = file.data(fs, "") else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     };
     let item = item?;
     let attribute = item.to_attribute()?;
-    let file_size = attribute.value_length().min(part_size).min(MAX_FILE_SIZE);
+    let stream_size = attribute.value_length();
+    let file_size = stream_size.min(part_size).min(MAX_FILE_SIZE);
     if file_size == 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), stream_size));
     }
 
     let debug = std::env::var_os("STRATUM_DEBUG").is_some();
@@ -494,7 +495,7 @@ fn read_data<R: Read + Seek>(
             value.attach(fs).take(MAX_FILE_SIZE).read_to_end(&mut buf)?;
         }
     }
-    Ok(buf)
+    Ok((buf, stream_size))
 }
 
 /// Setzt einen NTFS-komprimierten (LZNT1) `$DATA`-Strom aus seinen Datenläufen
@@ -691,6 +692,7 @@ fn file_meta(
     file: &NtfsFile<'_>,
     path: &str,
     part_offset: u64,
+    stream_size: u64,
 ) -> Result<FileMeta, NtfsVolumeError> {
     let info: NtfsStandardInformation = file.info()?;
     let record_offset = file
@@ -700,7 +702,7 @@ fn file_meta(
     Ok(FileMeta {
         path: path.to_string(),
         mft_record: file.file_record_number(),
-        size: u64::from(file.data_size()),
+        size: stream_size,
         record_offset,
         created: info.creation_time().nt_timestamp(),
         modified: info.modification_time().nt_timestamp(),
