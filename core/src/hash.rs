@@ -80,6 +80,52 @@ pub fn hash_bytes_with_progress(data: &[u8], progress: Option<Progress<'_>>) -> 
     }
 }
 
+/// Schreibt durch und berechnet dabei SHA-256 und BLAKE3 über alle geschriebenen
+/// Bytes. So lässt sich eine erzeugte Datei hashen, ohne sie erneut zu lesen.
+pub struct HashingWriter<W> {
+    inner: W,
+    sha: Sha256,
+    b3: blake3::Hasher,
+    bytes: u64,
+}
+
+impl<W: std::io::Write> HashingWriter<W> {
+    /// Umhüllt `inner`.
+    pub fn new(inner: W) -> Self {
+        Self {
+            inner,
+            sha: Sha256::new(),
+            b3: blake3::Hasher::new(),
+            bytes: 0,
+        }
+    }
+
+    /// Leert den Puffer und liefert den inneren Writer mit den Hashes.
+    pub fn finish(mut self) -> std::io::Result<(W, ImageHashes)> {
+        self.inner.flush()?;
+        let hashes = ImageHashes {
+            bytes: self.bytes,
+            sha256: to_hex(&self.sha.finalize()),
+            blake3: self.b3.finalize().to_hex().to_string(),
+        };
+        Ok((self.inner, hashes))
+    }
+}
+
+impl<W: std::io::Write> std::io::Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.sha.update(&buf[..n]);
+        self.b3.update(&buf[..n]);
+        self.bytes += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 fn to_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -132,5 +178,17 @@ mod tests {
     #[test]
     fn hex() {
         assert_eq!(to_hex(&[0x00, 0x0f, 0xa5, 0xff]), "000fa5ff");
+    }
+
+    #[test]
+    fn hashing_writer_entspricht_hash_bytes() {
+        use std::io::Write;
+        let data = vec![7u8; CHUNK + 13];
+        let mut w = HashingWriter::new(Vec::new());
+        w.write_all(&data[..5]).unwrap();
+        w.write_all(&data[5..]).unwrap();
+        let (out, h) = w.finish().unwrap();
+        assert_eq!(out, data);
+        assert_eq!(h, hash_bytes(&data));
     }
 }

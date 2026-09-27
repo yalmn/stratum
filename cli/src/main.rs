@@ -6,6 +6,7 @@
 //! mit einer Begriffstabelle. Das Ergebnis ist ein JSON-Report.
 
 mod bdp;
+mod extract;
 mod liveness;
 mod report;
 mod report_html;
@@ -30,7 +31,7 @@ use stratum_core::{
 };
 use stratum_search::TermTable;
 
-use report::{ImageInfo, KeywordInfo, Report, Tool, WindowsReport};
+use report::{CatalogInfo, ImageInfo, KeywordInfo, Report, Tool, WindowsReport};
 
 /// Automatisierte, gerichtsverwertbare Inhaltsanalyse eines Roh-Images (read-only).
 #[derive(Parser, Debug)]
@@ -85,6 +86,18 @@ struct Cli {
     /// Beispiel: --dump "Windows/System32/config/SAM" /tmp/SAM
     #[arg(long, num_args = 2, value_names = ["NTFS_PFAD", "ZIEL"])]
     dump: Option<Vec<String>>,
+
+    /// Eine Datei über Volume-Offset und MFT-Nummer extrahieren (Werte z. B. aus
+    /// dem Dateikatalog) und beenden. Wie bei --dump entsteht daneben
+    /// `<ZIEL>.herkunft.json` mit Quelle und Hashes; nichts wird überschrieben.
+    #[arg(long, num_args = 3, value_names = ["VOLUME_OFFSET", "MFT", "ZIEL"])]
+    dump_record: Option<Vec<String>>,
+
+    /// Dateikatalog aller Dateien und Verzeichnisse mit Metadaten als JSON Lines
+    /// in diese Datei schreiben. Der Report verweist mit Hashes darauf. Eine
+    /// vorhandene Datei wird nicht überschrieben.
+    #[arg(long, value_name = "DATEI")]
+    catalog: Option<PathBuf>,
 
     /// Klartextpasswort des Benutzers, um gespeicherte Browser-Passwörter
     /// (DPAPI) zu entschlüsseln. Der NT-Hash genügt dafür nicht; das Passwort
@@ -164,8 +177,48 @@ fn main() -> Result<()> {
 
     // Schnellmodus: eine Datei extrahieren und beenden (keine Analyse).
     if let Some(d) = &cli.dump {
-        return run_dump(&img, cli.bdp.as_deref(), &d[0], std::path::Path::new(&d[1]));
+        let targets = ntfs_targets(&img, cli.bdp.as_deref())?;
+        return extract::run(
+            &img,
+            &targets,
+            extract::Selector::Path(&d[0]),
+            std::path::Path::new(&d[1]),
+        );
     }
+    if let Some(d) = &cli.dump_record {
+        let volume_offset = d[0]
+            .parse()
+            .with_context(|| format!("VOLUME_OFFSET ist keine Zahl: {}", d[0]))?;
+        let mft = d[1]
+            .parse()
+            .with_context(|| format!("MFT ist keine Zahl: {}", d[1]))?;
+        let targets = ntfs_targets(&img, cli.bdp.as_deref())?;
+        return extract::run(
+            &img,
+            &targets,
+            extract::Selector::Record { volume_offset, mft },
+            std::path::Path::new(&d[2]),
+        );
+    }
+
+    // Katalogdatei vor der langen Hash-Phase anlegen, damit ein Namenskonflikt
+    // sofort auffällt.
+    let catalog_file = match &cli.catalog {
+        Some(p) => Some((
+            p.clone(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(p)
+                .with_context(|| {
+                    format!(
+                        "Katalog nicht anlegbar (existiert bereits?): {}",
+                        p.display()
+                    )
+                })?,
+        )),
+        None => None,
+    };
 
     let mut warnings = Vec::new();
 
@@ -187,28 +240,7 @@ fn main() -> Result<()> {
         partitions.scheme
     );
 
-    // Welche Bereiche als NTFS untersucht werden: entweder genau die per
-    // bdp.info benannte Partition, oder alle als NTFS erkannten aus dem Scan.
-    let targets: Vec<NtfsTarget> = match &cli.bdp {
-        Some(path) => {
-            let b = bdp::load(path)?;
-            vec![NtfsTarget {
-                index: u32::MAX,
-                offset: b.offset_bytes,
-                size: b.size_bytes,
-            }]
-        }
-        None => partitions
-            .partitions
-            .iter()
-            .filter(|p| p.fs_hint == FsHint::Ntfs || p.typ == stratum_core::PartitionType::Volume)
-            .map(|p| NtfsTarget {
-                index: p.index,
-                offset: p.start_offset,
-                size: p.size_bytes,
-            })
-            .collect(),
-    };
+    let targets = targets_from(&partitions, cli.bdp.as_deref())?;
     if targets.is_empty() && partitions.scheme != PartitionScheme::None {
         warnings.push("keine NTFS-Partition gefunden".into());
     }
@@ -222,8 +254,47 @@ fn main() -> Result<()> {
     ctx.firefox_password = cli.firefox_password.clone();
     warnings.extend(ctx.warnings.iter().cloned());
     if let Some(v) = ctx.volumes.first() {
-        eprintln!("[+] Pfad-Index: {} Dateien", v.files.len());
+        eprintln!(
+            "[+] Pfad-Index: {} Dateien, {} Verzeichnisse",
+            v.files.len(),
+            v.directories.len()
+        );
     }
+
+    let catalog = match catalog_file {
+        Some((path, file)) => {
+            eprintln!("[*] Schreibe Dateikatalog ...");
+            let mut w =
+                std::io::BufWriter::with_capacity(1 << 20, stratum_core::HashingWriter::new(file));
+            let summary = stratum_analysis::write_catalog(&img, &ctx.volumes, &mut w)
+                .with_context(|| format!("Katalog nicht schreibbar: {}", path.display()))?;
+            let (_, hashes) = w
+                .into_inner()
+                .map_err(|e| e.into_error())
+                .and_then(|h| h.finish())
+                .with_context(|| format!("Katalog nicht abschließbar: {}", path.display()))?;
+            eprintln!(
+                "[+] Dateikatalog: {} Einträge ({} Fehler) in {}",
+                summary.eintraege,
+                summary.fehler,
+                path.display()
+            );
+            if summary.fehler > 0 {
+                warnings.push(format!(
+                    "Dateikatalog: {} Einträge ohne lesbaren MFT-Datensatz (Feld fehler)",
+                    summary.fehler
+                ));
+            }
+            Some(CatalogInfo {
+                pfad: path.display().to_string(),
+                quelle: stratum_analysis::CATALOG_SOURCE,
+                format: "JSON Lines, ein Eintrag je Zeile, sortiert nach Volume und Pfad",
+                hashes,
+                summary,
+            })
+        }
+        None => None,
+    };
 
     let mut windows = Vec::new();
     for inst in &ctx.installs {
@@ -335,6 +406,7 @@ fn main() -> Result<()> {
         findings: analysis.findings,
         timeline,
         keywords,
+        catalog,
         warnings,
     };
 
@@ -361,23 +433,22 @@ fn bytes_bar(len: u64, label: &str) -> ProgressBar {
     pb
 }
 
-/// Extrahiert eine einzelne Datei aus dem Image und schreibt sie auf die Platte.
-fn run_dump(
-    img: &ImageReader,
+/// Welche Bereiche als NTFS untersucht werden: entweder genau die per
+/// bdp.info benannte Partition, oder alle als NTFS erkannten aus dem Scan.
+fn targets_from(
+    partitions: &stratum_core::PartitionTable,
     bdp: Option<&std::path::Path>,
-    ntfs_path: &str,
-    out: &std::path::Path,
-) -> Result<()> {
-    let targets: Vec<NtfsTarget> = match bdp {
-        Some(p) => {
-            let b = bdp::load(p)?;
+) -> Result<Vec<NtfsTarget>> {
+    Ok(match bdp {
+        Some(path) => {
+            let b = bdp::load(path)?;
             vec![NtfsTarget {
                 index: u32::MAX,
                 offset: b.offset_bytes,
                 size: b.size_bytes,
             }]
         }
-        None => scan_partitions(img)
+        None => partitions
             .partitions
             .iter()
             .filter(|p| p.fs_hint == FsHint::Ntfs || p.typ == stratum_core::PartitionType::Volume)
@@ -387,26 +458,12 @@ fn run_dump(
                 size: p.size_bytes,
             })
             .collect(),
-    };
+    })
+}
 
-    for t in &targets {
-        let mut vol = match stratum_ntfs::NtfsVolume::open(img, t.offset, t.size) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Ok(Some(file)) = vol.read_file(ntfs_path) {
-            std::fs::write(out, &file.data)
-                .with_context(|| format!("Zieldatei nicht schreibbar: {}", out.display()))?;
-            eprintln!(
-                "[+] {} Bytes geschrieben: {} (aus Offset {})",
-                file.data.len(),
-                out.display(),
-                t.offset
-            );
-            return Ok(());
-        }
-    }
-    anyhow::bail!("Datei '{ntfs_path}' in keiner NTFS-Partition gefunden");
+/// NTFS-Bereiche für die Extraktion, ohne Hashing und Analyse.
+fn ntfs_targets(img: &ImageReader, bdp: Option<&std::path::Path>) -> Result<Vec<NtfsTarget>> {
+    targets_from(&scan_partitions(img), bdp)
 }
 
 /// Baut den Keyword-Analyzer aus der mitgelieferten und den eigenen

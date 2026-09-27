@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use stratum_analysis::{Finding, TimeZone, TimelineEntry};
+use stratum_analysis::{CatalogSummary, Finding, TimeZone, TimelineEntry};
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
 
@@ -31,8 +31,27 @@ pub struct Report {
     /// Angaben zur verwendeten Begriffstabelle, falls die Keyword-Suche lief.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub keywords: Option<KeywordInfo>,
+    /// Verweis auf den Dateikatalog, falls einer geschrieben wurde.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<CatalogInfo>,
     /// Übergreifende Hinweise.
     pub warnings: Vec<String>,
+}
+
+/// Verweis auf den Dateikatalog mit Hashes der geschriebenen Datei.
+#[derive(Debug, Serialize)]
+pub struct CatalogInfo {
+    /// Pfad der Katalogdatei.
+    pub pfad: String,
+    /// Woraus der Katalog besteht und was fehlt.
+    pub quelle: &'static str,
+    /// Dateiformat.
+    pub format: &'static str,
+    /// SHA-256 und BLAKE3 über die geschriebene Datei.
+    pub hashes: ImageHashes,
+    /// Zähler.
+    #[serde(flatten)]
+    pub summary: CatalogSummary,
 }
 
 /// Angaben zur verwendeten Begriffstabelle.

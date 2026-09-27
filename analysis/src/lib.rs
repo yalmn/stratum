@@ -14,6 +14,7 @@
 #![warn(missing_docs)]
 
 mod browser;
+mod catalog;
 mod context;
 mod dpapi;
 mod eventlog;
@@ -41,6 +42,7 @@ mod windows;
 mod builder;
 
 pub use browser::BrowserAnalyzer;
+pub use catalog::{write_catalog, CatalogSummary, CATALOG_SOURCE};
 pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
 pub use dpapi::DpapiAnalyzer;
 pub use eventlog::EventLogAnalyzer;

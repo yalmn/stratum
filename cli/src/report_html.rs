@@ -37,6 +37,24 @@ pub fn render(report: &Report) -> String {
     }
     h.push_str("</table>\n</section>\n");
 
+    if let Some(c) = &report.catalog {
+        h.push_str("<section class=\"card\">\n<h2>Dateikatalog</h2>\n<table class=\"kv\">\n");
+        row(&mut h, "Datei", &c.pfad);
+        row(
+            &mut h,
+            "Einträge",
+            &format!(
+                "{} ({} Dateien, {} Verzeichnisse, {} ohne lesbaren Datensatz)",
+                c.summary.eintraege, c.summary.dateien, c.summary.verzeichnisse, c.summary.fehler
+            ),
+        );
+        row(&mut h, "SHA-256", &c.hashes.sha256);
+        row(&mut h, "BLAKE3", &c.hashes.blake3);
+        row(&mut h, "Quelle", c.quelle);
+        row(&mut h, "Format", c.format);
+        h.push_str("</table>\n</section>\n");
+    }
+
     // Partitionen.
     h.push_str("<section class=\"card\">\n<h2>Partitionen</h2>\n");
     h.push_str(&format!("<p>Schema: {:?}</p>\n", report.partitions.scheme));

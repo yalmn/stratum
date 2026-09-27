@@ -9,12 +9,13 @@ pub mod error;
 pub mod hash;
 pub mod image;
 pub mod partition;
+pub mod time;
 
 pub use analyzer::{Analyzer, AnalyzerError, Finding};
 pub use error::ImageError;
 pub use hash::{
-    hash_bytes, hash_bytes_with_progress, hash_image, hash_image_with_progress, ImageHashes,
-    Progress,
+    hash_bytes, hash_bytes_with_progress, hash_image, hash_image_with_progress, HashingWriter,
+    ImageHashes, Progress,
 };
 pub use image::ImageReader;
 pub use partition::{

@@ -70,6 +70,8 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 | `--raw-sweep` | zusätzlich das ganze Image roh durchsuchen (unallozierte/gelöschte Bereiche) |
 | `--check-onion` | gefundene .onion-Adressen online über Tor auf Erreichbarkeit prüfen (opt-in) |
 | `--dump <pfad> <ziel>` | eine einzelne Datei aus dem Image extrahieren und beenden (ohne Analyse) |
+| `--dump-record <volume_offset> <mft> <ziel>` | eine Datei über Volume-Offset und MFT-Nummer extrahieren (Werte aus dem Katalog) |
+| `--catalog <datei>` | Dateikatalog aller Dateien und Verzeichnisse als JSON Lines schreiben |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |
 | `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei grossen Images Zeit) |
 | `--dpapi-password <pw>` | Benutzerpasswort, um gespeicherte Chromium-Passwörter (DPAPI) zu entschlüsseln |
@@ -84,6 +86,36 @@ stratum merged.dd -o report.json --bdp bdp.info
 ```
 
 Ohne `--bdp` bestimmt stratum die NTFS-Partitionen selbst aus der Partitionstabelle. Mit `--bdp` wird genau die von ForensiCUnlock entschlüsselte Partition ausgewertet.
+
+### Dateikatalog
+
+`--catalog katalog.jsonl` schreibt je Datei und Verzeichnis eine JSON-Zeile:
+Volume-Offset, MFT-Nummer und Sequenz, Elternverzeichnis, Pfad, Größe des
+unbenannten Datenstroms, Zeiten aus `$STANDARD_INFORMATION` (`si`) und
+`$FILE_NAME` (`fn`), Dateiattribute, benannte Datenströme (z. B.
+`Zone.Identifier`), Zahl der Hardlinks und den Image-Offset des MFT-Datensatzes.
+Zeiten stehen als ISO 8601 in UTC mit 100-ns-Auflösung. Abweichungen zwischen
+`si` und `fn` können auf nachträglich veränderte Zeitstempel hinweisen, sind
+aber für sich allein kein Beleg.
+
+Der Katalog enthält nur Einträge, die über den Verzeichnisbaum erreichbar sind,
+keine gelöschten MFT-Datensätze. Er ist nach Volume und Pfad sortiert, so dass
+dasselbe Image immer dieselbe Datei ergibt. Der Report verweist unter `catalog`
+mit SHA-256, BLAKE3 und Zählern auf die Datei. Ist ein Datensatz nicht lesbar,
+bleibt der Eintrag mit dem Feld `fehler` erhalten.
+
+Einzelne Dateien lassen sich anschließend gezielt extrahieren:
+
+```sh
+stratum merged.dd --bdp bdp.info --dump-record 1048576 123456 ausgabe.bin
+```
+
+Neben der Zieldatei entsteht `ausgabe.bin.herkunft.json` mit Quelle
+(Volume-Offset, MFT-Nummer, Offset des Datensatzes), SHA-256 und BLAKE3 des
+Inhalts, den Artefaktzeiten der Datei und getrennt davon dem Zeitpunkt der
+Extraktion. Das gilt auch für `--dump`. Vorhandene Dateien werden nicht
+überschrieben. Dateien über 256 MiB werden nur bis zu dieser Grenze extrahiert
+und als `abgeschnitten` gekennzeichnet.
 
 ### Browser-Passwörter (DPAPI)
 

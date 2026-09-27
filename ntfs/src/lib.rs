@@ -22,7 +22,9 @@ use std::io::{Cursor, Read, Seek, SeekFrom};
 
 use ntfs::attribute_value::NtfsAttributeValue;
 use ntfs::indexes::NtfsFileNameIndex;
-use ntfs::structured_values::{NtfsAttributeList, NtfsFileNamespace, NtfsStandardInformation};
+use ntfs::structured_values::{
+    NtfsAttributeList, NtfsFileName, NtfsFileNamespace, NtfsStandardInformation,
+};
 use ntfs::{Ntfs, NtfsAttributeFlags, NtfsAttributeType, NtfsFile};
 
 use stratum_core::ImageReader;
@@ -96,11 +98,63 @@ pub struct WalkEntry {
     pub path: String,
     /// MFT-Datensatznummer, zum direkten Lesen ohne erneute Pfadauflösung.
     pub mft_record: u64,
+    /// MFT-Datensatznummer des Verzeichnisses, in dem der Eintrag gefunden wurde.
+    pub parent_record: u64,
     /// Länge der Datei in Bytes.
     pub size: u64,
     /// Ob der Eintrag ein Verzeichnis ist.
     pub is_directory: bool,
 }
+
+/// Die vier NTFS-Zeitstempel als FILETIME (100-ns-Schritte seit 1601, UTC).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct NtfsTimes {
+    /// Erstellung.
+    pub created: u64,
+    /// Letzte Änderung des Inhalts.
+    pub modified: u64,
+    /// Letzte Änderung des MFT-Datensatzes.
+    pub mft_modified: u64,
+    /// Letzter Zugriff.
+    pub accessed: u64,
+}
+
+/// Benannter Datenstrom (Alternate Data Stream) mit logischer Länge.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedStream {
+    /// Name des Stroms, z. B. `Zone.Identifier`.
+    pub name: String,
+    /// Logische Länge in Bytes.
+    pub size: u64,
+}
+
+/// Metadaten eines MFT-Datensatzes, ohne Dateiinhalt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordInfo {
+    /// MFT-Datensatznummer.
+    pub mft_record: u64,
+    /// Sequenznummer des Datensatzes (steigt bei Wiederverwendung).
+    pub sequence: u16,
+    /// Absoluter Byte-Offset des Datensatzes im Image, falls bekannt.
+    pub record_offset: Option<u64>,
+    /// Ob der Datensatz ein Verzeichnis beschreibt.
+    pub is_directory: bool,
+    /// Zahl der Hardlinks laut Datensatzkopf.
+    pub hard_links: u16,
+    /// Zeiten aus `$STANDARD_INFORMATION`.
+    pub si_times: Option<NtfsTimes>,
+    /// Dateiattribute aus `$STANDARD_INFORMATION` (Windows-Bitmaske).
+    pub file_attributes: u32,
+    /// Zeiten aus dem passenden `$FILE_NAME`-Attribut.
+    pub fn_times: Option<NtfsTimes>,
+    /// Logische Länge des unbenannten `$DATA`-Stroms.
+    pub data_size: Option<u64>,
+    /// Benannte `$DATA`-Ströme.
+    pub streams: Vec<NamedStream>,
+}
+
+/// Obergrenze für benannte Datenströme je Datensatz (Schutz vor Manipulation).
+const MAX_STREAMS: usize = 64;
 
 /// Obergrenze für die Zahl der Einträge eines Durchlaufs (Schutz vor
 /// manipulierten Images mit absurd vielen Einträgen).
@@ -226,6 +280,86 @@ impl<R: Read + Seek> NtfsVolume<R> {
         read_record(ntfs, fs, record, path, self.part_offset, self.part_size)
     }
 
+    /// Liest die Metadaten eines Datensatzes in einem Durchlauf über seine
+    /// Attribute: `$STANDARD_INFORMATION`, das zum Eintrag passende
+    /// `$FILE_NAME` (gleiches Elternverzeichnis, bevorzugt nicht der DOS-Kurzname)
+    /// und die Längen aller `$DATA`-Ströme. Dateiinhalte werden nicht gelesen.
+    pub fn record_info(
+        &mut self,
+        record: u64,
+        parent_record: Option<u64>,
+    ) -> Result<RecordInfo, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        let file = ntfs.file(fs, record)?;
+        let mut info = RecordInfo {
+            mft_record: record,
+            sequence: file.sequence_number(),
+            record_offset: file
+                .position()
+                .value()
+                .map(|p| self.part_offset.saturating_add(p.get())),
+            is_directory: file.is_directory(),
+            hard_links: file.hard_link_count(),
+            si_times: None,
+            file_attributes: 0,
+            fn_times: None,
+            data_size: None,
+            streams: Vec::new(),
+        };
+        let mut fn_is_dos = true;
+        let mut attrs = file.attributes();
+        while let Some(item) = attrs.next(fs) {
+            let item = item?;
+            let attribute = item.to_attribute()?;
+            match attribute.ty()? {
+                NtfsAttributeType::StandardInformation if info.si_times.is_none() => {
+                    let si: NtfsStandardInformation = attribute.structured_value(fs)?;
+                    info.si_times = Some(NtfsTimes {
+                        created: si.creation_time().nt_timestamp(),
+                        modified: si.modification_time().nt_timestamp(),
+                        mft_modified: si.mft_record_modification_time().nt_timestamp(),
+                        accessed: si.access_time().nt_timestamp(),
+                    });
+                    info.file_attributes = si.file_attributes().bits();
+                }
+                NtfsAttributeType::FileName if fn_is_dos => {
+                    let name: NtfsFileName = attribute.structured_value(fs)?;
+                    let parent_ok = parent_record.is_none_or(|p| {
+                        name.parent_directory_reference().file_record_number() == p
+                    });
+                    if !parent_ok {
+                        continue;
+                    }
+                    fn_is_dos = name.namespace() == NtfsFileNamespace::Dos;
+                    info.fn_times = Some(NtfsTimes {
+                        created: name.creation_time().nt_timestamp(),
+                        modified: name.modification_time().nt_timestamp(),
+                        mft_modified: name.mft_record_modification_time().nt_timestamp(),
+                        accessed: name.access_time().nt_timestamp(),
+                    });
+                }
+                NtfsAttributeType::Data => {
+                    let stream = attribute.name()?.to_string_lossy();
+                    // Bei Attributlisten erscheint ein Strom in mehreren Teilen;
+                    // nur der erste trägt die gültige Länge.
+                    if stream.is_empty() {
+                        info.data_size.get_or_insert(attribute.value_length());
+                    } else if info.streams.len() < MAX_STREAMS
+                        && !info.streams.iter().any(|s| s.name == stream)
+                    {
+                        info.streams.push(NamedStream {
+                            name: stream,
+                            size: attribute.value_length(),
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(info)
+    }
+
     /// Durchläuft das komplette Verzeichnis ab der Wurzel und liefert alle
     /// Dateien und Verzeichnisse mit vollständigem Pfad. Es werden nur Metadaten
     /// gelesen, keine Dateiinhalte; das ist die Grundlage des Pfad-Index.
@@ -265,6 +399,7 @@ impl<R: Read + Seek> NtfsVolume<R> {
                 out.push(WalkEntry {
                     path,
                     mft_record: c.mft_record,
+                    parent_record: dir_rec,
                     size: c.size,
                     is_directory: c.is_directory,
                 });

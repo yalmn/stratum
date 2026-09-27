@@ -18,34 +18,47 @@ pub struct FileEntry {
     pub path: String,
     /// MFT-Datensatznummer, zum gezielten Lesen ohne Pfadauflösung.
     pub mft_record: u64,
-    /// Länge der Datei in Bytes.
+    /// Länge der Datei in Bytes (aus dem Verzeichniseintrag, bei Verzeichnissen 0).
     pub size: u64,
+    /// MFT-Datensatznummer des Verzeichnisses, in dem der Eintrag steht.
+    pub parent_record: u64,
 }
 
-/// Der Pfad-Index eines NTFS-Bereichs (nur Dateien, keine Verzeichnisse).
+/// Der Pfad-Index eines NTFS-Bereichs.
 #[derive(Debug, Clone)]
 pub struct FsIndex {
     /// Der zugrunde liegende NTFS-Bereich.
     pub target: NtfsTarget,
     /// Alle Dateien des Bereichs.
     pub files: Vec<FileEntry>,
+    /// Alle Verzeichnisse des Bereichs (für den Dateikatalog).
+    pub directories: Vec<FileEntry>,
 }
 
 impl FsIndex {
     /// Baut den Index für einen NTFS-Bereich auf.
     pub fn build(img: &ImageReader, target: NtfsTarget) -> Result<Self, NtfsVolumeError> {
         let mut vol = NtfsVolume::open(img, target.offset, target.size)?;
-        let files = vol
-            .walk()?
-            .into_iter()
-            .filter(|e| !e.is_directory)
-            .map(|e| FileEntry {
+        let mut files = Vec::new();
+        let mut directories = Vec::new();
+        for e in vol.walk()? {
+            let entry = FileEntry {
                 path: e.path,
                 mft_record: e.mft_record,
                 size: e.size,
-            })
-            .collect();
-        Ok(Self { target, files })
+                parent_record: e.parent_record,
+            };
+            if e.is_directory {
+                directories.push(entry);
+            } else {
+                files.push(entry);
+            }
+        }
+        Ok(Self {
+            target,
+            files,
+            directories,
+        })
     }
 
     /// Dateien mit einer der angegebenen Endungen (ohne Punkt, klein).
@@ -118,8 +131,10 @@ mod tests {
                     path: p.to_string(),
                     mft_record: *r,
                     size: 10,
+                    parent_record: 5,
                 })
                 .collect(),
+            directories: Vec::new(),
         }
     }
 

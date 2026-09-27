@@ -125,3 +125,70 @@ fn mitgelieferte_liste_laeuft_ohne_keywords() {
     let findings = json["findings"].as_array().unwrap();
     assert!(findings.iter().any(|f| f["name"] == "torrc"));
 }
+
+#[test]
+fn katalog_wird_verknuepft_und_nie_ueberschrieben() {
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path().join("test.dd");
+    let catalog = dir.path().join("katalog.jsonl");
+    std::fs::write(&dd, build_dd()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .args(["--no-hash", "--no-default-keywords", "--catalog"])
+        .arg(&catalog)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Exit: {:?}", output.status);
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    // Die NTFS-Signatur allein ergibt kein lesbares Volume, der Katalog ist leer,
+    // aber vorhanden und im Report mit seinem Hash verknüpft.
+    let bytes = std::fs::read(&catalog).unwrap();
+    let c = &json["catalog"];
+    assert_eq!(c["eintraege"], 0);
+    assert_eq!(c["hashes"]["bytes"], bytes.len() as u64);
+    assert_eq!(
+        c["hashes"]["sha256"],
+        stratum_core::hash_bytes(&bytes).sha256
+    );
+
+    // Zweiter Lauf auf dieselbe Katalogdatei bricht sofort ab.
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .args(["--no-hash", "--no-default-keywords", "--catalog"])
+        .arg(&catalog)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("existiert"));
+}
+
+#[test]
+fn dump_record_meldet_unbekanntes_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path().join("test.dd");
+    let ziel = dir.path().join("ziel.bin");
+    std::fs::write(&dd, build_dd()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .args(["--dump-record", "999", "42"])
+        .arg(&ziel)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("kein NTFS-Volume bei Offset 999"), "{err}");
+    assert!(err.contains("1024"), "bekannte Offsets fehlen: {err}");
+    assert!(!ziel.exists());
+
+    // Vorhandene Zieldatei bleibt unangetastet.
+    std::fs::write(&ziel, b"alt").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .args(["--dump-record", "1024", "0"])
+        .arg(&ziel)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&ziel).unwrap(), b"alt");
+}
