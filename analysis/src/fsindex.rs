@@ -35,6 +35,8 @@ pub struct FsIndex {
     pub directories: Vec<FileEntry>,
     /// Was der Durchlauf nicht erfassen konnte (unlesbare Verzeichnisse, Grenzen).
     pub warnings: Vec<String>,
+    /// Verzeichnisse, deren Inhalt fehlt: MFT-Nummer und Fehler, nach MFT sortiert.
+    pub unreadable_dirs: Vec<(u64, String)>,
 }
 
 /// Höchstzahl einzeln gemeldeter unlesbarer Verzeichnisse je Volume.
@@ -73,6 +75,12 @@ impl FsIndex {
                 stratum_ntfs::MAX_WALK_ENTRIES
             ));
         }
+        let mut unreadable_dirs: Vec<(u64, String)> = walk
+            .skipped
+            .into_iter()
+            .map(|d| (d.mft_record, d.error))
+            .collect();
+        unreadable_dirs.sort_unstable_by_key(|(rec, _)| *rec);
         for e in walk.entries {
             let entry = FileEntry {
                 path: e.path,
@@ -91,6 +99,7 @@ impl FsIndex {
             files,
             directories,
             warnings,
+            unreadable_dirs,
         })
     }
 
@@ -169,6 +178,7 @@ mod tests {
                 .collect(),
             directories: Vec::new(),
             warnings: Vec::new(),
+            unreadable_dirs: Vec::new(),
         }
     }
 

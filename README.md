@@ -102,7 +102,9 @@ Der Katalog enthält nur Einträge, die über den Verzeichnisbaum erreichbar sin
 keine gelöschten MFT-Datensätze. Er ist nach Volume und Pfad sortiert, so dass
 dasselbe Image immer dieselbe Datei ergibt. Der Report verweist unter `catalog`
 mit SHA-256, BLAKE3 und Zählern auf die Datei. Ist ein Datensatz nicht lesbar,
-bleibt der Eintrag mit dem Feld `fehler` erhalten.
+bleibt der Eintrag mit dem Feld `fehler` erhalten. Verzeichnisse, deren
+Index nicht lesbar war, tragen `inhalt_fehler`; ihr Inhalt fehlt im Katalog und
+im Pfad-Index, der Report nennt sie zusätzlich unter `warnings`.
 
 Einzelne Dateien lassen sich anschließend gezielt extrahieren:
 

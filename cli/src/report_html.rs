@@ -44,8 +44,12 @@ pub fn render(report: &Report) -> String {
             &mut h,
             "Einträge",
             &format!(
-                "{} ({} Dateien, {} Verzeichnisse, {} ohne lesbaren Datensatz)",
-                c.summary.eintraege, c.summary.dateien, c.summary.verzeichnisse, c.summary.fehler
+                "{} ({} Dateien, {} Verzeichnisse, {} ohne lesbaren Datensatz, {} Verzeichnisse ohne lesbaren Inhalt)",
+                c.summary.eintraege,
+                c.summary.dateien,
+                c.summary.verzeichnisse,
+                c.summary.fehler,
+                c.summary.verzeichnisse_ohne_inhalt
             ),
         );
         row(&mut h, "SHA-256", &c.hashes.sha256);

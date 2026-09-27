@@ -41,6 +41,8 @@ pub struct CatalogSummary {
     pub verzeichnisse: u64,
     /// Einträge, deren MFT-Datensatz nicht lesbar war (Eintrag mit `fehler`).
     pub fehler: u64,
+    /// Verzeichnisse, deren Inhalt nicht lesbar war (Eintrag mit `inhalt_fehler`).
+    pub verzeichnisse_ohne_inhalt: u64,
     /// Volume-Offsets, die in den Katalog eingegangen sind.
     pub volumes: Vec<u64>,
 }
@@ -98,6 +100,9 @@ struct Line<'a> {
     mft_record_offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fehler: Option<String>,
+    /// Verzeichnis, dessen Einträge nicht lesbar waren; sein Inhalt fehlt im Katalog.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    inhalt_fehler: Option<&'a str>,
 }
 
 /// Windows-Dateiattribute mit ihren Katalognamen.
@@ -147,6 +152,7 @@ fn line<'a>(
         hardlinks: None,
         mft_record_offset: None,
         fehler: None,
+        inhalt_fehler: None,
     };
     match info {
         Ok(info) => {
@@ -214,10 +220,16 @@ pub fn write_catalog<W: Write>(
                                 Err(e) => Err(format!("Volume nicht lesbar: {e}")),
                             };
                             errors += u64::from(info.is_err());
+                            let mut l = line(offset, entry, is_dir, info);
+                            if is_dir {
+                                l.inhalt_fehler = v
+                                    .unreadable_dirs
+                                    .binary_search_by_key(&entry.mft_record, |(rec, _)| *rec)
+                                    .ok()
+                                    .map(|i| v.unreadable_dirs[i].1.as_str());
+                            }
                             // Serialisierung eines eigenen, einfachen Typs scheitert nicht.
-                            if serde_json::to_writer(&mut buf, &line(offset, entry, is_dir, info))
-                                .is_ok()
-                            {
+                            if serde_json::to_writer(&mut buf, &l).is_ok() {
                                 buf.push(b'\n');
                             }
                         }
@@ -231,6 +243,7 @@ pub fn write_catalog<W: Write>(
             }
         }
         summary.verzeichnisse += v.directories.len() as u64;
+        summary.verzeichnisse_ohne_inhalt += v.unreadable_dirs.len() as u64;
         summary.dateien += v.files.len() as u64;
         summary.volumes.push(offset);
     }
@@ -327,12 +340,14 @@ mod tests {
             files: vec![entry("b.txt"), entry("a.txt")],
             directories: vec![entry("ordner")],
             warnings: Vec::new(),
+            unreadable_dirs: vec![(42, "INDX fehlt".into())],
         };
         let s = write_catalog(&img, &[v], &mut out).unwrap();
         assert_eq!(
             (s.eintraege, s.dateien, s.verzeichnisse, s.fehler),
             (3, 2, 1, 3)
         );
+        assert_eq!(s.verzeichnisse_ohne_inhalt, 1);
         let text = String::from_utf8(out).unwrap();
         let pfade: Vec<String> = text
             .lines()
@@ -340,5 +355,8 @@ mod tests {
             .collect();
         assert_eq!(pfade, ["\"a.txt\"", "\"b.txt\"", "\"ordner\""]);
         assert!(text.lines().all(|l| l.contains("Volume nicht lesbar")));
+        // Nur das Verzeichnis trägt den Hinweis auf fehlenden Inhalt.
+        assert_eq!(text.matches("\"inhalt_fehler\":\"INDX fehlt\"").count(), 1);
+        assert!(text.lines().last().unwrap().contains("inhalt_fehler"));
     }
 }
