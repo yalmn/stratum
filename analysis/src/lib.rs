@@ -34,6 +34,7 @@ mod reg;
 mod runner;
 mod timeline;
 mod tor;
+mod usb;
 mod vss;
 mod windows;
 
@@ -101,6 +102,16 @@ pub trait Analyzer: Sync {
 /// Einstiegspunkte für die Fuzz-Targets. Nicht Teil der stabilen API.
 #[doc(hidden)]
 pub mod fuzzing {
+    /// Prüft USB-Properties unter dem Wurzelschlüssel eines synthetischen Hives.
+    pub fn usb_properties(data: &[u8]) {
+        if let Ok(hive) = stratum_registry::Hive::parse(data) {
+            if let Ok(key) = hive.root() {
+                let mut finding = crate::Finding::new("usb", "", "SYSTEM");
+                crate::usb::add_times(&key, &mut finding, &mut Vec::new());
+            }
+        }
+    }
+
     /// Wertet Aufgaben-XML und den Text zusätzlich als Dienstbefehl aus.
     pub fn persistence_text(text: &str) {
         let _ = crate::filepersist::task_actions(text);

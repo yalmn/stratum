@@ -37,6 +37,10 @@ pub struct TimelineEntry {
 /// Attribut-Schlüssel mit Zeitstempel und die zugehörige Ereignisbezeichnung,
 /// Jeder vorhandene gültige Zeitpunkt erzeugt ein eigenes Ereignis.
 const TIME_KEYS: &[(&str, &str)] = &[
+    ("erste_installation_unix", "usb_erste_installation"),
+    ("installation_unix", "usb_installation"),
+    ("letzte_verbindung_unix", "usb_verbunden"),
+    ("letztes_trennen_unix", "usb_getrennt"),
     ("geloescht_unix", "geloescht"),
     ("letzter_zugriff_unix", "zugegriffen"),
     ("key_letzte_aenderung_unix", "registry_key_geaendert"),
