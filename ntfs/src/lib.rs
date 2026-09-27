@@ -339,10 +339,8 @@ enum RunPlan {
     /// Nicht-residente Läufe eines NTFS-komprimierten Stroms (LZNT1). Werden
     /// einheitenweise entpackt statt roh zusammengesetzt.
     CompressedRuns(Vec<(Option<u64>, u64)>),
-    /// Residente Daten: (physischer Offset, Länge).
-    Resident(u64, u64),
-    /// Rückfall auf den eingebauten Leser (nur seltene Restfälle).
-    Fallback,
+    /// Residente Daten, bereits aus dem fixup-korrigierten Dateidatensatz kopiert.
+    Resident(Vec<u8>),
 }
 
 /// Liest den ungenannten `$DATA`-Strom, indem die Datenläufe selbst
@@ -421,15 +419,17 @@ fn read_data<R: Read + Seek>(
                     RunPlan::Runs(runs)
                 }
             }
-            NtfsAttributeValue::Resident(ref res) => match res.data_position().value() {
-                Some(p) => {
-                    if debug {
-                        eprintln!("[stratum] $DATA resident: {file_size} Bytes");
-                    }
-                    RunPlan::Resident(p.get(), file_size)
+            NtfsAttributeValue::Resident(ref res) => {
+                // Nicht über `data_position()` vom Datenträger lesen: ntfs 0.4.0
+                // liefert dort die Position des Attributkopfs, nicht des Werts,
+                // und die Rohbytes wären nicht um die Update Sequence korrigiert.
+                let data = res.data();
+                let len = usize::try_from(file_size).unwrap_or(0).min(data.len());
+                if debug {
+                    eprintln!("[stratum] $DATA resident: {len} Bytes");
                 }
-                None => RunPlan::Fallback,
-            },
+                RunPlan::Resident(data[..len].to_vec())
+            }
             NtfsAttributeValue::AttributeListNonResident(_) => {
                 // `value` haelt hier keinen fs-Borrow; der Sammler darf fs nutzen.
                 let runs = collect_attribute_list_runs(ntfs, fs, file)?;
@@ -483,17 +483,7 @@ fn read_data<R: Read + Seek>(
         RunPlan::CompressedRuns(runs) => {
             buf = assemble_compressed(&runs, fs, u64::from(ntfs.cluster_size()), file_size)?;
         }
-        RunPlan::Resident(p, len) => {
-            let len = usize::try_from(len).unwrap_or(0);
-            buf.resize(len, 0);
-            if fs.seek(SeekFrom::Start(p)).is_ok() {
-                let _ = fs.read_exact(&mut buf);
-            }
-        }
-        RunPlan::Fallback => {
-            let value = attribute.value(fs)?;
-            value.attach(fs).take(MAX_FILE_SIZE).read_to_end(&mut buf)?;
-        }
+        RunPlan::Resident(data) => buf = data,
     }
     Ok((buf, stream_size))
 }

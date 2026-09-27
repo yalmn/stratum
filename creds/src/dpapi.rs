@@ -37,11 +37,14 @@ const CALG_SHA_512: u32 = 0x800e;
 const CALG_3DES: u32 = 0x6603;
 const CALG_AES_256: u32 = 0x6610;
 
-/// Bekannte Offsets, an denen der MasterKey-Blob in einer MasterKeyFile beginnt.
-/// Der Dateikopf ist je nach Windows-Version unterschiedlich lang; der Blob wird
-/// über seine Algorithmus-Signatur eindeutig bestätigt. Die MasterKeyLen steht
-/// jeweils 32 Byte vor dem Blob.
-const MK_BLOB_OFFSETS: [usize; 2] = [152, 128];
+/// Länge des MasterKeyFile-Kopfs (MS-DPAPI): Version, zwei reservierte Felder,
+/// GUID als 72 Byte UTF-16LE ab Offset 12, Policy/Flags und ab Offset 96 die
+/// vier 64-Bit-Längen (MasterKey, BackupKey, CredHist, DomainKey).
+const MK_FILE_HEADER: usize = 128;
+/// Offset der GUID im Kopf.
+const MK_GUID_OFFSET: usize = 12;
+/// Offset der MasterKeyLen im Kopf.
+const MK_LEN_OFFSET: usize = 96;
 
 /// Fehler der DPAPI-Auswertung.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -99,25 +102,22 @@ fn prekey(pwd_sha1: &[u8; 20], sid: &str) -> [u8; 20] {
     mac.finalize().into_bytes().into()
 }
 
-/// Der GUID-Name einer Masterkey-Datei steht im Kopf als UTF-16LE-Text. Die
-/// Position variiert je nach Windows-Version (36 bei Windows 10/11, 12 älter);
-/// gewählt wird die Stelle, die wie eine GUID aussieht.
+/// Liest den GUID-Namen einer Masterkey-Datei aus dem Kopf (UTF-16LE ab Offset 12).
 pub fn masterkey_file_guid(file: &[u8]) -> Result<String, DpapiError> {
-    for &off in &[36usize, 12] {
-        let Some(raw) = file.get(off..off + 72) else {
-            continue;
-        };
-        let units: Vec<u16> = raw
-            .chunks_exact(2)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .take_while(|&u| u != 0)
-            .collect();
-        let text = String::from_utf16_lossy(&units);
-        if text.len() == 36 && text.as_bytes()[8] == b'-' {
-            return Ok(text);
-        }
+    let raw = file
+        .get(MK_GUID_OFFSET..MK_GUID_OFFSET + 72)
+        .ok_or(DpapiError::TooShort("Masterkey-Dateikopf"))?;
+    let units: Vec<u16> = raw
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .take_while(|&u| u != 0)
+        .collect();
+    let text = String::from_utf16_lossy(&units);
+    if text.len() == 36 && text.as_bytes()[8] == b'-' {
+        Ok(text)
+    } else {
+        Err(DpapiError::TooShort("Masterkey-GUID nicht gefunden"))
     }
-    Err(DpapiError::TooShort("Masterkey-GUID nicht gefunden"))
 }
 
 /// Entschlüsselt den Masterkey aus einer MasterKeyFile mit Passwort-Hash und
@@ -138,35 +138,28 @@ pub fn decrypt_system_masterkey(file: &[u8], key: &[u8; 20]) -> Result<[u8; 64],
     decrypt_masterkey_with_prekey(file, key)
 }
 
-/// Findet den MasterKey-Blob in einer MasterKeyFile. Der Dateikopf variiert je
-/// nach Windows-Version in der Länge, deshalb werden die bekannten Blob-Offsets
-/// durchprobiert und der Treffer über seine Algorithmus-Signatur (bekannter
-/// Hash- und Krypto-Algorithmus an fester Stelle) bestätigt.
+/// Liefert den MasterKey-Blob hinter dem Dateikopf. Die Algorithmus-Kennungen
+/// an fester Stelle im Blob dienen als Plausibilitätsprüfung.
 fn locate_masterkey_blob(file: &[u8]) -> Result<&[u8], DpapiError> {
-    for &hdr in &MK_BLOB_OFFSETS {
-        let Some(len_off) = hdr.checked_sub(32) else {
-            continue;
-        };
-        let Some(mk_len) = le_u64(file, len_off) else {
-            continue;
-        };
-        let mk_len = mk_len as usize;
-        if !(32..=file.len()).contains(&mk_len) {
-            continue;
-        }
-        let Some(blob) = file.get(hdr..hdr + mk_len) else {
-            continue;
-        };
-        let (Some(ha), Some(ca)) = (le_u32(blob, 24), le_u32(blob, 28)) else {
-            continue;
-        };
-        let known_hash = ha == CALG_SHA1 || ha == CALG_SHA_512;
-        let known_crypt = ca == CALG_3DES || ca == CALG_AES_256;
-        if known_hash && known_crypt {
-            return Ok(blob);
-        }
+    let mk_len = le_u64(file, MK_LEN_OFFSET).ok_or(DpapiError::TooShort("Masterkey-Dateikopf"))?;
+    let blob = usize::try_from(mk_len)
+        .ok()
+        .filter(|&l| l >= 32)
+        .and_then(|l| file.get(MK_FILE_HEADER..MK_FILE_HEADER.checked_add(l)?))
+        .ok_or(DpapiError::TooShort("Masterkey-Blob"))?;
+    let (Some(ha), Some(ca)) = (le_u32(blob, 24), le_u32(blob, 28)) else {
+        return Err(DpapiError::TooShort("Masterkey-Blob"));
+    };
+    let known_hash = ha == CALG_SHA1 || ha == CALG_SHA_512;
+    let known_crypt = ca == CALG_3DES || ca == CALG_AES_256;
+    if known_hash && known_crypt {
+        Ok(blob)
+    } else {
+        Err(DpapiError::Unsupported {
+            hash: ha,
+            crypt: ca,
+        })
     }
-    Err(DpapiError::TooShort("Masterkey-Blob nicht gefunden"))
 }
 
 /// Schlüsselableitung der DPAPI-Masterkeys (HMAC-SHA512). Es ist bewusst nicht
@@ -386,10 +379,9 @@ mod tests {
     use super::*;
     use crate::crypto::aes256_cbc_encrypt;
 
-    // Baut eine MasterKeyFile im Windows-10/11-Layout (Blob ab Offset 152,
-    // MasterKeyLen bei 120), aus der sich ein gewählter Masterkey wieder
-    // ableiten lässt (Round-Trip, gleiche Ableitung wie im Produktionspfad).
-    const MK_HEADER: usize = 152;
+    // Baut eine MasterKeyFile (Blob ab Offset 128, MasterKeyLen bei 96), aus der
+    // sich ein gewählter Masterkey wieder ableiten lässt (Round-Trip, gleiche
+    // Ableitung wie im Produktionspfad).
     fn build_masterkey_file(
         masterkey: &[u8; 64],
         pre: &[u8; 20],
@@ -427,9 +419,8 @@ mod tests {
         mk.extend_from_slice(&CALG_AES_256.to_le_bytes());
         mk.extend_from_slice(&enc);
 
-        // Datei-Kopf: 152 Byte (Win10/11), MasterKeyLen bei Offset 120.
-        let mut file = vec![0u8; MK_HEADER];
-        file[120..128].copy_from_slice(&(mk.len() as u64).to_le_bytes());
+        let mut file = vec![0u8; MK_FILE_HEADER];
+        file[MK_LEN_OFFSET..MK_LEN_OFFSET + 8].copy_from_slice(&(mk.len() as u64).to_le_bytes());
         file.extend_from_slice(&mk);
         file
     }
@@ -474,7 +465,7 @@ mod tests {
 
     #[test]
     fn alter_algorithmus_wird_gemeldet() {
-        let mut file = vec![0u8; MK_HEADER];
+        let mut file = vec![0u8; MK_FILE_HEADER];
         let mut mk = Vec::new();
         mk.extend_from_slice(&2u32.to_le_bytes());
         mk.extend_from_slice(&[0u8; 16]);
@@ -482,7 +473,7 @@ mod tests {
         mk.extend_from_slice(&CALG_SHA1.to_le_bytes());
         mk.extend_from_slice(&CALG_3DES.to_le_bytes());
         mk.extend_from_slice(&[0u8; 160]);
-        file[120..128].copy_from_slice(&(mk.len() as u64).to_le_bytes());
+        file[MK_LEN_OFFSET..MK_LEN_OFFSET + 8].copy_from_slice(&(mk.len() as u64).to_le_bytes());
         file.extend_from_slice(&mk);
         assert_eq!(
             decrypt_masterkey(&file, "S-1-5-21-1-1-1-1", &[0; 20]),
