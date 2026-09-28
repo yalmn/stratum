@@ -1,11 +1,14 @@
 //! MFT-Volltimeline gegen ein synthetisches NTFS-Volume.
 
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use stratum_analysis::{write_mft_timeline, AnalysisContext, NtfsTarget};
 use stratum_core::ImageReader;
+use stratum_ntfs::NtfsVolume;
+
+const FILE_RECORD_FLAGS_OFFSET: u64 = 0x16;
 
 fn have(tool: &str) -> bool {
     Command::new(tool)
@@ -16,7 +19,7 @@ fn have(tool: &str) -> bool {
 }
 
 fn build_ntfs(dir: &Path) -> Option<PathBuf> {
-    if !have("mkntfs") || !have("ntfscp") || !have("ntfsrm") {
+    if !have("mkntfs") || !have("ntfscp") {
         return None;
     }
     let image = dir.join("mft-timeline.ntfs");
@@ -47,25 +50,45 @@ fn build_ntfs(dir: &Path) -> Option<PathBuf> {
             return None;
         }
     }
-    if !Command::new("ntfsrm")
-        .arg(&image)
-        .arg("geloescht.txt")
-        .output()
-        .ok()?
-        .status
-        .success()
-    {
-        return None;
-    }
+    mark_deleted(&image, "geloescht.txt")?;
     Some(image)
 }
 
+fn mark_deleted(image: &Path, name: &str) -> Option<()> {
+    let reader = ImageReader::open(image).ok()?;
+    let mut volume = NtfsVolume::open(&reader, 0, reader.len()).ok()?;
+    let record = volume
+        .walk()
+        .ok()?
+        .into_iter()
+        .find(|entry| entry.path.eq_ignore_ascii_case(name))?
+        .mft_record;
+    let offset = volume.record_info(record, None).ok()?.record_offset?;
+    drop(volume);
+    drop(reader);
+
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(image)
+        .ok()?;
+    let flags_offset = offset.checked_add(FILE_RECORD_FLAGS_OFFSET)?;
+    file.seek(SeekFrom::Start(flags_offset)).ok()?;
+    let mut bytes = [0u8; 2];
+    file.read_exact(&mut bytes).ok()?;
+    let flags = u16::from_le_bytes(bytes) & !1;
+    file.seek(SeekFrom::Start(flags_offset)).ok()?;
+    file.write_all(&flags.to_le_bytes()).ok()?;
+    file.flush().ok()?;
+    Some(())
+}
+
 #[test]
-#[ignore = "benötigt mkntfs, ntfscp und ntfsrm; explizit auf der Linux-VM ausführen"]
+#[ignore = "benötigt mkntfs und ntfscp; explizit auf der Linux-VM ausführen"]
 fn aktive_und_geloeschte_datensaetze() {
     let directory = tempfile::tempdir().unwrap();
-    let path = build_ntfs(directory.path())
-        .expect("mkntfs, ntfscp und ntfsrm müssen auf der VM vorhanden sein");
+    let path =
+        build_ntfs(directory.path()).expect("mkntfs und ntfscp müssen auf der VM vorhanden sein");
     let before = std::fs::read(&path).unwrap();
     let image = ImageReader::open(&path).unwrap();
     let context = AnalysisContext::build(
