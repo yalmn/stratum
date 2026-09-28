@@ -26,7 +26,7 @@ use ntfs::indexes::NtfsFileNameIndex;
 use ntfs::structured_values::{
     NtfsAttributeList, NtfsFileName, NtfsFileNamespace, NtfsStandardInformation,
 };
-use ntfs::{Ntfs, NtfsAttributeFlags, NtfsAttributeType, NtfsFile};
+use ntfs::{Ntfs, NtfsAttributeFlags, NtfsAttributeType, NtfsFile, NtfsFileFlags};
 
 use stratum_core::ImageReader;
 
@@ -155,6 +155,21 @@ pub struct NamedStream {
     pub size: u64,
 }
 
+/// Ein `$FILE_NAME`-Attribut eines MFT-Datensatzes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileNameInfo {
+    /// Dateiname ohne Elternpfad.
+    pub name: String,
+    /// Namensraum: `posix`, `win32`, `dos` oder `win32_dos`.
+    pub namespace: &'static str,
+    /// MFT-Datensatznummer des Elternverzeichnisses.
+    pub parent_record: u64,
+    /// Sequenznummer des referenzierten Elternverzeichnisses.
+    pub parent_sequence: u16,
+    /// Im `$FILE_NAME` gespeicherte Zeitstempel.
+    pub times: NtfsTimes,
+}
+
 /// Metadaten eines MFT-Datensatzes, ohne Dateiinhalt.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordInfo {
@@ -164,6 +179,8 @@ pub struct RecordInfo {
     pub sequence: u16,
     /// Absoluter Byte-Offset des Datensatzes im Image, falls bekannt.
     pub record_offset: Option<u64>,
+    /// Ob der Datensatz laut MFT-Kopf aktuell belegt ist.
+    pub in_use: bool,
     /// Ob der Datensatz ein Verzeichnis beschreibt.
     pub is_directory: bool,
     /// Zahl der Hardlinks laut Datensatzkopf.
@@ -174,6 +191,8 @@ pub struct RecordInfo {
     pub file_attributes: u32,
     /// Zeiten aus dem passenden `$FILE_NAME`-Attribut.
     pub fn_times: Option<NtfsTimes>,
+    /// Alle lesbaren `$FILE_NAME`-Attribute, einschließlich Hardlinks.
+    pub file_names: Vec<FileNameInfo>,
     /// Logische Länge des unbenannten `$DATA`-Stroms.
     pub data_size: Option<u64>,
     /// Benannte `$DATA`-Ströme.
@@ -186,6 +205,8 @@ pub struct RecordInfo {
 
 /// Obergrenze für benannte Datenströme je Datensatz (Schutz vor Manipulation).
 const MAX_STREAMS: usize = 64;
+/// Obergrenze für Namen/Hardlinks je Datensatz (Schutz vor Manipulation).
+const MAX_FILE_NAMES: usize = 256;
 
 /// Obergrenze für die Zahl der Einträge eines Durchlaufs (Schutz vor
 /// manipulierten Images mit absurd vielen Einträgen).
@@ -330,11 +351,13 @@ impl<R: Read + Seek> NtfsVolume<R> {
                 .position()
                 .value()
                 .map(|p| self.part_offset.saturating_add(p.get())),
+            in_use: file.flags().contains(NtfsFileFlags::IN_USE),
             is_directory: file.is_directory(),
             hard_links: file.hard_link_count(),
             si_times: None,
             file_attributes: 0,
             fn_times: None,
+            file_names: Vec::new(),
             data_size: None,
             streams: Vec::new(),
             reparse_tag: None,
@@ -356,21 +379,41 @@ impl<R: Read + Seek> NtfsVolume<R> {
                     });
                     info.file_attributes = si.file_attributes().bits();
                 }
-                NtfsAttributeType::FileName if fn_is_dos => {
+                NtfsAttributeType::FileName => {
                     let name: NtfsFileName = attribute.structured_value(fs)?;
-                    let parent_ok = parent_record.is_none_or(|p| {
-                        name.parent_directory_reference().file_record_number() == p
-                    });
-                    if !parent_ok {
-                        continue;
+                    if info.file_names.len() < MAX_FILE_NAMES {
+                        let parent = name.parent_directory_reference();
+                        let times = NtfsTimes {
+                            created: name.creation_time().nt_timestamp(),
+                            modified: name.modification_time().nt_timestamp(),
+                            mft_modified: name.mft_record_modification_time().nt_timestamp(),
+                            accessed: name.access_time().nt_timestamp(),
+                        };
+                        let item = FileNameInfo {
+                            name: name.name().to_string_lossy(),
+                            namespace: namespace_name(name.namespace()),
+                            parent_record: parent.file_record_number(),
+                            parent_sequence: parent.sequence_number(),
+                            times,
+                        };
+                        if !info.file_names.contains(&item) {
+                            info.file_names.push(item);
+                        }
                     }
-                    fn_is_dos = name.namespace() == NtfsFileNamespace::Dos;
-                    info.fn_times = Some(NtfsTimes {
-                        created: name.creation_time().nt_timestamp(),
-                        modified: name.modification_time().nt_timestamp(),
-                        mft_modified: name.mft_record_modification_time().nt_timestamp(),
-                        accessed: name.access_time().nt_timestamp(),
-                    });
+                    if fn_is_dos {
+                        let parent_ok = parent_record.is_none_or(|p| {
+                            name.parent_directory_reference().file_record_number() == p
+                        });
+                        if parent_ok {
+                            fn_is_dos = name.namespace() == NtfsFileNamespace::Dos;
+                            info.fn_times = Some(NtfsTimes {
+                                created: name.creation_time().nt_timestamp(),
+                                modified: name.modification_time().nt_timestamp(),
+                                mft_modified: name.mft_record_modification_time().nt_timestamp(),
+                                accessed: name.access_time().nt_timestamp(),
+                            });
+                        }
+                    }
                 }
                 NtfsAttributeType::ReparsePoint if info.reparse_tag.is_none() => {
                     let data = small_value(&attribute, fs)?;
@@ -402,6 +445,29 @@ impl<R: Read + Seek> NtfsVolume<R> {
             }
         }
         Ok(info)
+    }
+
+    /// Anzahl der Datensätze im logischen `$MFT`-Datenstrom.
+    ///
+    /// Die Größe wird aus `$MFT::$DATA` gelesen und gegen Datensatz- und
+    /// Partitionsgröße plausibilisiert. Dadurch kann ein manipuliertes Image
+    /// keine unbeschränkte Schleife erzwingen.
+    pub fn mft_record_count(&mut self) -> Result<u64, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        let mft = ntfs.file(fs, 0)?;
+        let item = mft.data(fs, "").ok_or(NtfsVolumeError::MissingMftData)??;
+        let size = item.to_attribute()?.value_length();
+        let record_size = ntfs.file_record_size();
+        if size % u64::from(record_size) != 0 {
+            return Err(NtfsVolumeError::InvalidMftSize { size, record_size });
+        }
+        let records = size / u64::from(record_size);
+        let maximum = (self.part_size / u64::from(record_size)).min(MAX_WALK_ENTRIES as u64);
+        if records > maximum {
+            return Err(NtfsVolumeError::ImplausibleMftRecordCount { records, maximum });
+        }
+        Ok(records)
     }
 
     /// Durchläuft das komplette Verzeichnis ab der Wurzel und liefert alle
@@ -473,6 +539,15 @@ impl<R: Read + Seek> NtfsVolume<R> {
             }
         }
         Ok(result)
+    }
+}
+
+fn namespace_name(namespace: NtfsFileNamespace) -> &'static str {
+    match namespace {
+        NtfsFileNamespace::Posix => "posix",
+        NtfsFileNamespace::Win32 => "win32",
+        NtfsFileNamespace::Dos => "dos",
+        NtfsFileNamespace::Win32AndDos => "win32_dos",
     }
 }
 
