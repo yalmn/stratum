@@ -3,6 +3,33 @@
 /// Fehler beim Zugriff auf ein NTFS-Volume.
 #[derive(Debug, thiserror::Error)]
 pub enum NtfsVolumeError {
+    /// Ein Datenstrom ist für den rohen Extent-Zugriff komprimiert.
+    #[error("Datenstrom {stream} ist NTFS-komprimiert und nicht roh auswertbar")]
+    CompressedDataStream {
+        /// Name des Datenstroms.
+        stream: String,
+    },
+
+    /// Ein Datenstrom belegt mehr Bytes als die Schutzgrenze erlaubt.
+    #[error("Datenstrom belegt {allocated} Bytes, maximal zulässig sind {maximum}")]
+    DataStreamTooLarge {
+        /// Physisch belegte Bytes.
+        allocated: u64,
+        /// Schutzgrenze.
+        maximum: u64,
+    },
+
+    /// Ein Datenlauf verweist außerhalb des geöffneten Volumes.
+    #[error("Datenlauf [{offset}, +{size}) liegt außerhalb des Volumes ({volume_size} Bytes)")]
+    DataRunOutOfVolume {
+        /// Start relativ zum Volume.
+        offset: u64,
+        /// Länge des Laufs.
+        size: u64,
+        /// Größe des Volumes.
+        volume_size: u64,
+    },
+
     /// Der angegebene Bereich liegt außerhalb des Images.
     #[error("Partition [{offset}, +{size}) liegt außerhalb des Images ({image_size} Bytes)")]
     OutOfImage {

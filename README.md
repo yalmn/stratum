@@ -72,8 +72,9 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 | `--dump <pfad> <ziel>` | eine einzelne Datei aus dem Image extrahieren und beenden (ohne Analyse) |
 | `--dump-record <volume_offset> <mft> <ziel>` | eine Datei über Volume-Offset und MFT-Nummer extrahieren (Werte aus dem Katalog) |
 | `--catalog <datei>` | Dateikatalog aller Dateien und Verzeichnisse als JSON Lines schreiben |
+| `--usn-journal <datei>` | `$UsnJrnl:$J` aller NTFS-Volumes als JSON Lines schreiben |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |
-| `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei grossen Images Zeit) |
+| `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei großen Images Zeit) |
 | `--dpapi-password <pw>` | Benutzerpasswort, um gespeicherte Chromium-Passwörter (DPAPI) zu entschlüsseln |
 | `--dpapi-sha1 <hex>` | statt des Passworts dessen vorberechneter SHA-1 (UTF-16LE) |
 | `--dpapi-masterkey <hex>` | statt des Passworts ein bereits entschlüsselter DPAPI-Masterkey (64 Byte) |
@@ -123,6 +124,28 @@ Inhalts, den Artefaktzeiten der Datei und getrennt davon dem Zeitpunkt der
 Extraktion. Das gilt auch für `--dump`. Vorhandene Dateien werden nicht
 überschrieben. Dateien über 256 MiB werden nur bis zu dieser Grenze extrahiert
 und als `abgeschnitten` gekennzeichnet.
+
+### NTFS-Änderungsjournal
+
+`--usn-journal usn.jsonl` liest den benannten Strom `$Extend\$UsnJrnl:$J`
+aller NTFS-Volumes. Jede JSON-Zeile entspricht einem USN_RECORD_V2- oder
+USN_RECORD_V3-Datensatz. Enthalten sind USN, UTC-Zeit und roher FILETIME-Wert,
+Datei- und Elternreferenz, Dateiname, Änderungsgründe, Dateiattribute,
+Journaloffset und physischer Image-Offset. V2-Referenzen werden zusätzlich in
+MFT-Nummer und Sequenznummer zerlegt. 128-Bit-Referenzen aus V3 bleiben als
+vollständiger Hexwert erhalten und werden nicht als MFT-Nummer interpretiert.
+
+Die Datensätze bleiben in ihrer Reihenfolge im Journal. Mehrere Änderungen
+können in einem Datensatz als kombinierte Reason-Flags erscheinen. Eine
+Umbenennung besteht üblicherweise aus `RENAME_OLD_NAME` und
+`RENAME_NEW_NAME`; stratum bewahrt beide Datensätze getrennt. Das Journal
+belegt nur Änderungen, nicht deren Erfolg oder den früheren Dateiinhalt.
+
+Der `$J`-Strom kann einen sehr großen spärlichen Bereich besitzen. stratum liest
+nur physisch belegte Datenläufe und materialisiert die Nullbereiche nicht. Die
+Ausgabe wird nicht überschrieben und erscheint im Hauptreport mit SHA-256,
+BLAKE3, Größen- und Ereigniszählern. Unbekannte Hauptversionen und beschädigte
+Datensätze werden gezählt, ohne ein Format zu erraten.
 
 ### Browser-Passwörter (DPAPI)
 
@@ -202,7 +225,7 @@ keine Aussage über Schadsoftware; `auffaellig_grund` nennt den Anlass.
 
 Geplant, noch nicht implementiert:
 
-- Weitere Windows-Artefakte: USN/MFT, SRUM, ActivitiesCache, WebCache.
+- Weitere Windows-Artefakte: MFT-Volltimeline, SRUM, ActivitiesCache, WebCache.
 - Dateibasierte Analyse von Schattenkopien.
 - Linux-Dateisysteme und Serviceanalysen für Web, Datenbanken, Authentifizierung,
   VPN und Gateways.

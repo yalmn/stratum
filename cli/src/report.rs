@@ -5,7 +5,7 @@
 
 use serde::Serialize;
 
-use stratum_analysis::{CatalogSummary, Finding, TimeZone, TimelineEntry};
+use stratum_analysis::{CatalogSummary, Finding, TimeZone, TimelineEntry, UsnJournalSummary};
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
 
@@ -34,8 +34,27 @@ pub struct Report {
     /// Verweis auf den Dateikatalog, falls einer geschrieben wurde.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogInfo>,
+    /// Verweis auf das USN-Änderungsjournal, falls geschrieben.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usn_journal: Option<UsnJournalInfo>,
     /// Übergreifende Hinweise.
     pub warnings: Vec<String>,
+}
+
+/// Verweis auf die USN-Zeitachse mit Hashes und Zählern.
+#[derive(Debug, Serialize)]
+pub struct UsnJournalInfo {
+    /// Pfad der JSON-Lines-Datei.
+    pub pfad: String,
+    /// Beschreibung der ausgewerteten Quelle.
+    pub quelle: &'static str,
+    /// Dateiformat und Reihenfolge.
+    pub format: &'static str,
+    /// SHA-256 und BLAKE3 über die geschriebene Datei.
+    pub hashes: ImageHashes,
+    /// Zähler des Journal-Durchlaufs.
+    #[serde(flatten)]
+    pub summary: UsnJournalSummary,
 }
 
 /// Verweis auf den Dateikatalog mit Hashes der geschriebenen Datei.

@@ -71,3 +71,10 @@ path = "fuzz_targets/wof.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "usn"
+path = "fuzz_targets/usn.rs"
+test = false
+doc = false
+bench = false

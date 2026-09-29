@@ -34,6 +34,7 @@ mod reg;
 mod runner;
 mod timeline;
 mod tor;
+mod usn;
 mod vss;
 mod windows;
 
@@ -61,6 +62,7 @@ pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyze
 pub use runner::{run_all, AnalysisResult};
 pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
+pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
 pub use vss::VssAnalyzer;
 pub use windows::{extract_snapshots, Hives, TimeZone, WindowsInstall};
 
@@ -105,5 +107,10 @@ pub mod fuzzing {
     pub fn persistence_text(text: &str) {
         let _ = crate::filepersist::task_actions(text);
         let _ = crate::pathrating::rate_command(text);
+    }
+
+    /// Prüft den USN-Scanner mit beliebigen Bytes.
+    pub fn usn(data: &[u8]) {
+        crate::usn::fuzz(data);
     }
 }
