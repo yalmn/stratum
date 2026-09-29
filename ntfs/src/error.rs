@@ -25,6 +25,10 @@ pub enum NtfsVolumeError {
         maximum: u64,
     },
 
+    /// Die gültige Datenlänge eines nicht-residenten Stroms ist nicht bestimmbar.
+    #[error("gültige Datenlänge nicht bestimmbar: {0}")]
+    ValidDataLength(&'static str),
+
     /// Ein Datenstrom ist für den rohen Extent-Zugriff komprimiert.
     #[error("Datenstrom {stream} ist NTFS-komprimiert und nicht roh auswertbar")]
     CompressedDataStream {

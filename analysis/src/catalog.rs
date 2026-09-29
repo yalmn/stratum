@@ -97,6 +97,8 @@ struct ContentInfo {
     mime: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     signatur: Option<Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gueltige_laenge: Option<u64>,
 }
 
 type CachedContent = Arc<OnceLock<Result<ContentInfo, String>>>;
@@ -137,6 +139,9 @@ struct Line<'a> {
     mime: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     signatur: Option<Signature>,
+    /// Gültige Datenlänge, nur wenn kleiner als die Größe; dahinter Nullen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gueltige_laenge: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     hash_fehler: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -200,6 +205,7 @@ fn line<'a>(
         dateityp: None,
         mime: None,
         signatur: None,
+        gueltige_laenge: None,
         hash_fehler: None,
         mft_record_offset: None,
         fehler: None,
@@ -240,6 +246,7 @@ fn line<'a>(
                 l.dateityp = Some(content.dateityp);
                 l.mime = content.mime;
                 l.signatur = content.signatur;
+                l.gueltige_laenge = content.gueltige_laenge;
             }
             Err(error) => l.hash_fehler = Some(error),
         }
@@ -269,6 +276,7 @@ impl Inspector {
             dateityp,
             mime,
             signatur,
+            gueltige_laenge: None,
         }
     }
 }
@@ -384,7 +392,9 @@ fn inspect_file<R: std::io::Read + std::io::Seek>(
             inspector.bytes, meta.size
         ));
     }
-    Ok(inspector.finish())
+    let mut content = inspector.finish();
+    content.gueltige_laenge = meta.valid_size;
+    Ok(content)
 }
 
 /// Schreibt den Katalog aller Volumes als JSON Lines nach `out`.

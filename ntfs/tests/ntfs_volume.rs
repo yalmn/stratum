@@ -167,3 +167,73 @@ fn liest_datei_und_verzeichnis() {
     assert!(wurzel.is_directory);
     assert_eq!(wurzel.data_size, None);
 }
+
+/// Sucht im rohen FILE-Datensatz den unbenannten, nicht-residenten `$DATA`-Kopf.
+fn data_header(record: &[u8]) -> usize {
+    let mut offset = usize::from(u16::from_le_bytes([record[0x14], record[0x15]]));
+    loop {
+        let ty = u32::from_le_bytes(record[offset..offset + 4].try_into().unwrap());
+        assert_ne!(ty, 0xffff_ffff, "kein $DATA-Attribut gefunden");
+        let len = u32::from_le_bytes(record[offset + 4..offset + 8].try_into().unwrap()) as usize;
+        if ty == 0x80 && record[offset + 8] == 1 && record[offset + 9] == 0 {
+            return offset;
+        }
+        offset += len;
+    }
+}
+
+#[test]
+fn gueltige_datenlaenge_wird_beachtet() {
+    let dir = tempfile::tempdir().unwrap();
+    let inhalt: Vec<u8> = (0..64 * 1024u32).map(|i| (i % 253) as u8 + 1).collect();
+    let Some(img_path) = build_ntfs(dir.path(), &[("teil.bin", inhalt.as_slice())]) else {
+        eprintln!("mkntfs/ntfscp nicht vorhanden, Test übersprungen");
+        return;
+    };
+
+    // Im Fixture die gültige Datenlänge auf 10.000 Byte setzen, so wie Windows
+    // es bei vorab vergrößerten, nur teilweise beschriebenen Dateien hinterlässt.
+    let record_offset = {
+        let img = ImageReader::open(&img_path).unwrap();
+        let mut vol = NtfsVolume::open(&img, 0, img.len()).unwrap();
+        let eintrag = vol
+            .walk()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.path.eq_ignore_ascii_case("teil.bin"))
+            .expect("teil.bin im Walk");
+        vol.record_info(eintrag.mft_record, None)
+            .unwrap()
+            .record_offset
+            .unwrap() as usize
+    };
+    let mut bytes = std::fs::read(&img_path).unwrap();
+    let record = &mut bytes[record_offset..record_offset + 1024];
+    let kopf = data_header(record);
+    // Die Felder müssen vor dem ersten Blockende liegen, dort greift die
+    // Update Sequence nicht.
+    assert!(kopf + 0x40 <= 510);
+    assert_eq!(
+        u64::from_le_bytes(record[kopf + 0x38..kopf + 0x40].try_into().unwrap()),
+        inhalt.len() as u64
+    );
+    record[kopf + 0x38..kopf + 0x40].copy_from_slice(&10_000u64.to_le_bytes());
+    std::fs::write(&img_path, &bytes).unwrap();
+
+    let img = ImageReader::open(&img_path).unwrap();
+    let mut vol = NtfsVolume::open(&img, 0, img.len()).unwrap();
+    let datei = vol.read_file("teil.bin").unwrap().unwrap();
+    assert_eq!(datei.meta.size, inhalt.len() as u64);
+    assert_eq!(datei.meta.valid_size, Some(10_000));
+    assert_eq!(datei.data.len(), inhalt.len());
+    assert_eq!(&datei.data[..10_000], &inhalt[..10_000]);
+    assert!(datei.data[10_000..].iter().all(|&b| b == 0));
+
+    let mut gestreamt = Vec::new();
+    let meta = vol
+        .write_file_by_record(datei.meta.mft_record, "teil.bin", &mut gestreamt)
+        .unwrap()
+        .unwrap();
+    assert_eq!(meta.valid_size, Some(10_000));
+    assert_eq!(gestreamt, datei.data);
+}

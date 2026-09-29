@@ -110,6 +110,14 @@ fehlt der Hash und `hash_fehler` beschreibt die Ursache. Die Signaturprüfung
 ist auf die ersten 64 KiB begrenzt; SHA-256 umfasst unabhängig davon die ganze
 Datei.
 
+NTFS führt je Datenstrom eine gültige Datenlänge (Valid Data Length). Ist sie
+kleiner als die Dateigröße, etwa bei vorab vergrößerten und nur teilweise
+beschriebenen Dateien, liefert Windows dahinter Nullen, auch wenn in den
+belegten Clustern noch alte Daten stehen. stratum liest genauso, damit Inhalt
+und SHA-256 mit dem übereinstimmen, was Windows selbst ausgibt. Der Katalog
+nennt dann `gueltige_laenge`. Die Altdaten dahinter gehören zum Slack und
+werden hier nicht ausgewertet.
+
 Vom System komprimierte Dateien (WOF, etwa CompactOS) tragen `wof` mit dem
 Verfahren und `reparse_tag`. Beim Lesen entpackt stratum sie aus dem Strom
 `WofCompressedData` (XPRESS4K, XPRESS8K, XPRESS16K). LZX und WIM-gestützte Dateien
