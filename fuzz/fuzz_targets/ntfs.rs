@@ -12,4 +12,9 @@ fuzz_target!(|data: &[u8]| {
     let _ = vol.read_file("Windows/System32/config/SYSTEM");
     let _ = vol.exists("Users");
     let _ = vol.list_dir("");
+    if let Ok(count) = vol.mft_record_count() {
+        for record in 0..count.min(32) {
+            let _ = vol.record_info(record, None);
+        }
+    }
 });

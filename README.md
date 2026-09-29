@@ -72,8 +72,9 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 | `--dump <pfad> <ziel>` | eine einzelne Datei aus dem Image extrahieren und beenden (ohne Analyse) |
 | `--dump-record <volume_offset> <mft> <ziel>` | eine Datei über Volume-Offset und MFT-Nummer extrahieren (Werte aus dem Katalog) |
 | `--catalog <datei>` | Dateikatalog aller Dateien und Verzeichnisse als JSON Lines schreiben |
+| `--mft-timeline <datei>` | vollständige SI-/FN-MACB-Zeitachse einschließlich gelöschter MFT-Datensätze schreiben |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |
-| `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei grossen Images Zeit) |
+| `--no-hash` | die Integritäts-Hashes nicht berechnen (spart bei großen Images Zeit) |
 | `--dpapi-password <pw>` | Benutzerpasswort, um gespeicherte Chromium-Passwörter (DPAPI) zu entschlüsseln |
 | `--dpapi-sha1 <hex>` | statt des Passworts dessen vorberechneter SHA-1 (UTF-16LE) |
 | `--dpapi-masterkey <hex>` | statt des Passworts ein bereits entschlüsselter DPAPI-Masterkey (64 Byte) |
@@ -123,6 +124,29 @@ Inhalts, den Artefaktzeiten der Datei und getrennt davon dem Zeitpunkt der
 Extraktion. Das gilt auch für `--dump`. Vorhandene Dateien werden nicht
 überschrieben. Dateien über 256 MiB werden nur bis zu dieser Grenze extrahiert
 und als `abgeschnitten` gekennzeichnet.
+
+### MFT-Volltimeline
+
+`--mft-timeline mft-zeitachse.jsonl` liest den logischen Datenstrom der Master
+File Table vollständig. Erfasst werden gültige belegte und gelöschte
+FILE-Datensätze. Jede JSON-Zeile beschreibt genau ein MACB-Ereignis aus
+`$STANDARD_INFORMATION` oder `$FILE_NAME`: Erstellung (`B`), Inhaltsänderung
+(`M`), Metadatenänderung (`C`) oder Zugriff (`A`). FILETIME-Rohwert und UTC-Zeit
+mit 100-ns-Auflösung bleiben gemeinsam erhalten.
+
+Jedes Ereignis nennt Volume-Offset, MFT-Nummer, Sequenznummer, Belegungsstatus,
+Datensatztyp und den Image-Offset des MFT-Datensatzes. FN-Ereignisse tragen
+zusätzlich Name, Namensraum und die Elternreferenz mit deren Sequenznummer.
+Aktuelle Pfade stammen aus dem Verzeichnisindex. Historische Pfade werden nur
+dann als `rekonstruiert` ausgegeben, wenn die vollständige Elternkette samt
+Sequenznummern passt. Andernfalls ist `pfad_status` gleich `unbekannt`; stratum
+rät keinen Pfad. DOS-Kurznamen erzeugen keine doppelten Zeitereignisse.
+
+Die Datei ist je Volume chronologisch sortiert. Der Hauptreport verweist unter
+`mft_timeline` mit SHA-256, BLAKE3 und Zählern auf sie. Die Analyse liest keine
+Dateiinhalte und verändert das Image nicht. Gelöscht bedeutet ausschließlich,
+dass das `IN_USE`-Flag im MFT-Kopf nicht gesetzt ist. Es sagt nicht aus, ob der
+frühere Dateiinhalt noch vollständig wiederherstellbar ist.
 
 ### Browser-Passwörter (DPAPI)
 
@@ -236,7 +260,7 @@ keine Aussage über Schadsoftware; `auffaellig_grund` nennt den Anlass.
 
 Geplant, noch nicht implementiert:
 
-- Weitere Windows-Artefakte: USN/MFT, SRUM, ActivitiesCache, WebCache.
+- Weitere Windows-Artefakte: USN, SRUM, ActivitiesCache, WebCache.
 - Dateibasierte Analyse von Schattenkopien.
 - Linux-Dateisysteme und Serviceanalysen für Web, Datenbanken, Authentifizierung,
   VPN und Gateways.

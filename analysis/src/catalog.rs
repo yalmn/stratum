@@ -280,6 +280,7 @@ mod tests {
             mft_record: 42,
             sequence: 3,
             record_offset: Some(4096),
+            in_use: true,
             is_directory: false,
             hard_links: 1,
             si_times: Some(NtfsTimes {
@@ -290,6 +291,7 @@ mod tests {
             }),
             file_attributes: 0x0002 | 0x0020,
             fn_times: None,
+            file_names: Vec::new(),
             data_size: Some(10),
             streams: vec![stratum_ntfs::NamedStream {
                 name: "Zone.Identifier".into(),

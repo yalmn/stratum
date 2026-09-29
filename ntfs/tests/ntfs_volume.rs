@@ -141,6 +141,7 @@ fn liest_datei_und_verzeichnis() {
     assert_eq!(notiz.parent_record, 5);
     let info = vol.record_info(notiz.mft_record, Some(5)).unwrap();
     assert_eq!(info.mft_record, notiz.mft_record);
+    assert!(info.in_use);
     assert!(!info.is_directory);
     assert_eq!(info.data_size, Some(10));
     assert!(info.streams.is_empty());
@@ -148,7 +149,11 @@ fn liest_datei_und_verzeichnis() {
         .si_times
         .is_some_and(|t| t.created > 0 && t.modified > 0));
     assert!(info.fn_times.is_some_and(|t| t.created > 0));
+    assert!(info.file_names.iter().any(|n| {
+        n.name.eq_ignore_ascii_case("notiz.txt") && n.parent_record == 5 && n.parent_sequence > 0
+    }));
     assert!(info.record_offset.is_some());
+    assert!(vol.mft_record_count().unwrap() > notiz.mft_record);
     let gross_eintrag = walked
         .iter()
         .find(|e| e.path.eq_ignore_ascii_case("gross.bin"))

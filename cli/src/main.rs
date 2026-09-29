@@ -31,7 +31,7 @@ use stratum_core::{
 };
 use stratum_search::TermTable;
 
-use report::{CatalogInfo, ImageInfo, KeywordInfo, Report, Tool, WindowsReport};
+use report::{CatalogInfo, ImageInfo, KeywordInfo, MftTimelineInfo, Report, Tool, WindowsReport};
 
 /// Automatisierte, gerichtsverwertbare Inhaltsanalyse eines Roh-Images (read-only).
 #[derive(Parser, Debug)]
@@ -98,6 +98,12 @@ struct Cli {
     /// vorhandene Datei wird nicht überschrieben.
     #[arg(long, value_name = "DATEI")]
     catalog: Option<PathBuf>,
+
+    /// Vollständige MFT-Zeitachse mit SI-/FN-MACB-Ereignissen als JSON Lines.
+    /// Enthält auch lesbare gelöschte Datensätze. Eine vorhandene Datei wird
+    /// nicht überschrieben.
+    #[arg(long, value_name = "DATEI")]
+    mft_timeline: Option<PathBuf>,
 
     /// Klartextpasswort des Benutzers, um gespeicherte Browser-Passwörter
     /// (DPAPI) zu entschlüsseln. Der NT-Hash genügt dafür nicht; das Passwort
@@ -219,6 +225,22 @@ fn main() -> Result<()> {
         )),
         None => None,
     };
+    let mft_timeline_file = match &cli.mft_timeline {
+        Some(p) => Some((
+            p.clone(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(p)
+                .with_context(|| {
+                    format!(
+                        "MFT-Zeitachse nicht anlegbar (existiert bereits?): {}",
+                        p.display()
+                    )
+                })?,
+        )),
+        None => None,
+    };
 
     let mut warnings = Vec::new();
 
@@ -289,6 +311,43 @@ fn main() -> Result<()> {
                 pfad: path.display().to_string(),
                 quelle: stratum_analysis::CATALOG_SOURCE,
                 format: "JSON Lines, ein Eintrag je Zeile, sortiert nach Volume und Pfad",
+                hashes,
+                summary,
+            })
+        }
+        None => None,
+    };
+
+    let mft_timeline = match mft_timeline_file {
+        Some((path, file)) => {
+            eprintln!("[*] Schreibe vollständige MFT-Zeitachse ...");
+            let mut writer =
+                std::io::BufWriter::with_capacity(1 << 20, stratum_core::HashingWriter::new(file));
+            let summary = stratum_analysis::write_mft_timeline(&img, &ctx.volumes, &mut writer)
+                .with_context(|| format!("MFT-Zeitachse nicht schreibbar: {}", path.display()))?;
+            let (_, hashes) = writer
+                .into_inner()
+                .map_err(|e| e.into_error())
+                .and_then(|h| h.finish())
+                .with_context(|| format!("MFT-Zeitachse nicht abschließbar: {}", path.display()))?;
+            eprintln!(
+                "[+] MFT-Zeitachse: {} Ereignisse aus {} lesbaren Datensätzen ({} gelöscht, {} Fehler) in {}",
+                summary.ereignisse,
+                summary.lesbar,
+                summary.geloescht,
+                summary.fehler,
+                path.display()
+            );
+            if summary.fehler > 0 {
+                warnings.push(format!(
+                    "MFT-Zeitachse: {} Datensatzplätze nicht als gültige FILE-Datensätze lesbar",
+                    summary.fehler
+                ));
+            }
+            Some(MftTimelineInfo {
+                pfad: path.display().to_string(),
+                quelle: stratum_analysis::MFT_TIMELINE_SOURCE,
+                format: "JSON Lines, ein SI-/FN-MACB-Ereignis je Zeile, je Volume chronologisch sortiert",
                 hashes,
                 summary,
             })
@@ -407,6 +466,7 @@ fn main() -> Result<()> {
         timeline,
         keywords,
         catalog,
+        mft_timeline,
         warnings,
     };
 
