@@ -1,7 +1,8 @@
 //! Vollständige MFT-Zeitachse einschließlich gelöschter Datensätze.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::{Error, ErrorKind, Write};
+use std::rc::Rc;
 
 use rayon::prelude::*;
 use serde::Serialize;
@@ -110,6 +111,7 @@ pub fn write_mft_timeline<W: Write>(
             .filter_map(|(i, r)| r.as_ref().map(|r| (r.mft_record, i)))
             .collect();
         let indexed_paths = indexed_paths(volume);
+        let mut cache = PathCache::new(&records, &by_record);
         let mut events = Vec::new();
         for (record_index, record) in records.iter().enumerate() {
             let Some(record) = record else { continue };
@@ -138,8 +140,7 @@ pub fn write_mft_timeline<W: Write>(
                 continue;
             };
             let name = event.name_index.map(|i| &record.file_names[i]);
-            let (path, path_status) =
-                event_path(record, name, &records, &by_record, &indexed_paths);
+            let (path, path_status) = event_path(record, name, &mut cache, &indexed_paths);
             let (macb, action) = event_kind(event.kind);
             let Some(utc) = filetime_to_iso(event.filetime) else {
                 continue;
@@ -249,8 +250,7 @@ fn indexed_paths(volume: &FsIndex) -> HashMap<u64, Vec<&str>> {
 fn event_path(
     record: &RecordInfo,
     name: Option<&FileNameInfo>,
-    records: &[Option<RecordInfo>],
-    by_record: &HashMap<u64, usize>,
+    cache: &mut PathCache<'_>,
     indexed: &HashMap<u64, Vec<&str>>,
 ) -> (Option<String>, &'static str) {
     if record.in_use {
@@ -272,35 +272,98 @@ fn event_path(
     let Some(chosen) = chosen else {
         return (None, "unbekannt");
     };
-    let mut seen = HashSet::new();
-    match reconstruct(chosen, records, by_record, &mut seen, 0) {
+    match cache.path(chosen) {
         Some(path) => (Some(path), "rekonstruiert"),
         None => (None, "unbekannt"),
     }
 }
 
-fn reconstruct(
-    name: &FileNameInfo,
-    records: &[Option<RecordInfo>],
-    by_record: &HashMap<u64, usize>,
-    seen: &mut HashSet<u64>,
-    depth: usize,
-) -> Option<String> {
-    if depth >= 128 || !seen.insert(name.parent_record) {
-        return None;
+/// Höchste rekonstruierte Verzeichnistiefe; tiefere Ketten bleiben unbekannt.
+const MAX_DEPTH: usize = 128;
+
+/// Aufgelöster Verzeichnispfad und seine Tiefe unter der Wurzel.
+type DirPath = (Rc<str>, usize);
+
+/// Rekonstruiert historische Pfade. Jedes Verzeichnis (Datensatz und
+/// Sequenznummer) wird nur einmal aufgelöst und dann wiederverwendet.
+struct PathCache<'a> {
+    records: &'a [Option<RecordInfo>],
+    by_record: &'a HashMap<u64, usize>,
+    dirs: HashMap<(u64, u16), Option<DirPath>>,
+}
+
+impl<'a> PathCache<'a> {
+    fn new(records: &'a [Option<RecordInfo>], by_record: &'a HashMap<u64, usize>) -> Self {
+        Self {
+            records,
+            by_record,
+            dirs: HashMap::new(),
+        }
     }
-    let parent = records
-        .get(*by_record.get(&name.parent_record)?)?
-        .as_ref()?;
-    if parent.sequence != name.parent_sequence {
-        return None;
+
+    /// Pfad zu einem Namen, nur wenn die ganze Elternkette samt
+    /// Sequenznummern zu lesbaren Datensätzen passt.
+    fn path(&mut self, name: &FileNameInfo) -> Option<String> {
+        let (prefix, _) = self.dir(name.parent_record, name.parent_sequence)?;
+        Some(join(&prefix, &name.name))
     }
-    if name.parent_record == 5 {
-        return Some(name.name.clone());
+
+    /// Pfad und Tiefe eines Verzeichnisses. Die Kette wird iterativ nach oben
+    /// verfolgt, damit manipulierte Ketten weder den Stack noch die Laufzeit
+    /// sprengen. Zyklen und zu tiefe Ketten ergeben `None`.
+    fn dir(&mut self, record: u64, sequence: u16) -> Option<DirPath> {
+        let records = self.records;
+        let mut chain: Vec<((u64, u16), &'a FileNameInfo)> = Vec::new();
+        let mut key = (record, sequence);
+        let base = loop {
+            if let Some(hit) = self.dirs.get(&key) {
+                break hit.clone();
+            }
+            if chain.len() >= MAX_DEPTH {
+                // Nicht zwischenspeichern: flachere Teile der Kette können von
+                // sich aus sehr wohl auflösbar sein.
+                return None;
+            }
+            if chain.iter().any(|(k, _)| *k == key) {
+                break None;
+            }
+            let Some(node) = self
+                .by_record
+                .get(&key.0)
+                .and_then(|&i| records.get(i))
+                .and_then(Option::as_ref)
+                .filter(|node| node.sequence == key.1)
+            else {
+                break None;
+            };
+            if key.0 == 5 {
+                let root = Some((Rc::from(""), 0));
+                self.dirs.insert(key, root.clone());
+                break root;
+            }
+            let Some(name) = preferred_name(node) else {
+                break None;
+            };
+            chain.push((key, name));
+            key = (name.parent_record, name.parent_sequence);
+        };
+        let mut current = base;
+        for (key, name) in chain.into_iter().rev() {
+            current = current
+                .map(|(prefix, depth)| (Rc::from(join(&prefix, &name.name)), depth + 1))
+                .filter(|(_, depth)| *depth < MAX_DEPTH);
+            self.dirs.insert(key, current.clone());
+        }
+        current
     }
-    let parent_name = preferred_name(parent)?;
-    let prefix = reconstruct(parent_name, records, by_record, seen, depth + 1)?;
-    Some(format!("{prefix}\\{}", name.name))
+}
+
+fn join(prefix: &str, name: &str) -> String {
+    if prefix.is_empty() {
+        name.to_string()
+    } else {
+        format!("{prefix}\\{name}")
+    }
 }
 
 fn preferred_name(record: &RecordInfo) -> Option<&FileNameInfo> {
@@ -356,37 +419,56 @@ mod tests {
             Some(record(11, 7, vec![name("weg.txt", 10, 3)])),
         ];
         let by_record = HashMap::from([(5, 0), (10, 1), (11, 2)]);
-        let mut seen = HashSet::new();
-        assert_eq!(
-            reconstruct(
-                &records[2].as_ref().unwrap().file_names[0],
-                &records,
-                &by_record,
-                &mut seen,
-                0
-            ),
-            Some("Ordner\\weg.txt".into())
-        );
+        let pfad = |records: &[Option<RecordInfo>]| {
+            PathCache::new(records, &by_record).path(&records[2].as_ref().unwrap().file_names[0])
+        };
+        assert_eq!(pfad(&records), Some("Ordner\\weg.txt".into()));
         let mut broken = records.clone();
         broken[1].as_mut().unwrap().sequence = 4;
-        assert!(reconstruct(
-            &broken[2].as_ref().unwrap().file_names[0],
-            &broken,
-            &by_record,
-            &mut HashSet::new(),
-            0
-        )
-        .is_none());
+        assert!(pfad(&broken).is_none());
         broken[1].as_mut().unwrap().sequence = 3;
         broken[1].as_mut().unwrap().file_names[0].parent_sequence = 2;
-        assert!(reconstruct(
-            &broken[2].as_ref().unwrap().file_names[0],
-            &broken,
-            &by_record,
-            &mut HashSet::new(),
-            0
-        )
-        .is_none());
+        assert!(pfad(&broken).is_none());
+    }
+
+    #[test]
+    fn zyklen_und_zu_tiefe_ketten_bleiben_unbekannt() {
+        // 12 und 13 verweisen gegenseitig aufeinander.
+        let mut records = vec![
+            Some(record(5, 1, Vec::new())),
+            Some(record(12, 1, vec![name("a", 13, 1)])),
+            Some(record(13, 1, vec![name("b", 12, 1)])),
+        ];
+        let mut by_record = HashMap::from([(5, 0), (12, 1), (13, 2)]);
+        assert!(PathCache::new(&records, &by_record)
+            .path(&name("x", 12, 1))
+            .is_none());
+
+        // Kette aus 200 Verzeichnissen unter der Wurzel.
+        records.truncate(1);
+        by_record = HashMap::from([(5, 0)]);
+        for i in 0..200u64 {
+            let parent = if i == 0 { 5 } else { 99 + i };
+            records.push(Some(record(100 + i, 1, vec![name("d", parent, 1)])));
+            by_record.insert(100 + i, records.len() - 1);
+        }
+        let mut cache = PathCache::new(&records, &by_record);
+        assert!(cache.path(&name("x", 299, 1)).is_none());
+        let flach = cache.path(&name("x", 100, 1)).unwrap();
+        assert_eq!(flach, "d\\x");
+        assert_eq!(
+            cache
+                .path(&name("x", 226, 1))
+                .unwrap()
+                .matches('\\')
+                .count(),
+            MAX_DEPTH - 1
+        );
+        // Mit und ohne Zwischenspeicher dieselbe Grenze.
+        assert!(cache.path(&name("x", 227, 1)).is_none());
+        assert!(PathCache::new(&records, &by_record)
+            .path(&name("x", 227, 1))
+            .is_none());
     }
 
     #[test]
@@ -395,5 +477,65 @@ mod tests {
         assert_eq!(event_kind(1), ("M", "inhalt_geaendert"));
         assert_eq!(event_kind(2), ("C", "metadaten_geaendert"));
         assert_eq!(event_kind(3), ("A", "zugegriffen"));
+    }
+
+    /// Bisherige rekursive Auflösung als Referenz für den Vergleich.
+    fn referenz(
+        name: &FileNameInfo,
+        records: &[Option<RecordInfo>],
+        by_record: &HashMap<u64, usize>,
+        seen: &mut std::collections::HashSet<u64>,
+    ) -> Option<String> {
+        if !seen.insert(name.parent_record) {
+            return None;
+        }
+        let parent = records
+            .get(*by_record.get(&name.parent_record)?)?
+            .as_ref()?;
+        if parent.sequence != name.parent_sequence {
+            return None;
+        }
+        if name.parent_record == 5 {
+            return Some(name.name.clone());
+        }
+        let prefix = referenz(preferred_name(parent)?, records, by_record, seen)?;
+        Some(format!("{prefix}\\{}", name.name))
+    }
+
+    #[test]
+    fn gleiche_pfade_wie_die_rekursive_aufloesung() {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move |n: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state % n
+        };
+        for _ in 0..50 {
+            let mut records = vec![Some(record(5, 1, Vec::new()))];
+            let mut by_record = HashMap::from([(5, 0)]);
+            for i in 0..300u64 {
+                let parent = if next(5) == 0 { 5 } else { 100 + next(300) };
+                let parent_sequence = if next(20) == 0 { 2 } else { 1 };
+                let nummer = 100 + i;
+                records.push(Some(record(
+                    nummer,
+                    1,
+                    vec![name(&format!("n{nummer}"), parent, parent_sequence)],
+                )));
+                by_record.insert(nummer, records.len() - 1);
+            }
+            let mut cache = PathCache::new(&records, &by_record);
+            for index in (1..records.len()).rev() {
+                let name = &records[index].as_ref().unwrap().file_names[0];
+                let erwartet = referenz(
+                    name,
+                    &records,
+                    &by_record,
+                    &mut std::collections::HashSet::new(),
+                );
+                assert_eq!(cache.path(name), erwartet);
+            }
+        }
     }
 }
