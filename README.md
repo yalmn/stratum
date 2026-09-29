@@ -154,6 +154,40 @@ stratum merged.dd -o report.json --bdp bdp.info -k eigene.toml
 
 Die eingebaute Liste ist ein neutraler Ausgangspunkt, kein fertiger Fallkatalog. Pro Fall lässt sich abschalten, was nicht passt (`aktiv = false`), und mit `--no-default-keywords` deaktiviert man sie ganz. Sensible oder fallbezogene Wortlisten gehören nicht in dieses Repository, sondern in die eigene Tabelle, die getrennt geführt wird. Name und Version der verwendeten Tabellen stehen im Report, damit nachvollziehbar bleibt, wonach gesucht wurde.
 
+## USB-Zeitpunkte
+
+USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
+`Properties\{83da6326-97a6-4088-9453-a1923f573b29}` im aktiven ControlSet:
+
+| Property | Zeitfeld | Bedeutung |
+|---|---|---|
+| `0064` | `installation` | Installation, auch nach Treiberaktualisierung |
+| `0065` | `erste_installation` | Erste Installation dieser Geräteinstanz |
+| `0066` | `letzte_verbindung` | Letzte Verbindung |
+| `0067` | `letztes_trennen` | Letztes Trennen |
+
+Die Zuordnung folgt [Microsofts devpkey.h](https://github.com/microsoft/win32metadata/blob/main/generation/WinSDK/RecompiledIdlHeaders/shared/devpkey.h).
+RegRipper `usbstor` v.20200515 vertauscht die Beschriftungen von `0064` und
+`0065`; bei unterschiedlichen Werten ist das beim Vergleich zu berücksichtigen.
+
+Je Zeitfeld stehen `*_utc` (100-ns-Präzision), `*_unix` (ganze Sekunden) und
+`*_filetime` (Rohwert) im Fund. FILETIME ist bereits UTC und benötigt keine
+Umrechnung mit der Zeitzone des untersuchten Systems oder des Analyse-Rechners.
+Die vier Zeiten erscheinen als getrennte Ereignisse in der Timeline.
+`*_quelle` nennt den Property-Pfad einschließlich Standardwert, `*_hive_offset`
+die vk-Zelle und `*_key_hive_offset` die nk-Zelle in der SYSTEM-Hive-Datei,
+jeweils einschließlich des Zellgrößenfelds. `hive_offset` bezeichnet die
+Geräteinstanz, `volume_offset` das zugehörige Volume im Image. Diese
+Hive-Offsets sind keine physischen Image-Offsets.
+
+`*_status` unterscheidet `vorhanden`, `nicht_vorhanden`, `nicht_gesetzt`
+(Nullwert) und `nicht_lesbar` (zusätzlich eine Warnung). Unterstützt ist das
+gegen Windows 11 geprüfte Layout mit acht Byte und Property-Typ `0xffff0010`.
+Andere Typen oder Längen werden nicht als Zeit interpretiert. Ältere Layouts
+mit anderen Schlüsselpfaden sind nicht abgedeckt. Schlüsseländerungszeiten
+dienen nicht als Ersatz für fehlende Gerätezeitpunkte. Ein fehlender
+Trennzeitpunkt belegt nicht, dass das Gerät noch verbunden war.
+
 ## PowerShell-Verlauf und Ereignisquellen
 
 Der PowerShell-Analyzer liest `ConsoleHost_history.txt` sowie weitere

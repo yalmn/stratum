@@ -7,6 +7,13 @@ edition = "2021"
 [package.metadata]
 cargo-fuzz = true
 
+[[bin]]
+name = "usb"
+path = "fuzz_targets/usb.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4.13"
 stratum-core = { path = "../core" }

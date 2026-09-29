@@ -271,15 +271,17 @@ impl Analyzer for UsbAnalyzer {
                         .flatten()
                         .and_then(|v| v.as_string())
                         .unwrap_or_else(|| dev.name().to_string());
-                    out.findings.push(
-                        Finding::new(
-                            "usb",
-                            friendly,
-                            format!("SYSTEM\\{base}\\{}\\{}", dev.name(), inst_key.name()),
-                        )
-                        .with("geraet", dev.name())
-                        .with("seriennummer", inst_key.name()),
-                    );
+                    let mut finding = Finding::new(
+                        "usb",
+                        friendly,
+                        format!("SYSTEM\\{base}\\{}\\{}", dev.name(), inst_key.name()),
+                    )
+                    .with("geraet", dev.name())
+                    .with("seriennummer", inst_key.name())
+                    .with("hive_offset", inst_key.file_offset().to_string())
+                    .with("volume_offset", inst.target.offset.to_string());
+                    crate::usb::add_times(&inst_key, &mut finding, &mut out.warnings);
+                    out.findings.push(finding);
                 }
             }
             mounted_devices(&hive, &mut out);
