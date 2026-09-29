@@ -2,19 +2,21 @@
 //! mit ihren Metadaten, als JSON Lines (ein Eintrag je Zeile).
 //!
 //! Grundlage ist der vorhandene Pfad-Index, der Verzeichnisbaum wird also nicht
-//! erneut durchlaufen. Je Eintrag wird nur der MFT-Datensatz gelesen, nie der
-//! Dateiinhalt. Die Arbeit läuft blockweise parallel und wird direkt
+//! erneut durchlaufen. Dateiinhalt wird für SHA-256 und die Signaturerkennung
+//! blockweise gelesen. Die Arbeit läuft blockweise parallel und wird direkt
 //! geschrieben, der Speicherbedarf hängt daher nicht von der Größe des
-//! Dateisystems ab. Die Einträge sind nach Volume und Pfad sortiert, so dass
-//! dasselbe Image stets einen bytegleichen Katalog ergibt.
+//! Dateisystems oder der Dateien ab. Die Einträge sind nach Volume und Pfad
+//! sortiert, so dass dasselbe Image stets einen bytegleichen Katalog ergibt.
 //!
 //! Erfasst werden nur Einträge, die über den Verzeichnisbaum erreichbar sind.
 //! Gelöschte oder verwaiste MFT-Datensätze fehlen hier.
 
 use std::io::Write;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use stratum_core::time::filetime_to_iso;
 use stratum_core::ImageReader;
 use stratum_ntfs::{NtfsTimes, NtfsVolume, RecordInfo};
@@ -25,6 +27,8 @@ use crate::{FileEntry, FsIndex};
 const BATCH: usize = 16_384;
 /// Einträge je paralleler Arbeitseinheit innerhalb eines Blocks.
 const TASK: usize = 512;
+/// Für Signaturen vorgehaltener Dateianfang. Deckt auch übliche PE-Header ab.
+const SIGNATURE_PREFIX: usize = 64 * 1024;
 
 /// Beschreibung der Katalogquelle für den Report.
 pub const CATALOG_SOURCE: &str =
@@ -43,6 +47,12 @@ pub struct CatalogSummary {
     pub fehler: u64,
     /// Verzeichnisse, deren Inhalt nicht lesbar war (Eintrag mit `inhalt_fehler`).
     pub verzeichnisse_ohne_inhalt: u64,
+    /// Dateien mit vollständigem SHA-256.
+    pub dateien_gehasht: u64,
+    /// Dateien, deren Inhalt nicht vollständig gelesen und daher nicht gehasht wurde.
+    pub hash_fehler: u64,
+    /// Dateien mit einem anhand der Inhaltsbytes erkannten Typ.
+    pub signaturen_erkannt: u64,
     /// Volume-Offsets, die in den Katalog eingegangen sind.
     pub volumes: Vec<u64>,
 }
@@ -73,6 +83,25 @@ struct Stream {
     groesse: u64,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct Signature {
+    offset: u64,
+    bytes: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ContentInfo {
+    sha256: String,
+    dateityp: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signatur: Option<Signature>,
+}
+
+type CachedContent = Arc<OnceLock<Result<ContentInfo, String>>>;
+type HardlinkCache = Mutex<std::collections::HashMap<u64, CachedContent>>;
+
 /// Eine Katalogzeile.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 struct Line<'a> {
@@ -100,6 +129,16 @@ struct Line<'a> {
     reparse_tag: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     wof: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dateityp: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mime: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    signatur: Option<Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hash_fehler: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     mft_record_offset: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -138,6 +177,7 @@ fn line<'a>(
     entry: &'a FileEntry,
     is_directory: bool,
     info: Result<RecordInfo, String>,
+    content: Option<Result<ContentInfo, String>>,
 ) -> Line<'a> {
     let name = entry.path.rsplit('\\').next().unwrap_or(&entry.path);
     let mut l = Line {
@@ -156,6 +196,11 @@ fn line<'a>(
         hardlinks: None,
         reparse_tag: None,
         wof: None,
+        sha256: None,
+        dateityp: None,
+        mime: None,
+        signatur: None,
+        hash_fehler: None,
         mft_record_offset: None,
         fehler: None,
         inhalt_fehler: None,
@@ -188,7 +233,158 @@ fn line<'a>(
             l.fehler = Some(e);
         }
     }
+    if let Some(content) = content {
+        match content {
+            Ok(content) => {
+                l.sha256 = Some(content.sha256);
+                l.dateityp = Some(content.dateityp);
+                l.mime = content.mime;
+                l.signatur = content.signatur;
+            }
+            Err(error) => l.hash_fehler = Some(error),
+        }
+    }
     l
+}
+
+struct Inspector {
+    sha256: Sha256,
+    prefix: Vec<u8>,
+    bytes: u64,
+}
+
+impl Inspector {
+    fn new() -> Self {
+        Self {
+            sha256: Sha256::new(),
+            prefix: Vec::with_capacity(4096),
+            bytes: 0,
+        }
+    }
+
+    fn finish(self) -> ContentInfo {
+        let (dateityp, mime, signatur) = detect_type(&self.prefix, self.bytes);
+        ContentInfo {
+            sha256: hex(&self.sha256.finalize()),
+            dateityp,
+            mime,
+            signatur,
+        }
+    }
+}
+
+impl Write for Inspector {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.sha256.update(buf);
+        let wanted = SIGNATURE_PREFIX.saturating_sub(self.prefix.len());
+        self.prefix.extend_from_slice(&buf[..buf.len().min(wanted)]);
+        self.bytes = self.bytes.saturating_add(buf.len() as u64);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn signature(offset: u64, bytes: &[u8]) -> Signature {
+    Signature {
+        offset,
+        bytes: hex(bytes),
+    }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    let mut hex = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut hex, "{byte:02x}");
+    }
+    hex
+}
+
+fn detected(
+    name: &'static str,
+    mime: Option<&'static str>,
+    offset: u64,
+    bytes: &[u8],
+) -> (&'static str, Option<&'static str>, Option<Signature>) {
+    (name, mime, Some(signature(offset, bytes)))
+}
+
+/// Bestimmt den Typ ausschließlich anhand fester Bytes im Dateiinhalt.
+fn detect_type(
+    data: &[u8],
+    total_size: u64,
+) -> (&'static str, Option<&'static str>, Option<Signature>) {
+    if total_size == 0 {
+        return ("leer", None, None);
+    }
+    if data.starts_with(b"MZ") && data.len() >= 0x40 {
+        let pe = u32::from_le_bytes([data[0x3c], data[0x3d], data[0x3e], data[0x3f]]) as usize;
+        if data.get(pe..pe.saturating_add(4)) == Some(b"PE\0\0") {
+            return detected(
+                "pe",
+                Some("application/vnd.microsoft.portable-executable"),
+                pe as u64,
+                b"PE\0\0",
+            );
+        }
+    }
+    const TYPES: &[(&[u8], &str, Option<&str>)] = &[
+        (b"\x89PNG\r\n\x1a\n", "png", Some("image/png")),
+        (
+            b"SQLite format 3\0",
+            "sqlite3",
+            Some("application/vnd.sqlite3"),
+        ),
+        (b"%PDF-", "pdf", Some("application/pdf")),
+        (b"PK\x03\x04", "zip", Some("application/zip")),
+        (b"PK\x05\x06", "zip", Some("application/zip")),
+        (b"PK\x07\x08", "zip", Some("application/zip")),
+        (b"\x7fELF", "elf", Some("application/x-elf")),
+        (b"\xff\xd8\xff", "jpeg", Some("image/jpeg")),
+        (b"GIF87a", "gif", Some("image/gif")),
+        (b"GIF89a", "gif", Some("image/gif")),
+        (b"\x1f\x8b", "gzip", Some("application/gzip")),
+        (
+            b"7z\xbc\xaf\x27\x1c",
+            "7z",
+            Some("application/x-7z-compressed"),
+        ),
+        (b"Rar!\x1a\x07", "rar", Some("application/vnd.rar")),
+        (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "ole_cfb", None),
+        (b"ElfFile\0", "evtx", None),
+        (b"regf", "registry_hive", None),
+    ];
+    for &(magic, name, mime) in TYPES {
+        if data.starts_with(magic) {
+            return detected(name, mime, 0, magic);
+        }
+    }
+    const LNK: &[u8] = b"L\0\0\0\x01\x14\x02\0\0\0\0\0\xc0\0\0\0\0\0\0F";
+    if data.starts_with(LNK) {
+        return detected("windows_lnk", None, 0, LNK);
+    }
+    ("unbekannt", None, None)
+}
+
+fn inspect_file<R: std::io::Read + std::io::Seek>(
+    volume: &mut NtfsVolume<R>,
+    entry: &FileEntry,
+) -> Result<ContentInfo, String> {
+    let mut inspector = Inspector::new();
+    let meta = volume
+        .write_file_by_record(entry.mft_record, &entry.path, &mut inspector)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "Datei nicht gefunden".to_string())?;
+    if inspector.bytes != meta.size {
+        return Err(format!(
+            "vollständiger Inhalt nicht bestätigt: {} von {} Bytes gelesen",
+            inspector.bytes, meta.size
+        ));
+    }
+    Ok(inspector.finish())
 }
 
 /// Schreibt den Katalog aller Volumes als JSON Lines nach `out`.
@@ -211,15 +407,22 @@ pub fn write_catalog<W: Write>(
                 .cmp(&b.0.path)
                 .then(a.0.mft_record.cmp(&b.0.mft_record))
         });
+        // Mehrere Pfade können auf denselben MFT-Datensatz zeigen. Nur solche
+        // Hardlinks werden volumeweit zwischengespeichert, damit große Inhalte
+        // nicht mehrfach gelesen werden und normale Dateien keinen Cache belegen.
+        let hardlink_cache: HardlinkCache = Mutex::new(std::collections::HashMap::new());
 
         for batch in entries.chunks(BATCH) {
-            let parts: Vec<(Vec<u8>, u64)> = batch
+            let parts: Vec<(Vec<u8>, u64, u64, u64, u64)> = batch
                 .par_chunks(TASK)
                 .map_init(
                     || NtfsVolume::open(img, offset, size).map_err(|e| e.to_string()),
                     |vol, task| {
                         let mut buf = Vec::with_capacity(task.len() * 400);
                         let mut errors = 0;
+                        let mut hashed = 0;
+                        let mut hash_errors = 0;
+                        let mut signatures = 0;
                         for &(entry, is_dir) in task {
                             let info = match vol {
                                 Ok(vol) => vol
@@ -228,7 +431,37 @@ pub fn write_catalog<W: Write>(
                                 Err(e) => Err(format!("Volume nicht lesbar: {e}")),
                             };
                             errors += u64::from(info.is_err());
-                            let mut l = line(offset, entry, is_dir, info);
+                            let content = if is_dir || info.is_err() {
+                                None
+                            } else {
+                                let mut inspect = || match vol {
+                                    Ok(vol) => inspect_file(vol, entry),
+                                    Err(e) => Err(format!("Volume nicht lesbar: {e}")),
+                                };
+                                let result = if matches!(&info, Ok(i) if i.hard_links > 1) {
+                                    let cell = {
+                                        let mut cache = hardlink_cache
+                                            .lock()
+                                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                                        cache
+                                            .entry(entry.mft_record)
+                                            .or_insert_with(|| Arc::new(OnceLock::new()))
+                                            .clone()
+                                    };
+                                    cell.get_or_init(inspect).clone()
+                                } else {
+                                    inspect()
+                                };
+                                match &result {
+                                    Ok(c) => {
+                                        hashed += 1;
+                                        signatures += u64::from(c.signatur.is_some());
+                                    }
+                                    Err(_) => hash_errors += 1,
+                                }
+                                Some(result)
+                            };
+                            let mut l = line(offset, entry, is_dir, info, content);
                             if is_dir {
                                 l.inhalt_fehler = v
                                     .unreadable_dirs
@@ -241,13 +474,16 @@ pub fn write_catalog<W: Write>(
                                 buf.push(b'\n');
                             }
                         }
-                        (buf, errors)
+                        (buf, errors, hashed, hash_errors, signatures)
                     },
                 )
                 .collect();
-            for (buf, errors) in parts {
+            for (buf, errors, hashed, hash_errors, signatures) in parts {
                 out.write_all(&buf)?;
                 summary.fehler += errors;
+                summary.dateien_gehasht += hashed;
+                summary.hash_fehler += hash_errors;
+                summary.signaturen_erkannt += signatures;
             }
         }
         summary.verzeichnisse += v.directories.len() as u64;
@@ -298,7 +534,7 @@ mod tests {
             reparse_tag: Some(0x8000_0017),
             wof: Some("XPRESS8K"),
         };
-        let json = serde_json::to_value(line(1_048_576, &e, false, Ok(info))).unwrap();
+        let json = serde_json::to_value(line(1_048_576, &e, false, Ok(info), None)).unwrap();
         assert_eq!(json["name"], "notiz.txt");
         assert_eq!(json["typ"], "datei");
         assert_eq!(json["groesse"], 10);
@@ -321,13 +557,58 @@ mod tests {
     fn zeile_bei_lesefehler() {
         let e = entry("kaputt.bin");
         let json =
-            serde_json::to_value(line(0, &e, false, Err("Datensatz defekt".into()))).unwrap();
+            serde_json::to_value(line(0, &e, false, Err("Datensatz defekt".into()), None)).unwrap();
         assert_eq!(json["fehler"], "Datensatz defekt");
         assert_eq!(json["groesse"], 7);
         assert!(json.get("si").is_none());
-        let dir = serde_json::to_value(line(0, &e, true, Err("x".into()))).unwrap();
+        let dir = serde_json::to_value(line(0, &e, true, Err("x".into()), None)).unwrap();
         assert_eq!(dir["typ"], "verzeichnis");
         assert!(dir.get("groesse").is_none());
+    }
+
+    #[test]
+    fn signaturen_werden_ohne_dateinamen_erkannt() {
+        let png = detect_type(b"\x89PNG\r\n\x1a\nrest", 12);
+        assert_eq!(png.0, "png");
+        assert_eq!(png.1, Some("image/png"));
+        assert_eq!(png.2.unwrap().bytes, "89504e470d0a1a0a");
+
+        let sqlite = detect_type(b"SQLite format 3\0weitere bytes", 29);
+        assert_eq!(sqlite.0, "sqlite3");
+        assert_eq!(sqlite.2.unwrap().offset, 0);
+
+        let empty = detect_type(&[], 0);
+        assert_eq!(empty, ("leer", None, None));
+        let unknown = detect_type(b"nur text", 8);
+        assert_eq!(unknown, ("unbekannt", None, None));
+    }
+
+    #[test]
+    fn pe_braucht_die_pe_signatur_am_header_offset() {
+        let mut pe = vec![0u8; 132];
+        pe[..2].copy_from_slice(b"MZ");
+        pe[0x3c..0x40].copy_from_slice(&128u32.to_le_bytes());
+        pe[128..132].copy_from_slice(b"PE\0\0");
+        let detected = detect_type(&pe, pe.len() as u64);
+        assert_eq!(detected.0, "pe");
+        assert_eq!(detected.2.unwrap().offset, 128);
+
+        pe[128] = b'X';
+        assert_eq!(detect_type(&pe, pe.len() as u64).0, "unbekannt");
+        assert_eq!(detect_type(b"MZ", 2).0, "unbekannt");
+    }
+
+    #[test]
+    fn inspector_hasht_alle_geschriebenen_bloecke() {
+        let mut inspector = Inspector::new();
+        inspector.write_all(b"a").unwrap();
+        inspector.write_all(b"bc").unwrap();
+        let content = inspector.finish();
+        assert_eq!(
+            content.sha256,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(content.dateityp, "unbekannt");
     }
 
     #[test]

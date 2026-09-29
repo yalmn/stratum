@@ -311,6 +311,33 @@ impl<R: Read + Seek> NtfsVolume<R> {
         read_record(ntfs, fs, record, path, self.part_offset, self.part_size)
     }
 
+    /// Schreibt den vollständigen logischen Inhalt einer Datei direkt über ihre
+    /// MFT-Datensatznummer nach `out`. Normale und spärliche Datenströme werden
+    /// blockweise verarbeitet, ohne die ganze Datei im Speicher zu halten.
+    ///
+    /// NTFS- und WOF-komprimierte Dateien müssen für die Dekompression derzeit
+    /// vollständig im Speicher liegen und unterliegen daher [`MAX_FILE_SIZE`].
+    /// Bei einem Lesefehler werden keine Ersatzbytes erzeugt: Der Aufrufer darf
+    /// einen bis dahin berechneten Hash nicht als vollständigen Dateihash nutzen.
+    pub fn write_file_by_record<W: std::io::Write>(
+        &mut self,
+        record: u64,
+        path: &str,
+        out: &mut W,
+    ) -> Result<Option<FileMeta>, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        write_record(
+            ntfs,
+            fs,
+            record,
+            path,
+            self.part_offset,
+            self.part_size,
+            out,
+        )
+    }
+
     /// Liest die Metadaten eines Datensatzes in einem Durchlauf über seine
     /// Attribute: `$STANDARD_INFORMATION`, das zum Eintrag passende
     /// `$FILE_NAME` (gleiches Elternverzeichnis, bevorzugt nicht der DOS-Kurzname)
@@ -551,6 +578,53 @@ fn read_record<R: Read + Seek>(
     Ok(Some(FileData { meta, data }))
 }
 
+/// Schreibt den unbenannten `$DATA`-Strom eines Datensatzes vollständig.
+fn write_record<R: Read + Seek, W: std::io::Write>(
+    ntfs: &Ntfs,
+    fs: &mut R,
+    rec: u64,
+    path: &str,
+    part_offset: u64,
+    part_size: u64,
+    out: &mut W,
+) -> Result<Option<FileMeta>, NtfsVolumeError> {
+    let file = ntfs.file(fs, rec)?;
+    if file.is_directory() {
+        return Err(NtfsVolumeError::NotAFile {
+            path: path.to_string(),
+        });
+    }
+
+    let (stream_size, wof) = match wof_format(&file, fs)? {
+        Some(format) => {
+            let size = file
+                .data(fs, "")
+                .transpose()?
+                .map(|item| item.to_attribute().map(|a| a.value_length()))
+                .transpose()?
+                .unwrap_or(0);
+            if size > MAX_FILE_SIZE {
+                return Err(NtfsVolumeError::CompressedFileTooLarge {
+                    path: path.to_string(),
+                    size,
+                    limit: MAX_FILE_SIZE,
+                });
+            }
+            let (stream, _) = read_data(ntfs, &file, fs, part_size, wof::WOF_STREAM)?;
+            let data = wof::decompress(&stream, format, size, size as usize)?;
+            out.write_all(&data)?;
+            (size, Some(format.name()))
+        }
+        None => {
+            let size = write_data(ntfs, &file, fs, part_size, path, out)?;
+            (size, None)
+        }
+    };
+    let mut meta = file_meta(&file, path, part_offset, stream_size)?;
+    meta.wof = wof;
+    Ok(Some(meta))
+}
+
 /// Liest den (kleinen) Wert eines Attributs, höchstens 64 KiB.
 fn small_value<R: Read + Seek>(
     attribute: &ntfs::NtfsAttribute<'_, '_>,
@@ -597,6 +671,140 @@ enum RunPlan {
     Resident(Vec<u8>),
 }
 
+/// Schreibt einen unbenannten Strom blockweise. Nur komprimierte Datenläufe
+/// verwenden noch den vorhandenen, begrenzten Dekompressionspfad.
+fn write_data<R: Read + Seek, W: std::io::Write>(
+    ntfs: &Ntfs,
+    file: &NtfsFile<'_>,
+    fs: &mut R,
+    part_size: u64,
+    path: &str,
+    out: &mut W,
+) -> Result<u64, NtfsVolumeError> {
+    let Some(item) = file.data(fs, "") else {
+        return Ok(0);
+    };
+    let item = item?;
+    let attribute = item.to_attribute()?;
+    let stream_size = attribute.value_length();
+    if stream_size > part_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("logische Dateigröße {stream_size} überschreitet Volumegröße {part_size}"),
+        )
+        .into());
+    }
+    if stream_size == 0 {
+        return Ok(0);
+    }
+
+    let compressed = attribute.flags().contains(NtfsAttributeFlags::COMPRESSED);
+    if compressed {
+        if stream_size > MAX_FILE_SIZE {
+            return Err(NtfsVolumeError::CompressedFileTooLarge {
+                path: path.to_string(),
+                size: stream_size,
+                limit: MAX_FILE_SIZE,
+            });
+        }
+        let (data, size) = read_data(ntfs, file, fs, part_size, "")?;
+        if data.len() as u64 != size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "NTFS-komprimierter Inhalt ist unvollständig",
+            )
+            .into());
+        }
+        out.write_all(&data)?;
+        return Ok(size);
+    }
+
+    let plan = {
+        let value = attribute.value(fs)?;
+        match value {
+            NtfsAttributeValue::NonResident(nr) => {
+                let mut runs = Vec::new();
+                for run in nr.data_runs() {
+                    let run = run?;
+                    runs.push((
+                        run.data_position().value().map(|p| p.get()),
+                        run.allocated_size(),
+                    ));
+                }
+                RunPlan::Runs(runs)
+            }
+            NtfsAttributeValue::Resident(ref resident) => {
+                let len = usize::try_from(stream_size)
+                    .unwrap_or(usize::MAX)
+                    .min(resident.data().len());
+                RunPlan::Resident(resident.data()[..len].to_vec())
+            }
+            NtfsAttributeValue::AttributeListNonResident(_) => {
+                RunPlan::Runs(collect_attribute_list_runs(ntfs, fs, file, "")?)
+            }
+        }
+    };
+
+    match plan {
+        RunPlan::Resident(data) => {
+            if data.len() as u64 != stream_size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "residenter Dateiinhalt ist unvollständig",
+                )
+                .into());
+            }
+            out.write_all(&data)?;
+        }
+        RunPlan::Runs(runs) => write_runs(fs, &runs, stream_size, out)?,
+        RunPlan::CompressedRuns(_) => unreachable!("Kompression wurde vorab behandelt"),
+    }
+    Ok(stream_size)
+}
+
+fn write_runs<R: Read + Seek, W: std::io::Write>(
+    fs: &mut R,
+    runs: &[(Option<u64>, u64)],
+    stream_size: u64,
+    out: &mut W,
+) -> Result<(), NtfsVolumeError> {
+    const BLOCK: usize = 1024 * 1024;
+    let mut buf = vec![0u8; BLOCK];
+    let mut done = 0u64;
+    for &(position, allocated) in runs {
+        if done >= stream_size {
+            break;
+        }
+        let mut remaining = allocated.min(stream_size - done);
+        if let Some(position) = position {
+            fs.seek(SeekFrom::Start(position))?;
+            while remaining > 0 {
+                let n = usize::try_from(remaining.min(BLOCK as u64)).unwrap_or(BLOCK);
+                fs.read_exact(&mut buf[..n])?;
+                out.write_all(&buf[..n])?;
+                remaining -= n as u64;
+                done += n as u64;
+            }
+        } else {
+            buf.fill(0);
+            while remaining > 0 {
+                let n = usize::try_from(remaining.min(BLOCK as u64)).unwrap_or(BLOCK);
+                out.write_all(&buf[..n])?;
+                remaining -= n as u64;
+                done += n as u64;
+            }
+        }
+    }
+    if done != stream_size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            format!("Datenläufe liefern {done} statt {stream_size} Bytes"),
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Liest den ungenannten `$DATA`-Strom, indem die Datenläufe selbst
 /// zusammengesetzt werden. Spärliche Läufe werden mit Nullen gefüllt, damit die
 /// Byte-Ausrichtung erhalten bleibt (der eingebaute Leser des ntfs-Crates
@@ -624,7 +832,15 @@ fn read_data<R: Read + Seek>(
     let item = item?;
     let attribute = item.to_attribute()?;
     let stream_size = attribute.value_length();
-    let file_size = stream_size.min(part_size).min(MAX_FILE_SIZE);
+    let limit = part_size.min(MAX_FILE_SIZE);
+    if stream_size > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("Datenstrom mit {stream_size} Bytes überschreitet Lesegrenze {limit}"),
+        )
+        .into());
+    }
+    let file_size = stream_size;
     if file_size == 0 {
         return Ok((Vec::new(), stream_size));
     }
@@ -717,17 +933,10 @@ fn read_data<R: Read + Seek>(
                 let take_usize = usize::try_from(take).unwrap_or(0);
                 match pos {
                     Some(p) => {
-                        // Bei Lesefehlern (z. B. gekürztes Image) den Lauf
-                        // mit Nullen füllen, damit die Ausrichtung erhalten bleibt.
-                        if fs.seek(SeekFrom::Start(p)).is_ok() {
-                            let start = buf.len();
-                            buf.resize(start + take_usize, 0);
-                            if fs.read_exact(&mut buf[start..]).is_err() {
-                                // teilweise gelesen ist ok; Rest bleibt 0
-                            }
-                        } else {
-                            buf.resize(buf.len() + take_usize, 0);
-                        }
+                        fs.seek(SeekFrom::Start(p))?;
+                        let start = buf.len();
+                        buf.resize(start + take_usize, 0);
+                        fs.read_exact(&mut buf[start..])?;
                     }
                     None => buf.resize(buf.len() + take_usize, 0),
                 }
@@ -780,9 +989,15 @@ fn assemble_compressed<R: Read + Seek>(
         if let Some(p) = pos {
             let start = usize::try_from(off).unwrap_or(0);
             let n = usize::try_from(len).unwrap_or(0);
-            if start.saturating_add(n) <= raw.len() && fs.seek(SeekFrom::Start(*p)).is_ok() {
-                let _ = fs.read_exact(&mut raw[start..start + n]);
+            if start.saturating_add(n) > raw.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Datenlauf überschreitet den Dekompressionspuffer",
+                )
+                .into());
             }
+            fs.seek(SeekFrom::Start(*p))?;
+            fs.read_exact(&mut raw[start..start + n])?;
             let mut b = off;
             let e = off + len;
             while b < e {
@@ -822,14 +1037,16 @@ fn assemble_compressed<R: Read + Seek>(
             // Vollständig spärliche Einheit: reine Nullfolge.
             out.resize(out.len() + logical_usize, 0);
         } else if real_clusters >= logical_clusters {
-            // Unkomprimiert: die logischen Bytes roh übernehmen (bei gekürztem
-            // Image mit Nullen auffüllen, damit die Länge stimmt).
-            let e = (s + logical_usize).min(raw.len());
-            out.extend_from_slice(&raw[s..e]);
-            let got = e - s;
-            if got < logical_usize {
-                out.resize(out.len() + (logical_usize - got), 0);
+            // Unkomprimiert: die logischen Bytes roh übernehmen.
+            let e = s.saturating_add(logical_usize);
+            if e > raw.len() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unkomprimierte NTFS-Einheit ist unvollständig",
+                )
+                .into());
             }
+            out.extend_from_slice(&raw[s..e]);
         } else {
             // Komprimierte Einheit: nur die belegten Bytes entpacken.
             let r = usize::try_from(real).unwrap_or(0);
@@ -974,5 +1191,22 @@ mod tests {
     #[test]
     fn max_file_size_ist_gesetzt() {
         assert_eq!(MAX_FILE_SIZE, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn datenlaeufe_werden_blockweise_und_sparse_korrekt_geschrieben() {
+        let mut source = Cursor::new(vec![1u8, 2, 3, 4]);
+        let runs = vec![(Some(0), 4), (None, 3)];
+        let mut out = Vec::new();
+        write_runs(&mut source, &runs, 7, &mut out).unwrap();
+        assert_eq!(out, [1, 2, 3, 4, 0, 0, 0]);
+    }
+
+    #[test]
+    fn gekuerzter_datenlauf_ist_ein_fehler() {
+        let mut source = Cursor::new(vec![1u8, 2]);
+        let mut out = Vec::new();
+        let error = write_runs(&mut source, &[(Some(0), 4)], 4, &mut out).unwrap_err();
+        assert!(matches!(error, NtfsVolumeError::Io(_)));
     }
 }

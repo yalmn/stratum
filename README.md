@@ -98,6 +98,16 @@ Zeiten stehen als ISO 8601 in UTC mit 100-ns-Auflösung. Abweichungen zwischen
 `si` und `fn` können auf nachträglich veränderte Zeitstempel hinweisen, sind
 aber für sich allein kein Beleg.
 
+Dateien tragen außerdem den SHA-256 ihres vollständigen logischen Inhalts.
+`dateityp` wird aus einer festen Signatur im Inhalt bestimmt, nicht aus der
+Dateiendung. Bei einem erkannten Typ nennen `signatur.offset` und
+`signatur.bytes` die dafür verwendeten Bytes; `mime` wird nur für Formate mit
+eindeutiger Zuordnung ausgegeben. Ohne unterstützte Signatur steht
+`dateityp` auf `unbekannt`. Kann der Inhalt nicht vollständig gelesen werden,
+fehlt der Hash und `hash_fehler` beschreibt die Ursache. Die Signaturprüfung
+ist auf die ersten 64 KiB begrenzt; SHA-256 umfasst unabhängig davon die ganze
+Datei.
+
 Vom System komprimierte Dateien (WOF, etwa CompactOS) tragen `wof` mit dem
 Verfahren und `reparse_tag`. Beim Lesen entpackt stratum sie aus dem Strom
 `WofCompressedData` (XPRESS4K, XPRESS8K, XPRESS16K). LZX und WIM-gestützte Dateien

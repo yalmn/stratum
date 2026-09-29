@@ -12,4 +12,6 @@ fuzz_target!(|data: &[u8]| {
     let _ = vol.read_file("Windows/System32/config/SYSTEM");
     let _ = vol.exists("Users");
     let _ = vol.list_dir("");
+    let mut sink = std::io::sink();
+    let _ = vol.write_file_by_record(0, "$MFT", &mut sink);
 });

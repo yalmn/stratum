@@ -54,7 +54,11 @@ fn katalog_ueber_ntfs_index() {
     let dir = tempfile::tempdir().unwrap();
     let path = build_ntfs(
         dir.path(),
-        &[("klein.txt", b"hallo"), ("zweite.bin", &[7u8; 5000])],
+        &[
+            ("klein.txt", b"hallo"),
+            ("zweite.bin", &[7u8; 5000]),
+            ("bild.txt", b"\x89PNG\r\n\x1a\nkein echtes bild"),
+        ],
     )
     .expect("mkntfs und ntfscp müssen für diesen Integrationstest installiert sein");
     let original = std::fs::read(&path).unwrap();
@@ -84,8 +88,26 @@ fn katalog_ueber_ntfs_index() {
     assert!(klein["si"]["erstellt"].as_str().unwrap().ends_with('Z'));
     assert!(klein["fn"]["erstellt"].is_string());
     assert!(klein["mft_record_offset"].is_u64());
+    assert_eq!(
+        klein["sha256"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+    assert_eq!(klein["dateityp"], "unbekannt");
+    assert!(klein.get("signatur").is_none());
     let zweite = lines.iter().find(|l| l["pfad"] == "zweite.bin").unwrap();
     assert_eq!(zweite["groesse"], 5000);
+    assert!(zweite["sha256"].as_str().is_some_and(|h| h.len() == 64));
+    let bild = lines.iter().find(|l| l["pfad"] == "bild.txt").unwrap();
+    assert_eq!(
+        bild["dateityp"], "png",
+        "Dateiendung darf nicht entscheiden"
+    );
+    assert_eq!(bild["mime"], "image/png");
+    assert_eq!(bild["signatur"]["offset"], 0);
+    assert_eq!(bild["signatur"]["bytes"], "89504e470d0a1a0a");
+    assert!(summary.dateien_gehasht >= 3);
+    assert_eq!(summary.hash_fehler, 0);
+    assert!(summary.signaturen_erkannt >= 1);
 
     // Gleiches Image, gleicher Katalog.
     let mut again = Vec::new();
