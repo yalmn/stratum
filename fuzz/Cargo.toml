@@ -85,3 +85,10 @@ path = "fuzz_targets/usn.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "zone_identifier"
+path = "fuzz_targets/zone_identifier.rs"
+test = false
+doc = false
+bench = false

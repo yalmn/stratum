@@ -39,6 +39,7 @@ mod usb;
 mod usn;
 mod vss;
 mod windows;
+mod zone;
 
 #[cfg(test)]
 #[path = "../tests/common/builder.rs"]
@@ -68,6 +69,7 @@ pub use tor::TorAnalyzer;
 pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
 pub use vss::VssAnalyzer;
 pub use windows::{extract_snapshots, Hives, TimeZone, WindowsInstall};
+pub use zone::ZoneIdentifierAnalyzer;
 
 /// Ergebnis eines einzelnen Analyzers.
 #[derive(Debug, Default)]
@@ -125,5 +127,10 @@ pub mod fuzzing {
     /// Prüft den USN-Scanner mit beliebigen Bytes.
     pub fn usn(data: &[u8]) {
         crate::usn::fuzz(data);
+    }
+
+    /// Prüft den `Zone.Identifier`-Parser mit beliebigen Bytes.
+    pub fn zone_identifier(data: &[u8]) {
+        crate::zone::fuzz(data);
     }
 }

@@ -171,6 +171,23 @@ Ausgabe wird nicht überschrieben und erscheint im Hauptreport mit SHA-256,
 BLAKE3, Größen- und Ereigniszählern. Unbekannte Hauptversionen und beschädigte
 Datensätze werden gezählt, ohne ein Format zu erraten.
 
+### Download-Herkunft aus `Zone.Identifier`
+
+Benannte NTFS-Datenströme mit dem Namen `Zone.Identifier` werden im normalen
+Analyselauf gelesen. stratum wertet den Abschnitt `[ZoneTransfer]` aus und
+meldet `ZoneId`, die Windows-Sicherheitszone sowie vorhandene Angaben wie
+`HostUrl`, `ReferrerUrl`, `LastWriterPackageFamilyName` und
+`AppDefinedZoneId`. Unbekannte Zonennummern und weitere Feldnamen bleiben als
+Rohangaben erhalten und werden nicht gedeutet.
+
+Jeder Fund enthält Datei- und Strompfad, Volume-Offset, MFT-Nummer,
+MFT-Datensatzoffset, Stromgröße sowie SHA-256 und BLAKE3 des Strominhalts. Der
+MFT-Datensatzoffset ist ausdrücklich als Quellenanker gekennzeichnet; bei
+nicht-residenten Strömen ist er nicht der physische Offset jedes Nutzdatenbytes.
+Die Auswertung ist auf 64 KiB je Strom und 100.000 Funde begrenzt. UTF-8 sowie
+UTF-16 mit Byte Order Mark werden unterstützt. Eine gespeicherte Herkunftszone
+belegt weder einen erfolgreichen Download noch die Ausführung der Datei.
+
 ### Browser-Passwörter (DPAPI)
 
 Die in Chromium-Browsern (Edge, Chrome, Brave, Opera) gespeicherten Passwörter liegen mit AES-GCM verschlüsselt in `Login Data`; der GCM-Schlüssel steckt DPAPI-geschützt in `Local State` und hängt letztlich am Passwort des Benutzers, nicht an dessen NT-Hash. Ohne dieses Passwort weist stratum nur Anzahl und Speicherort aus. Ist das Passwort bekannt (üblicherweise vorher aus dem NT-Hash geknackt), entschlüsselt stratum die komplette Kette selbst:
