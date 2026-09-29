@@ -71,3 +71,10 @@ path = "fuzz_targets/wof.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "zone_identifier"
+path = "fuzz_targets/zone_identifier.rs"
+test = false
+doc = false
+bench = false

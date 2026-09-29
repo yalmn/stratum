@@ -36,6 +36,7 @@ mod timeline;
 mod tor;
 mod vss;
 mod windows;
+mod zone;
 
 #[cfg(test)]
 #[path = "../tests/common/builder.rs"]
@@ -63,6 +64,7 @@ pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
 pub use vss::VssAnalyzer;
 pub use windows::{extract_snapshots, Hives, TimeZone, WindowsInstall};
+pub use zone::ZoneIdentifierAnalyzer;
 
 /// Ergebnis eines einzelnen Analyzers.
 #[derive(Debug, Default)]
@@ -105,5 +107,10 @@ pub mod fuzzing {
     pub fn persistence_text(text: &str) {
         let _ = crate::filepersist::task_actions(text);
         let _ = crate::pathrating::rate_command(text);
+    }
+
+    /// Prüft den `Zone.Identifier`-Parser mit beliebigen Bytes.
+    pub fn zone_identifier(data: &[u8]) {
+        crate::zone::fuzz(data);
     }
 }

@@ -56,7 +56,7 @@ pub struct FileMeta {
     pub path: String,
     /// MFT-Datensatznummer, eindeutiger Anker der Datei im Volume.
     pub mft_record: u64,
-    /// Größe der ungenannten Datenstroms in Bytes.
+    /// Größe des gelesenen Datenstroms in Bytes.
     pub size: u64,
     /// Absoluter Byte-Offset des MFT-Datensatzes im Image, falls bekannt.
     pub record_offset: Option<u64>,
@@ -77,7 +77,7 @@ pub struct FileMeta {
 pub struct FileData {
     /// Herkunftsdaten.
     pub meta: FileMeta,
-    /// Roher Inhalt des ungenannten Datenstroms.
+    /// Roher Inhalt des gelesenen Datenstroms.
     pub data: Vec<u8>,
 }
 
@@ -309,6 +309,58 @@ impl<R: Read + Seek> NtfsVolume<R> {
         let ntfs = &self.ntfs;
         let fs = &mut self.fs;
         read_record(ntfs, fs, record, path, self.part_offset, self.part_size)
+    }
+
+    /// Liest einen benannten `$DATA`-Strom einer Datei über ihren Pfad.
+    ///
+    /// Der Stromname wird ohne den Typzusatz `:$DATA` übergeben. `Ok(None)`
+    /// bedeutet, dass der Pfad oder der benannte Strom nicht vorhanden ist.
+    pub fn read_stream(
+        &mut self,
+        path: &str,
+        stream: &str,
+    ) -> Result<Option<FileData>, NtfsVolumeError> {
+        if stream.is_empty() {
+            return Ok(None);
+        }
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        let Some(record) = resolve(ntfs, fs, path)? else {
+            return Ok(None);
+        };
+        read_named_record(
+            ntfs,
+            fs,
+            record,
+            path,
+            stream,
+            self.part_offset,
+            self.part_size,
+        )
+    }
+
+    /// Liest einen benannten `$DATA`-Strom direkt über die MFT-Nummer.
+    /// `path` wird nur als Herkunftsangabe übernommen.
+    pub fn read_stream_by_record(
+        &mut self,
+        record: u64,
+        path: &str,
+        stream: &str,
+    ) -> Result<Option<FileData>, NtfsVolumeError> {
+        if stream.is_empty() {
+            return Ok(None);
+        }
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        read_named_record(
+            ntfs,
+            fs,
+            record,
+            path,
+            stream,
+            self.part_offset,
+            self.part_size,
+        )
     }
 
     /// Liest die Metadaten eines Datensatzes in einem Durchlauf über seine
@@ -548,6 +600,31 @@ fn read_record<R: Read + Seek>(
     };
     let mut meta = file_meta(&file, path, part_offset, stream_size)?;
     meta.wof = wof;
+    Ok(Some(FileData { meta, data }))
+}
+
+/// Liest einen benannten `$DATA`-Strom mitsamt dem MFT-Datensatz als
+/// Herkunftsanker.
+fn read_named_record<R: Read + Seek>(
+    ntfs: &Ntfs,
+    fs: &mut R,
+    record: u64,
+    path: &str,
+    stream: &str,
+    part_offset: u64,
+    part_size: u64,
+) -> Result<Option<FileData>, NtfsVolumeError> {
+    let file = ntfs.file(fs, record)?;
+    if file.is_directory() {
+        return Err(NtfsVolumeError::NotAFile {
+            path: path.to_string(),
+        });
+    }
+    if file.data(fs, stream).is_none() {
+        return Ok(None);
+    }
+    let (data, stream_size) = read_data(ntfs, &file, fs, part_size, stream)?;
+    let meta = file_meta(&file, path, part_offset, stream_size)?;
     Ok(Some(FileData { meta, data }))
 }
 
