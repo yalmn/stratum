@@ -173,7 +173,9 @@ frühere Dateiinhalt noch vollständig wiederherstellbar ist.
 aller NTFS-Volumes. Jede JSON-Zeile entspricht einem USN_RECORD_V2- oder
 USN_RECORD_V3-Datensatz. Enthalten sind USN, UTC-Zeit und roher FILETIME-Wert,
 Datei- und Elternreferenz, Dateiname, Änderungsgründe, Dateiattribute,
-Journaloffset und physischer Image-Offset. V2-Referenzen werden zusätzlich in
+Journaloffset und physischer Image-Offset. Liegt ein Datensatz über der Grenze
+zweier Datenläufe, nennt `image_bereiche` alle Teile als Offset und Länge.
+V2-Referenzen werden zusätzlich in
 MFT-Nummer und Sequenznummer zerlegt. 128-Bit-Referenzen aus V3 bleiben als
 vollständiger Hexwert erhalten und werden nicht als MFT-Nummer interpretiert.
 

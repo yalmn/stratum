@@ -58,6 +58,10 @@ struct EventLine {
     stream_offset: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     image_offset: Option<u64>,
+    /// Nur bei Datensätzen über eine Laufgrenze: alle Image-Bereiche als
+    /// (Offset, Länge) in logischer Reihenfolge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_bereiche: Option<Vec<(Option<u64>, u64)>>,
     record_length: u32,
     version_major: u16,
     version_minor: u16,
@@ -122,7 +126,7 @@ pub fn write_usn_journal<W: Write>(
         } else {
             for run in layout.runs {
                 let Some(image_offset) = run.image_offset else {
-                    scanner.gap(run.logical_offset.saturating_add(run.length));
+                    scanner.gap();
                     continue;
                 };
                 let mut done = 0u64;
@@ -149,12 +153,41 @@ fn invalid_data(error: impl std::fmt::Display) -> Error {
     Error::new(ErrorKind::InvalidData, error.to_string())
 }
 
+/// Ein über eine Einspeisegrenze reichender, noch unvollständiger Datensatz.
 struct Pending {
     data: Vec<u8>,
-    expected: Option<usize>,
     logical_offset: u64,
-    image_offset: Option<u64>,
     next_logical: u64,
+    /// Image-Bereiche der bisher gesammelten Bytes, zusammenhängende vereint.
+    segments: Vec<(Option<u64>, u64)>,
+}
+
+impl Pending {
+    fn new(logical_offset: u64) -> Self {
+        Self {
+            data: Vec::new(),
+            logical_offset,
+            next_logical: logical_offset,
+            segments: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, bytes: &[u8], image_offset: Option<u64>) {
+        if bytes.is_empty() {
+            return;
+        }
+        let len = bytes.len() as u64;
+        match self.segments.last_mut() {
+            Some((Some(start), length))
+                if image_offset.is_some_and(|offset| *start + *length == offset) =>
+            {
+                *length += len;
+            }
+            _ => self.segments.push((image_offset, len)),
+        }
+        self.data.extend_from_slice(bytes);
+        self.next_logical += len;
+    }
 }
 
 struct Scanner<'a, W: Write> {
@@ -174,17 +207,18 @@ impl<'a, W: Write> Scanner<'a, W> {
         }
     }
 
-    fn gap(&mut self, next_logical: u64) {
-        if self.pending.take().is_some() {
-            self.summary.abgeschnitten += 1;
+    /// Ein spärlicher Bereich unterbricht einen angefangenen Datensatz. Reine
+    /// Nullbytes davor sind freier Journalbereich, kein abgeschnittener Satz.
+    fn gap(&mut self) {
+        if let Some(pending) = self.pending.take() {
+            if pending.data.iter().any(|byte| *byte != 0) {
+                self.summary.abgeschnitten += 1;
+            }
         }
-        let _ = next_logical;
     }
 
     fn finish(&mut self) {
-        if self.pending.take().is_some() {
-            self.summary.abgeschnitten += 1;
-        }
+        self.gap();
     }
 
     fn feed(
@@ -193,92 +227,87 @@ impl<'a, W: Write> Scanner<'a, W> {
         image_offset: Option<u64>,
         data: &[u8],
     ) -> std::io::Result<()> {
+        let at = |used: usize| image_offset.map(|offset| offset + used as u64);
         let mut used = 0usize;
-        if self
-            .pending
-            .as_ref()
-            .is_some_and(|pending| pending.next_logical != logical_offset)
-        {
-            self.pending = None;
-            self.summary.abgeschnitten += 1;
-        }
         if let Some(mut pending) = self.pending.take() {
-            if pending.expected.is_none() {
-                let take = (8 - pending.data.len()).min(data.len());
-                pending.data.extend_from_slice(&data[..take]);
-                pending.next_logical += take as u64;
-                used += take;
-                if pending.data.len() == 8 {
-                    pending.expected = plausible_header(&pending.data);
-                    if pending.expected.is_none() {
-                        self.summary.fehler += 1;
-                    }
-                }
-            }
-            if let Some(expected) = pending.expected {
-                let take = (expected - pending.data.len()).min(data.len() - used);
-                pending.data.extend_from_slice(&data[used..used + take]);
-                pending.next_logical += take as u64;
-                used += take;
-                if pending.data.len() == expected {
-                    self.write_record(&pending.data, pending.logical_offset, pending.image_offset)?;
-                } else {
+            if pending.next_logical != logical_offset {
+                self.summary.abgeschnitten += 1;
+            } else {
+                let take = 8usize.saturating_sub(pending.data.len()).min(data.len());
+                pending.push(&data[..take], at(0));
+                used = take;
+                if pending.data.len() < 8 {
                     self.pending = Some(pending);
                     return Ok(());
+                }
+                match plausible_header(&pending.data) {
+                    None => self.skip_header(&pending.data[..8]),
+                    Some(expected) => {
+                        let take = (expected - pending.data.len()).min(data.len() - used);
+                        pending.push(&data[used..used + take], at(used));
+                        used += take;
+                        if pending.data.len() < expected {
+                            self.pending = Some(pending);
+                            return Ok(());
+                        }
+                        self.write_record(
+                            &pending.data,
+                            pending.logical_offset,
+                            &pending.segments,
+                        )?;
+                    }
                 }
             }
         }
 
         while used < data.len() {
             let remaining = &data[used..];
-            if remaining.len() < 8 {
-                self.pending = Some(Pending {
-                    data: remaining.to_vec(),
-                    expected: None,
-                    logical_offset: logical_offset + used as u64,
-                    image_offset: image_offset.map(|offset| offset + used as u64),
-                    next_logical: logical_offset + data.len() as u64,
-                });
-                break;
-            }
             let length = match plausible_header(remaining) {
-                Some(length) => length,
-                None => {
-                    if remaining[..8].iter().any(|byte| *byte != 0) {
-                        self.summary.fehler += 1;
-                    }
+                Some(length) if length <= remaining.len() => length,
+                None if remaining.len() >= 8 => {
+                    self.skip_header(&remaining[..8]);
                     used += 8;
                     continue;
                 }
+                // Kopf oder Datensatz reicht über das Ende dieser Einspeisung.
+                _ => {
+                    let mut pending = Pending::new(logical_offset + used as u64);
+                    pending.push(remaining, at(used));
+                    self.pending = Some(pending);
+                    break;
+                }
             };
-            if length > remaining.len() {
-                self.pending = Some(Pending {
-                    data: remaining.to_vec(),
-                    expected: Some(length),
-                    logical_offset: logical_offset + used as u64,
-                    image_offset: image_offset.map(|offset| offset + used as u64),
-                    next_logical: logical_offset + data.len() as u64,
-                });
-                break;
-            }
-            self.write_record(
-                &remaining[..length],
-                logical_offset + used as u64,
-                image_offset.map(|offset| offset + used as u64),
-            )?;
+            let segment = [(at(used), length as u64)];
+            self.write_record(&remaining[..length], logical_offset + used as u64, &segment)?;
             used += length;
         }
         Ok(())
+    }
+
+    /// Nullköpfe sind freie Journalbereiche, alles andere ein Fehler.
+    fn skip_header(&mut self, header: &[u8]) {
+        if header.iter().any(|byte| *byte != 0) {
+            self.summary.fehler += 1;
+        }
     }
 
     fn write_record(
         &mut self,
         bytes: &[u8],
         logical_offset: u64,
-        image_offset: Option<u64>,
+        segments: &[(Option<u64>, u64)],
     ) -> std::io::Result<()> {
+        let image_offset = segments.first().and_then(|(offset, _)| *offset);
         match parse_record(bytes, self.volume_offset, logical_offset, image_offset) {
-            Ok(parsed) => {
+            Ok(mut parsed) => {
+                if segments.len() > 1 {
+                    parsed.line.image_bereiche = Some(
+                        segments
+                            .iter()
+                            .map(|(offset, length)| (*offset, *length))
+                            .collect(),
+                    );
+                }
                 if parsed.line.reason & 0x0000_0100 != 0 {
                     self.summary.erstellt += 1;
                 }
@@ -376,6 +405,7 @@ fn parse_record(
             volume_offset,
             stream_offset,
             image_offset,
+            image_bereiche: None,
             record_length,
             version_major: major,
             version_minor: minor,
@@ -579,6 +609,58 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
         assert_eq!(json["stream_offset"], 100);
         assert_eq!(json["image_offset"], 1000);
+        let rest = record.len() - 17;
+        assert_eq!(
+            json["image_bereiche"],
+            serde_json::json!([[1000, 17], [2000, rest]])
+        );
+    }
+
+    #[test]
+    fn zusammenhaengender_datensatz_ohne_bereichsliste() {
+        let record = v2("am_stueck.txt", 0x100);
+        let mut output = Vec::new();
+        let mut summary = UsnJournalSummary::default();
+        let mut scanner = Scanner::new(&mut output, &mut summary, 0);
+        scanner.feed(0, Some(4096), &record[..24]).unwrap();
+        scanner.feed(24, Some(4120), &record[24..]).unwrap();
+        scanner.finish();
+        let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(json["image_offset"], 4096);
+        assert!(json.get("image_bereiche").is_none());
+    }
+
+    #[test]
+    fn kopf_ueber_mehrere_einspeisungen() {
+        let record = v2("kopf.txt", 0x200);
+        let mut output = Vec::new();
+        let mut summary = UsnJournalSummary::default();
+        let mut scanner = Scanner::new(&mut output, &mut summary, 0);
+        scanner.feed(0, Some(0), &record[..3]).unwrap();
+        scanner.feed(3, Some(3), &record[3..6]).unwrap();
+        scanner.feed(6, Some(6), &record[6..]).unwrap();
+        scanner.finish();
+        assert_eq!(summary.datensaetze, 1);
+        assert_eq!(summary.abgeschnitten, 0);
+        assert_eq!(summary.fehler, 0);
+    }
+
+    #[test]
+    fn nullbytes_und_luecken_werden_richtig_gezaehlt() {
+        let record = v2("weg.txt", 0x200);
+        let mut output = Vec::new();
+        let mut summary = UsnJournalSummary::default();
+        let mut scanner = Scanner::new(&mut output, &mut summary, 0);
+        // Freier Bereich über die Einspeisegrenze: weder Fehler noch abgeschnitten.
+        scanner.feed(0, Some(0), &[0; 12]).unwrap();
+        scanner.gap();
+        // Angefangener Datensatz vor einer Lücke ist abgeschnitten.
+        scanner.feed(4096, Some(4096), &record[..20]).unwrap();
+        scanner.feed(9000, Some(9000), &record).unwrap();
+        scanner.finish();
+        assert_eq!(summary.fehler, 0);
+        assert_eq!(summary.abgeschnitten, 1);
+        assert_eq!(summary.datensaetze, 1);
     }
 
     #[test]
@@ -599,5 +681,40 @@ mod tests {
         let mut data = v2("x", 1);
         data[0..4].copy_from_slice(&7u32.to_le_bytes());
         assert!(plausible_header(&data).is_none());
+    }
+
+    #[test]
+    fn zufaellige_einspeisungen_ohne_panik() {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for _ in 0..200 {
+            let mut data: Vec<u8> = (0..4096).map(|_| next() as u8).collect();
+            // Gültige Datensätze einstreuen, damit auch der Normalpfad läuft.
+            let record = v2("z.txt", 0x100);
+            let at = (next() % 3000) as usize & !7;
+            data[at..at + record.len()].copy_from_slice(&record);
+            let mut output = Vec::new();
+            let mut summary = UsnJournalSummary::default();
+            let mut scanner = Scanner::new(&mut output, &mut summary, 0);
+            let mut pos = 0usize;
+            while pos < data.len() {
+                let len = ((next() % 97) as usize + 1).min(data.len() - pos);
+                let logical = if next() % 50 == 0 {
+                    pos as u64 + 8
+                } else {
+                    pos as u64
+                };
+                scanner
+                    .feed(logical, Some(pos as u64), &data[pos..pos + len])
+                    .unwrap();
+                pos += len;
+            }
+            scanner.finish();
+        }
     }
 }
