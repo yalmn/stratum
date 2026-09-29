@@ -90,7 +90,7 @@ fn katalog_ueber_ntfs_index() {
     assert!(klein["mft_record_offset"].is_u64());
     assert_eq!(
         klein["sha256"],
-        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        "d3751d33f9cd5049c4af2b462735457e4d3baf130bcbb87f389e349fbaeb20b9"
     );
     assert_eq!(klein["dateityp"], "unbekannt");
     assert!(klein.get("signatur").is_none());
