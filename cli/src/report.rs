@@ -5,7 +5,9 @@
 
 use serde::Serialize;
 
-use stratum_analysis::{CatalogSummary, Finding, MftTimelineSummary, TimeZone, TimelineEntry};
+use stratum_analysis::{
+    CatalogSummary, Finding, MftTimelineSummary, TimeZone, TimelineEntry, UsnJournalSummary,
+};
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
 
@@ -37,6 +39,9 @@ pub struct Report {
     /// Verweis auf die vollständige MFT-Zeitachse, falls geschrieben.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mft_timeline: Option<MftTimelineInfo>,
+    /// Verweis auf das USN-Änderungsjournal, falls geschrieben.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usn_journal: Option<UsnJournalInfo>,
     /// Übergreifende Hinweise.
     pub warnings: Vec<String>,
 }
@@ -55,6 +60,22 @@ pub struct MftTimelineInfo {
     /// Zähler des MFT-Durchlaufs.
     #[serde(flatten)]
     pub summary: MftTimelineSummary,
+}
+
+/// Verweis auf die USN-Zeitachse mit Hashes und Zählern.
+#[derive(Debug, Serialize)]
+pub struct UsnJournalInfo {
+    /// Pfad der JSON-Lines-Datei.
+    pub pfad: String,
+    /// Beschreibung der ausgewerteten Quelle.
+    pub quelle: &'static str,
+    /// Dateiformat und Reihenfolge.
+    pub format: &'static str,
+    /// SHA-256 und BLAKE3 über die geschriebene Datei.
+    pub hashes: ImageHashes,
+    /// Zähler des Journal-Durchlaufs.
+    #[serde(flatten)]
+    pub summary: UsnJournalSummary,
 }
 
 /// Verweis auf den Dateikatalog mit Hashes der geschriebenen Datei.

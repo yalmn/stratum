@@ -199,6 +199,41 @@ fn mft_timeline_wird_verknuepft_und_nie_ueberschrieben() {
 }
 
 #[test]
+fn usn_journal_wird_verknuepft_und_nie_ueberschrieben() {
+    let dir = tempfile::tempdir().unwrap();
+    let dd = dir.path().join("test.dd");
+    let journal = dir.path().join("usn.jsonl");
+    std::fs::write(&dd, build_dd()).unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .args(["--no-hash", "--no-default-keywords", "--usn-journal"])
+        .arg(&journal)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "Exit: {:?}", output.status);
+    let report: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let bytes = std::fs::read(&journal).unwrap();
+    let info = &report["usn_journal"];
+    assert_eq!(info["journals"], 0);
+    assert_eq!(info["datensaetze"], 0);
+    assert_eq!(info["hashes"]["bytes"], bytes.len() as u64);
+    assert_eq!(
+        info["hashes"]["sha256"],
+        stratum_core::hash_bytes(&bytes).sha256
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .arg(&dd)
+        .args(["--no-hash", "--no-default-keywords", "--usn-journal"])
+        .arg(&journal)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("existiert"));
+}
+
+#[test]
 fn dump_record_meldet_unbekanntes_volume() {
     let dir = tempfile::tempdir().unwrap();
     let dd = dir.path().join("test.dd");

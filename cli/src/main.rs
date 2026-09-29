@@ -31,7 +31,10 @@ use stratum_core::{
 };
 use stratum_search::TermTable;
 
-use report::{CatalogInfo, ImageInfo, KeywordInfo, MftTimelineInfo, Report, Tool, WindowsReport};
+use report::{
+    CatalogInfo, ImageInfo, KeywordInfo, MftTimelineInfo, Report, Tool, UsnJournalInfo,
+    WindowsReport,
+};
 
 /// Automatisierte, gerichtsverwertbare Inhaltsanalyse eines Roh-Images (read-only).
 #[derive(Parser, Debug)]
@@ -104,6 +107,12 @@ struct Cli {
     /// nicht überschrieben.
     #[arg(long, value_name = "DATEI")]
     mft_timeline: Option<PathBuf>,
+
+    /// NTFS-Änderungsjournal `$UsnJrnl:$J` als JSON Lines schreiben. Spärliche
+    /// Bereiche werden übersprungen. Eine vorhandene Datei wird nicht
+    /// überschrieben.
+    #[arg(long, value_name = "DATEI")]
+    usn_journal: Option<PathBuf>,
 
     /// Klartextpasswort des Benutzers, um gespeicherte Browser-Passwörter
     /// (DPAPI) zu entschlüsseln. Der NT-Hash genügt dafür nicht; das Passwort
@@ -241,6 +250,22 @@ fn main() -> Result<()> {
         )),
         None => None,
     };
+    let usn_file = match &cli.usn_journal {
+        Some(path) => Some((
+            path.clone(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)
+                .with_context(|| {
+                    format!(
+                        "USN-Zeitachse nicht anlegbar (existiert bereits?): {}",
+                        path.display()
+                    )
+                })?,
+        )),
+        None => None,
+    };
 
     let mut warnings = Vec::new();
 
@@ -348,6 +373,42 @@ fn main() -> Result<()> {
                 pfad: path.display().to_string(),
                 quelle: stratum_analysis::MFT_TIMELINE_SOURCE,
                 format: "JSON Lines, ein SI-/FN-MACB-Ereignis je Zeile, je Volume chronologisch sortiert",
+                hashes,
+                summary,
+            })
+        }
+        None => None,
+    };
+
+    let usn_journal = match usn_file {
+        Some((path, file)) => {
+            eprintln!("[*] Schreibe USN-Änderungsjournal ...");
+            let mut writer =
+                std::io::BufWriter::with_capacity(1 << 20, stratum_core::HashingWriter::new(file));
+            let summary = stratum_analysis::write_usn_journal(&img, &ctx.volumes, &mut writer)
+                .with_context(|| format!("USN-Zeitachse nicht schreibbar: {}", path.display()))?;
+            let (_, hashes) = writer
+                .into_inner()
+                .map_err(|error| error.into_error())
+                .and_then(|hashing| hashing.finish())
+                .with_context(|| format!("USN-Zeitachse nicht abschließbar: {}", path.display()))?;
+            eprintln!(
+                "[+] USN-Zeitachse: {} Datensätze aus {} Journal(en), {} Fehler in {}",
+                summary.datensaetze,
+                summary.journals,
+                summary.fehler,
+                path.display()
+            );
+            if summary.fehler > 0 || summary.abgeschnitten > 0 {
+                warnings.push(format!(
+                    "USN-Zeitachse: {} unplausible und {} abgeschnittene Datensätze",
+                    summary.fehler, summary.abgeschnitten
+                ));
+            }
+            Some(UsnJournalInfo {
+                pfad: path.display().to_string(),
+                quelle: stratum_analysis::USN_JOURNAL_SOURCE,
+                format: "JSON Lines, ein USN_RECORD_V2/V3 je Zeile, in Journalreihenfolge",
                 hashes,
                 summary,
             })
@@ -467,6 +528,7 @@ fn main() -> Result<()> {
         keywords,
         catalog,
         mft_timeline,
+        usn_journal,
         warnings,
     };
 

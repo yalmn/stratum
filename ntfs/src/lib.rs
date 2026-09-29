@@ -39,6 +39,9 @@ pub use error::NtfsVolumeError;
 /// liegen weit darunter.
 pub const MAX_FILE_SIZE: u64 = 256 * 1024 * 1024;
 
+/// Obergrenze für physisch belegte Bytes eines roh durchlaufenen Datenstroms.
+pub const MAX_STREAM_ALLOCATED_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+
 /// Ein geöffnetes NTFS-Volume. Generisch über die darunterliegende Quelle
 /// (`Read + Seek`): ein Ausschnitt des Images (`Cursor<&[u8]>`) oder der Reader
 /// einer Volume Shadow Copy.
@@ -168,6 +171,32 @@ pub struct FileNameInfo {
     pub parent_sequence: u16,
     /// Im `$FILE_NAME` gespeicherte Zeitstempel.
     pub times: NtfsTimes,
+}
+
+/// Ein logischer Abschnitt eines nicht-residenten NTFS-Datenstroms.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataStreamRun {
+    /// Position im logischen Datenstrom.
+    pub logical_offset: u64,
+    /// Absoluter Offset im Image; `None` kennzeichnet einen spärlichen Lauf.
+    pub image_offset: Option<u64>,
+    /// Logische Länge dieses Laufs.
+    pub length: u64,
+}
+
+/// Ablageplan eines NTFS-Datenstroms ohne Kopie seiner nicht-residenten Daten.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataStreamLayout {
+    /// Logische Länge des Datenstroms.
+    pub logical_size: u64,
+    /// Physisch belegte Länge ohne spärliche Läufe.
+    pub allocated_size: u64,
+    /// Nicht-residente Datenläufe in logischer Reihenfolge.
+    pub runs: Vec<DataStreamRun>,
+    /// Inhalt eines residenten Datenstroms.
+    pub resident: Option<Vec<u8>>,
+    /// MFT-Datensatzoffset als Quellenanker eines residenten Stroms.
+    pub resident_image_offset: Option<u64>,
 }
 
 /// Metadaten eines MFT-Datensatzes, ohne Dateiinhalt.
@@ -468,6 +497,74 @@ impl<R: Read + Seek> NtfsVolume<R> {
             return Err(NtfsVolumeError::ImplausibleMftRecordCount { records, maximum });
         }
         Ok(records)
+    }
+
+    /// Liefert die physische Ablage eines benannten Datenstroms.
+    ///
+    /// Nicht-residente Nutzdaten werden nicht kopiert. Spärliche Läufe bleiben
+    /// als Einträge ohne Image-Offset erhalten. Komprimierte Ströme werden
+    /// abgelehnt, weil deren physische Bytes nicht dem logischen Inhalt
+    /// entsprechen.
+    pub fn data_stream_layout(
+        &mut self,
+        path: &str,
+        stream: &str,
+    ) -> Result<Option<DataStreamLayout>, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        let Some(record) = resolve(ntfs, fs, path)? else {
+            return Ok(None);
+        };
+        let file = ntfs.file(fs, record)?;
+        let Some(item) = file.data(fs, stream) else {
+            return Ok(None);
+        };
+        let item = item?;
+        let attribute = item.to_attribute()?;
+        if attribute.flags().contains(NtfsAttributeFlags::COMPRESSED) {
+            return Err(NtfsVolumeError::CompressedDataStream {
+                stream: stream.to_string(),
+            });
+        }
+        let logical_size = attribute.value_length();
+        let value = attribute.value(fs)?;
+        let plan = match value {
+            NtfsAttributeValue::Resident(value) => {
+                let length = usize::try_from(logical_size)
+                    .unwrap_or(usize::MAX)
+                    .min(value.data().len());
+                return Ok(Some(DataStreamLayout {
+                    logical_size,
+                    allocated_size: length as u64,
+                    runs: Vec::new(),
+                    resident: Some(value.data()[..length].to_vec()),
+                    resident_image_offset: file
+                        .position()
+                        .value()
+                        .map(|position| self.part_offset.saturating_add(position.get())),
+                }));
+            }
+            NtfsAttributeValue::NonResident(value) => {
+                let mut runs = Vec::new();
+                for run in value.data_runs() {
+                    let run = run?;
+                    runs.push((
+                        run.data_position().value().map(|p| p.get()),
+                        run.allocated_size(),
+                    ));
+                }
+                runs
+            }
+            NtfsAttributeValue::AttributeListNonResident(_) => {
+                collect_attribute_list_runs(ntfs, fs, &file, stream)?
+            }
+        };
+        Ok(Some(stream_layout(
+            plan,
+            logical_size,
+            self.part_offset,
+            self.part_size,
+        )?))
     }
 
     /// Durchläuft das komplette Verzeichnis ab der Wurzel und liefert alle
@@ -988,6 +1085,82 @@ fn collect_attribute_list_runs<R: Read + Seek>(
     Ok(runs)
 }
 
+fn stream_layout(
+    runs: Vec<(Option<u64>, u64)>,
+    logical_size: u64,
+    part_offset: u64,
+    part_size: u64,
+) -> Result<DataStreamLayout, NtfsVolumeError> {
+    let mut layout = Vec::with_capacity(runs.len());
+    let mut logical_offset = 0u64;
+    let mut allocated_size = 0u64;
+    for (position, run_length) in runs {
+        if logical_offset >= logical_size {
+            break;
+        }
+        let length = run_length.min(logical_size - logical_offset);
+        let image_offset = match position {
+            Some(position) => {
+                let end =
+                    position
+                        .checked_add(length)
+                        .ok_or(NtfsVolumeError::DataRunOutOfVolume {
+                            offset: position,
+                            size: length,
+                            volume_size: part_size,
+                        })?;
+                if end > part_size {
+                    return Err(NtfsVolumeError::DataRunOutOfVolume {
+                        offset: position,
+                        size: length,
+                        volume_size: part_size,
+                    });
+                }
+                allocated_size = allocated_size.checked_add(length).ok_or(
+                    NtfsVolumeError::DataStreamTooLarge {
+                        allocated: u64::MAX,
+                        maximum: MAX_STREAM_ALLOCATED_SIZE,
+                    },
+                )?;
+                if allocated_size > MAX_STREAM_ALLOCATED_SIZE {
+                    return Err(NtfsVolumeError::DataStreamTooLarge {
+                        allocated: allocated_size,
+                        maximum: MAX_STREAM_ALLOCATED_SIZE,
+                    });
+                }
+                Some(part_offset.checked_add(position).ok_or(
+                    NtfsVolumeError::DataRunOutOfVolume {
+                        offset: position,
+                        size: length,
+                        volume_size: part_size,
+                    },
+                )?)
+            }
+            None => None,
+        };
+        layout.push(DataStreamRun {
+            logical_offset,
+            image_offset,
+            length,
+        });
+        logical_offset =
+            logical_offset
+                .checked_add(run_length)
+                .ok_or(NtfsVolumeError::DataRunOutOfVolume {
+                    offset: logical_offset,
+                    size: run_length,
+                    volume_size: part_size,
+                })?;
+    }
+    Ok(DataStreamLayout {
+        logical_size,
+        allocated_size,
+        runs: layout,
+        resident: None,
+        resident_image_offset: None,
+    })
+}
+
 /// Löst einen Pfad in eine MFT-Datensatznummer auf.
 fn resolve<R: Read + Seek>(
     ntfs: &Ntfs,
@@ -1049,5 +1222,31 @@ mod tests {
     #[test]
     fn max_file_size_ist_gesetzt() {
         assert_eq!(MAX_FILE_SIZE, 256 * 1024 * 1024);
+    }
+
+    #[test]
+    fn datenstrom_layout_behaelt_sparse_positionen() {
+        let layout = stream_layout(
+            vec![(None, 4096), (Some(8192), 4096), (Some(16384), 4096)],
+            10_000,
+            1_000,
+            32_768,
+        )
+        .unwrap();
+        assert_eq!(layout.logical_size, 10_000);
+        assert_eq!(layout.allocated_size, 5_904);
+        assert_eq!(layout.runs[0].logical_offset, 0);
+        assert_eq!(layout.runs[0].image_offset, None);
+        assert_eq!(layout.runs[1].logical_offset, 4096);
+        assert_eq!(layout.runs[1].image_offset, Some(9192));
+        assert_eq!(layout.runs[2].length, 1808);
+    }
+
+    #[test]
+    fn datenstrom_layout_verwirft_lauf_ausserhalb() {
+        assert!(matches!(
+            stream_layout(vec![(Some(900), 200)], 200, 0, 1024),
+            Err(NtfsVolumeError::DataRunOutOfVolume { .. })
+        ));
     }
 }
