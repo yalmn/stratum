@@ -77,6 +77,19 @@ pub enum NtfsVolumeError {
         path: String,
     },
 
+    /// Ein komprimierter Inhalt überschreitet die sichere Dekompressionsgrenze.
+    #[error(
+        "{path} ist mit {size} Bytes zu groß für die vollständige Dekompression (Grenze: {limit} Bytes)"
+    )]
+    CompressedFileTooLarge {
+        /// Angefragter Pfad.
+        path: String,
+        /// Logische Dateigröße.
+        size: u64,
+        /// Angewandte Obergrenze.
+        limit: u64,
+    },
+
     /// Fehler aus dem darunterliegenden NTFS-Parser.
     #[error(transparent)]
     Ntfs(#[from] ntfs::NtfsError),

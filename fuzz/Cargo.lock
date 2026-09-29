@@ -1822,6 +1822,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "stratum-core",
  "stratum-creds",
  "stratum-ntfs",
