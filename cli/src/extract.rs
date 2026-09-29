@@ -6,7 +6,7 @@
 //! Dateien werden nie überschrieben.
 
 use std::fs::{File, OpenOptions};
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,8 +14,8 @@ use anyhow::{Context, Result};
 use serde::Serialize;
 use stratum_analysis::NtfsTarget;
 use stratum_core::time::filetime_to_iso;
-use stratum_core::{hash_bytes, ImageHashes, ImageReader};
-use stratum_ntfs::{FileData, NtfsVolume};
+use stratum_core::{HashingWriter, ImageReader};
+use stratum_ntfs::NtfsVolume;
 
 use crate::report::Tool;
 
@@ -64,7 +64,8 @@ struct Quelle<'a> {
 struct Inhalt {
     groesse_strom: u64,
     geschrieben: u64,
-    abgeschnitten: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gueltige_laenge: Option<u64>,
     sha256: String,
     blake3: String,
 }
@@ -84,6 +85,11 @@ struct Untersuchung<'a> {
 }
 
 /// Sucht die Datei, schreibt Inhalt und Herkunftsnachweis.
+///
+/// Der Inhalt wird blockweise gestreamt und dabei gehasht, es gibt also keine
+/// Größengrenze. Nur NTFS- und WOF-komprimierte Dateien werden im Speicher
+/// entpackt und sind auf [`stratum_ntfs::MAX_FILE_SIZE`] begrenzt; darüber gibt
+/// es einen Fehler statt einer gekürzten Datei.
 pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path) -> Result<()> {
     let sidecar = sidecar_path(out);
     for p in [out, sidecar.as_path()] {
@@ -95,13 +101,23 @@ pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path)
         }
     }
 
-    let (volume_offset, file) = find(img, targets, &sel)?;
-    let hashes: ImageHashes = hash_bytes(&file.data);
-    let abgeschnitten = (file.data.len() as u64) < file.meta.size;
-
-    create_new(out)?
-        .write_all(&file.data)
-        .with_context(|| format!("Zieldatei nicht schreibbar: {}", out.display()))?;
+    let (volume_offset, mut vol, mft, path) = find(img, targets, &sel)?;
+    let mut writer = HashingWriter::new(BufWriter::with_capacity(1 << 20, create_new(out)?));
+    let prefetch = |offset: u64, len: u64| img.prefetch(offset, len);
+    let written = vol
+        .write_file_by_record(mft, path, &prefetch, &mut writer)
+        .map_err(anyhow::Error::from)
+        .and_then(|meta| meta.with_context(|| format!("MFT-Datensatz {mft} hat keinen Inhalt")))
+        .and_then(|meta| Ok((meta, writer.finish()?)));
+    let (meta, hashes) = match written {
+        Ok((meta, (_, hashes))) => (meta, hashes),
+        Err(error) => {
+            // Nur die eben selbst angelegte, unvollständige Zieldatei entfernen,
+            // damit kein halber Inhalt wie ein Beweisstück aussieht.
+            let _ = std::fs::remove_file(out);
+            return Err(error.context(format!("Extraktion von MFT {mft} fehlgeschlagen")));
+        }
+    };
 
     let ziel = out.display().to_string();
     let herkunft = Herkunft {
@@ -113,10 +129,10 @@ pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path)
         },
         quelle: Quelle {
             volume_offset,
-            mft_record: file.meta.mft_record,
-            mft_record_offset: file.meta.record_offset,
-            pfad: &file.meta.path,
-            strom: match file.meta.wof {
+            mft_record: meta.mft_record,
+            mft_record_offset: meta.record_offset,
+            pfad: &meta.path,
+            strom: match meta.wof {
                 Some(format) => format!(
                     "{} entpackt ({format}), Größe laut unbenanntem $DATA",
                     stratum_ntfs::wof::WOF_STREAM
@@ -125,17 +141,17 @@ pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path)
             },
         },
         inhalt: Inhalt {
-            groesse_strom: file.meta.size,
+            groesse_strom: meta.size,
             geschrieben: hashes.bytes,
-            abgeschnitten,
+            gueltige_laenge: meta.valid_size,
             sha256: hashes.sha256,
             blake3: hashes.blake3,
         },
         artefaktzeiten_si: Zeiten {
-            erstellt: filetime_to_iso(file.meta.created),
-            geaendert: filetime_to_iso(file.meta.modified),
-            mft_geaendert: filetime_to_iso(file.meta.mft_modified),
-            zugriff: filetime_to_iso(file.meta.accessed),
+            erstellt: filetime_to_iso(meta.created),
+            geaendert: filetime_to_iso(meta.modified),
+            mft_geaendert: filetime_to_iso(meta.mft_modified),
+            zugriff: filetime_to_iso(meta.accessed),
         },
         untersuchung: Untersuchung {
             extrahiert_utc: now_filetime().and_then(filetime_to_iso),
@@ -149,32 +165,27 @@ pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path)
 
     eprintln!(
         "[+] {} Bytes geschrieben: {} (Volume {}, MFT {}), Herkunft: {}",
-        file.data.len(),
+        hashes.bytes,
         out.display(),
         volume_offset,
-        file.meta.mft_record,
+        meta.mft_record,
         sidecar.display()
     );
-    if abgeschnitten {
-        eprintln!(
-            "[!] Datei ist {} Bytes groß, extrahiert wurden nur {} Bytes (Obergrenze {} Bytes)",
-            file.meta.size,
-            file.data.len(),
-            stratum_ntfs::MAX_FILE_SIZE
-        );
-    }
+    eprintln!("[+] SHA-256 {}", herkunft.inhalt.sha256);
     Ok(())
 }
 
-fn find(img: &ImageReader, targets: &[NtfsTarget], sel: &Selector) -> Result<(u64, FileData)> {
+type Found<'a> = (u64, NtfsVolume<std::io::Cursor<&'a [u8]>>, u64, &'a str);
+
+fn find<'a>(img: &'a ImageReader, targets: &[NtfsTarget], sel: &Selector<'a>) -> Result<Found<'a>> {
     match *sel {
         Selector::Path(path) => {
             for t in targets {
                 let Ok(mut vol) = NtfsVolume::open(img, t.offset, t.size) else {
                     continue;
                 };
-                if let Ok(Some(file)) = vol.read_file(path) {
-                    return Ok((t.offset, file));
+                if let Ok(Some(mft)) = vol.record_of(path) {
+                    return Ok((t.offset, vol, mft, path));
                 }
             }
             anyhow::bail!("Datei '{path}' in keiner NTFS-Partition gefunden")
@@ -191,13 +202,9 @@ fn find(img: &ImageReader, targets: &[NtfsTarget], sel: &Selector) -> Result<(u6
                         bekannt.join(", ")
                     )
                 })?;
-            let mut vol = NtfsVolume::open(img, t.offset, t.size)
+            let vol = NtfsVolume::open(img, t.offset, t.size)
                 .with_context(|| format!("Volume bei Offset {volume_offset} nicht lesbar"))?;
-            let file = vol
-                .read_file_by_record(mft, "")
-                .with_context(|| format!("MFT-Datensatz {mft} nicht lesbar"))?
-                .with_context(|| format!("MFT-Datensatz {mft} hat keinen Inhalt"))?;
-            Ok((volume_offset, file))
+            Ok((volume_offset, vol, mft, ""))
         }
     }
 }

@@ -335,6 +335,13 @@ impl<R: Read + Seek> NtfsVolume<R> {
         read_record(ntfs, fs, rec, path, self.part_offset, self.part_size)
     }
 
+    /// MFT-Datensatznummer zu einem Pfad, `None` wenn er nicht existiert.
+    pub fn record_of(&mut self, path: &str) -> Result<Option<u64>, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
+        resolve(ntfs, fs, path)
+    }
+
     /// Prüft, ob ein Pfad existiert.
     pub fn exists(&mut self, path: &str) -> Result<bool, NtfsVolumeError> {
         let ntfs = &self.ntfs;

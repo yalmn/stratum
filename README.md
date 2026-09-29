@@ -146,8 +146,12 @@ Neben der Zieldatei entsteht `ausgabe.bin.herkunft.json` mit Quelle
 (Volume-Offset, MFT-Nummer, Offset des Datensatzes), SHA-256 und BLAKE3 des
 Inhalts, den Artefaktzeiten der Datei und getrennt davon dem Zeitpunkt der
 Extraktion. Das gilt auch für `--dump`. Vorhandene Dateien werden nicht
-überschrieben. Dateien über 256 MiB werden nur bis zu dieser Grenze extrahiert
-und als `abgeschnitten` gekennzeichnet.
+überschrieben. Der Inhalt wird blockweise gelesen und dabei gehasht, eine
+Größengrenze gibt es nicht. Nur NTFS- und WOF-komprimierte Dateien werden im
+Speicher entpackt und sind auf 256 MiB begrenzt; darüber bricht die Extraktion
+mit einer Meldung ab, statt eine gekürzte Datei zu liefern. So lässt sich eine
+einzelne Datei aus dem Katalog gezielt auswählen und hashen, ohne alle Inhalte
+des Images zu lesen.
 
 ### MFT-Volltimeline
 
