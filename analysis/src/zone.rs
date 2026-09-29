@@ -6,11 +6,13 @@
 //! Ausführung der Datei.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use rayon::prelude::*;
 use stratum_core::hash_bytes;
 use stratum_ntfs::NtfsVolume;
 
-use crate::{AnalysisContext, Analyzer, Finding, Outcome};
+use crate::{AnalysisContext, Analyzer, FileEntry, Finding, Outcome};
 
 const STREAM_NAME: &str = "Zone.Identifier";
 const MAX_STREAM_SIZE: u64 = 64 * 1024;
@@ -18,6 +20,8 @@ const MAX_LINES: usize = 256;
 const MAX_LINE_BYTES: usize = 8192;
 const MAX_FINDINGS: usize = 100_000;
 const MAX_WARNINGS: usize = 100;
+/// Dateien je paralleler Arbeitseinheit.
+const TASK: usize = 512;
 
 /// Analyzer für die von Windows gespeicherte Herkunftszone einer Datei.
 pub struct ZoneIdentifierAnalyzer;
@@ -29,124 +33,172 @@ impl Analyzer for ZoneIdentifierAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
+        let mut suppressed = 0usize;
         for index in &ctx.volumes {
-            let mut volume = match NtfsVolume::open(ctx.img, index.target.offset, index.target.size)
-            {
-                Ok(volume) => volume,
-                Err(error) => {
-                    push_warning(
-                        &mut out,
-                        format!("Volume {} nicht lesbar: {error}", index.target.offset),
-                    );
-                    continue;
-                }
-            };
-            for entry in &index.files {
-                if out.findings.len() >= MAX_FINDINGS {
-                    push_warning(
-                        &mut out,
-                        format!("Grenze von {MAX_FINDINGS} Zone.Identifier-Funden erreicht"),
-                    );
-                    return out;
-                }
-                let info = match volume.record_info(entry.mft_record, Some(entry.parent_record)) {
-                    Ok(info) => info,
-                    Err(_) => continue,
-                };
-                let Some(stream) = info
-                    .streams
-                    .iter()
-                    .find(|stream| stream.name.eq_ignore_ascii_case(STREAM_NAME))
-                else {
-                    continue;
-                };
-                let source = format!("{}:{}:$DATA", entry.path, stream.name);
-                let Some(record_offset) = info.record_offset else {
-                    push_warning(
-                        &mut out,
-                        format!("{source}: MFT-Datensatzoffset nicht bestimmbar"),
-                    );
-                    continue;
-                };
-                let mut finding = Finding::new(
-                    "dateiherkunft",
-                    entry.path.rsplit('\\').next().unwrap_or(&entry.path),
-                    &source,
-                )
-                .at(record_offset)
-                .with("art", "zone_identifier")
-                .with("dateipfad", &entry.path)
-                .with("strom", &stream.name)
-                .with("strom_groesse", stream.size.to_string())
-                .with("mft_record", entry.mft_record.to_string())
-                .with("volume_offset", index.target.offset.to_string())
-                .with("mft_record_offset", record_offset.to_string())
-                .with("offset_art", "MFT-Datensatz als Quellenanker")
-                .with(
-                    "aussage",
-                    "gespeicherte Herkunftszone; Download und Ausführung dadurch nicht belegt",
+            let (offset, size) = (index.target.offset, index.target.size);
+            if let Err(error) = NtfsVolume::open(ctx.img, offset, size) {
+                push_warning(
+                    &mut out,
+                    &mut suppressed,
+                    format!("Volume {offset} nicht lesbar: {error}"),
                 );
-                if stream.size > MAX_STREAM_SIZE {
-                    push_warning(
-                        &mut out,
-                        format!(
-                            "{source}: {} Bytes, Grenze {MAX_STREAM_SIZE}, nicht gelesen",
-                            stream.size
-                        ),
-                    );
-                    out.findings
-                        .push(finding.with("auswertung_status", "zu_gross"));
-                    continue;
+                continue;
+            }
+            // Jeder Datensatz wird einmal gelesen; die Blöcke laufen parallel,
+            // die Reihenfolge der Ergebnisse bleibt die des Pfad-Index.
+            let found = AtomicUsize::new(out.findings.len());
+            let results: Vec<Vec<Inspected>> = index
+                .files
+                .par_chunks(TASK)
+                .map_init(
+                    || NtfsVolume::open(ctx.img, offset, size).ok(),
+                    |volume, chunk| {
+                        let Some(volume) = volume else {
+                            return Vec::new();
+                        };
+                        let mut results = Vec::new();
+                        for entry in chunk {
+                            if found.load(Ordering::Relaxed) > MAX_FINDINGS {
+                                break;
+                            }
+                            let result = inspect(volume, offset, entry);
+                            if result.0.is_some() {
+                                found.fetch_add(1, Ordering::Relaxed);
+                            }
+                            if result.0.is_some() || !result.1.is_empty() {
+                                results.push(result);
+                            }
+                        }
+                        results
+                    },
+                )
+                .collect();
+            for (finding, warnings) in results.into_iter().flatten() {
+                for warning in warnings {
+                    push_warning(&mut out, &mut suppressed, warning);
                 }
-                let data =
-                    match volume.read_stream_by_record(entry.mft_record, &entry.path, &stream.name)
-                    {
-                        Ok(Some(data)) => data,
-                        Ok(None) => {
-                            push_warning(&mut out, format!("{source}: Strom nicht mehr lesbar"));
-                            out.findings
-                                .push(finding.with("auswertung_status", "nicht_lesbar"));
-                            continue;
-                        }
-                        Err(error) => {
-                            push_warning(&mut out, format!("{source}: {error}"));
-                            out.findings
-                                .push(finding.with("auswertung_status", "nicht_lesbar"));
-                            continue;
-                        }
-                    };
-                let hashes = hash_bytes(&data.data);
-                finding = finding
-                    .with("strom_sha256", hashes.sha256)
-                    .with("strom_blake3", hashes.blake3)
-                    .with("gelesene_bytes", hashes.bytes.to_string());
-                match parse(&data.data) {
-                    Ok(parsed) => {
-                        finding = add_fields(finding, &parsed);
-                        if !parsed.hinweise.is_empty() {
-                            finding = finding.with("parser_hinweise", parsed.hinweise.join("; "));
-                        }
-                        out.findings
-                            .push(finding.with("auswertung_status", "gelesen"));
-                    }
-                    Err(error) => {
-                        push_warning(&mut out, format!("{source}: {error}"));
-                        out.findings.push(
-                            finding
-                                .with("auswertung_status", "format_nicht_lesbar")
-                                .with("parser_fehler", error),
+                if let Some(finding) = finding {
+                    if out.findings.len() >= MAX_FINDINGS {
+                        push_warning(
+                            &mut out,
+                            &mut suppressed,
+                            format!("Grenze von {MAX_FINDINGS} Zone.Identifier-Funden erreicht"),
                         );
+                        return out;
                     }
+                    out.findings.push(finding);
                 }
             }
+        }
+        if suppressed > 0 {
+            out.warnings.push(format!(
+                "{suppressed} weitere Zone.Identifier-Hinweise nicht einzeln aufgeführt"
+            ));
         }
         out
     }
 }
 
-fn push_warning(out: &mut Outcome, warning: String) {
+/// Ergebnis für eine Datei: Fund (falls ein `Zone.Identifier` existiert) und Hinweise.
+type Inspected = (Option<Finding>, Vec<String>);
+
+/// Prüft eine Datei auf einen `Zone.Identifier`-Strom und wertet ihn aus.
+fn inspect<R: std::io::Read + std::io::Seek>(
+    volume: &mut NtfsVolume<R>,
+    volume_offset: u64,
+    entry: &FileEntry,
+) -> Inspected {
+    let Ok(info) = volume.record_info(entry.mft_record, Some(entry.parent_record)) else {
+        return (None, Vec::new());
+    };
+    let Some(stream) = info
+        .streams
+        .iter()
+        .find(|stream| stream.name.eq_ignore_ascii_case(STREAM_NAME))
+    else {
+        return (None, Vec::new());
+    };
+    let source = format!("{}:{}:$DATA", entry.path, stream.name);
+    let Some(record_offset) = info.record_offset else {
+        return (
+            None,
+            vec![format!("{source}: MFT-Datensatzoffset nicht bestimmbar")],
+        );
+    };
+    let finding = Finding::new(
+        "dateiherkunft",
+        entry.path.rsplit('\\').next().unwrap_or(&entry.path),
+        &source,
+    )
+    .at(record_offset)
+    .with("art", "zone_identifier")
+    .with("dateipfad", &entry.path)
+    .with("strom", &stream.name)
+    .with("strom_groesse", stream.size.to_string())
+    .with("mft_record", entry.mft_record.to_string())
+    .with("volume_offset", volume_offset.to_string())
+    .with("mft_record_offset", record_offset.to_string())
+    .with("offset_art", "MFT-Datensatz als Quellenanker")
+    .with(
+        "aussage",
+        "gespeicherte Herkunftszone; Download und Ausführung dadurch nicht belegt",
+    );
+    if stream.size > MAX_STREAM_SIZE {
+        return (
+            Some(finding.with("auswertung_status", "zu_gross")),
+            vec![format!(
+                "{source}: {} Bytes, Grenze {MAX_STREAM_SIZE}, nicht gelesen",
+                stream.size
+            )],
+        );
+    }
+    let data = match volume.read_stream_by_record(entry.mft_record, &entry.path, &stream.name) {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return (
+                Some(finding.with("auswertung_status", "nicht_lesbar")),
+                vec![format!("{source}: Strom nicht mehr lesbar")],
+            );
+        }
+        Err(error) => {
+            return (
+                Some(finding.with("auswertung_status", "nicht_lesbar")),
+                vec![format!("{source}: {error}")],
+            );
+        }
+    };
+    let hashes = hash_bytes(&data.data);
+    let finding = finding
+        .with("strom_sha256", hashes.sha256)
+        .with("strom_blake3", hashes.blake3)
+        .with("gelesene_bytes", hashes.bytes.to_string());
+    match parse(&data.data) {
+        Ok(parsed) => {
+            let mut finding = add_fields(finding, &parsed);
+            if !parsed.hinweise.is_empty() {
+                finding = finding.with("parser_hinweise", parsed.hinweise.join("; "));
+            }
+            (
+                Some(finding.with("auswertung_status", "gelesen")),
+                Vec::new(),
+            )
+        }
+        Err(error) => (
+            Some(
+                finding
+                    .with("auswertung_status", "format_nicht_lesbar")
+                    .with("parser_fehler", &error),
+            ),
+            vec![format!("{source}: {error}")],
+        ),
+    }
+}
+
+fn push_warning(out: &mut Outcome, suppressed: &mut usize, warning: String) {
     if out.warnings.len() < MAX_WARNINGS {
         out.warnings.push(warning);
+    } else {
+        *suppressed += 1;
     }
 }
 
