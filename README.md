@@ -72,6 +72,7 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 | `--dump <pfad> <ziel>` | eine einzelne Datei aus dem Image extrahieren und beenden (ohne Analyse) |
 | `--dump-record <volume_offset> <mft> <ziel>` | eine Datei über Volume-Offset und MFT-Nummer extrahieren (Werte aus dem Katalog) |
 | `--catalog <datei>` | Dateikatalog aller Dateien und Verzeichnisse als JSON Lines schreiben |
+| `--datei-hashes` | im Katalog zusätzlich SHA-256 und Signaturtyp jeder Datei bestimmen (liest alle Inhalte, dauert lange) |
 | `--mft-timeline <datei>` | vollständige SI-/FN-MACB-Zeitachse einschließlich gelöschter MFT-Datensätze schreiben |
 | `--usn-journal <datei>` | `$UsnJrnl:$J` aller NTFS-Volumes als JSON Lines schreiben |
 | `--bdp` | `bdp.info` von ForensiCUnlock, legt die zu analysierende Partition fest |
@@ -100,8 +101,12 @@ Zeiten stehen als ISO 8601 in UTC mit 100-ns-Auflösung. Abweichungen zwischen
 `si` und `fn` können auf nachträglich veränderte Zeitstempel hinweisen, sind
 aber für sich allein kein Beleg.
 
-Dateien tragen außerdem den SHA-256 ihres vollständigen logischen Inhalts.
-`dateityp` wird aus einer festen Signatur im Inhalt bestimmt, nicht aus der
+Der Katalog liest nur MFT-Datensätze, keine Dateiinhalte; die Integrität des
+Beweismittels sichert der Hash über das ganze Image. Mit `--datei-hashes`
+tragen Dateien zusätzlich den SHA-256 ihres vollständigen logischen Inhalts.
+Das liest jede Datei ganz und dauert bei einem Windows-System entsprechend
+lange. Einzelne Dateien lassen sich stattdessen gezielt extrahieren und hashen
+(siehe unten). `dateityp` wird aus einer festen Signatur im Inhalt bestimmt, nicht aus der
 Dateiendung. Bei einem erkannten Typ nennen `signatur.offset` und
 `signatur.bytes` die dafür verwendeten Bytes; `mime` wird nur für Formate mit
 eindeutiger Zuordnung ausgegeben. Ohne unterstützte Signatur steht
@@ -115,7 +120,7 @@ kleiner als die Dateigröße, etwa bei vorab vergrößerten und nur teilweise
 beschriebenen Dateien, liefert Windows dahinter Nullen, auch wenn in den
 belegten Clustern noch alte Daten stehen. stratum liest genauso, damit Inhalt
 und SHA-256 mit dem übereinstimmen, was Windows selbst ausgibt. Der Katalog
-nennt dann `gueltige_laenge`. Die Altdaten dahinter gehören zum Slack und
+nennt dann mit `--datei-hashes` das Feld `gueltige_laenge`. Die Altdaten dahinter gehören zum Slack und
 werden hier nicht ausgewertet.
 
 Vom System komprimierte Dateien (WOF, etwa CompactOS) tragen `wof` mit dem

@@ -47,7 +47,8 @@ mod builder;
 
 pub use browser::BrowserAnalyzer;
 pub use catalog::{
-    write_catalog, write_catalog_with_progress, CatalogProgress, CatalogSummary, CATALOG_SOURCE,
+    write_catalog, write_catalog_with, CatalogOptions, CatalogProgress, CatalogSummary,
+    CATALOG_SOURCE,
 };
 pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
 pub use dpapi::DpapiAnalyzer;

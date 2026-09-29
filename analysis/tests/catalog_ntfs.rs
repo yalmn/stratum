@@ -2,7 +2,9 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use stratum_analysis::{write_catalog, AnalysisContext, NtfsTarget};
+use stratum_analysis::{
+    write_catalog, write_catalog_with, AnalysisContext, CatalogOptions, NtfsTarget,
+};
 use stratum_core::ImageReader;
 
 fn have(tool: &str) -> bool {
@@ -71,8 +73,20 @@ fn katalog_ueber_ntfs_index() {
             size: image.len(),
         }],
     );
+    // Ohne Option nur Metadaten, keine Inhalte.
+    let mut nur_metadaten = Vec::new();
+    let summary = write_catalog(&image, &ctx.volumes, &mut nur_metadaten).unwrap();
+    assert!(!summary.inhalte_gelesen);
+    assert_eq!(summary.dateien_gehasht, 0);
+    assert!(!String::from_utf8_lossy(&nur_metadaten).contains("sha256"));
+
+    let mit_inhalten = CatalogOptions {
+        inhalte: true,
+        progress: None,
+    };
     let mut out = Vec::new();
-    let summary = write_catalog(&image, &ctx.volumes, &mut out).unwrap();
+    let summary = write_catalog_with(&image, &ctx.volumes, &mut out, mit_inhalten).unwrap();
+    assert!(summary.inhalte_gelesen);
     assert_eq!(summary.fehler, 0, "{}", String::from_utf8_lossy(&out));
     assert!(summary.verzeichnisse >= 1, "mindestens $Extend");
     let lines: Vec<serde_json::Value> = String::from_utf8(out.clone())
@@ -111,7 +125,7 @@ fn katalog_ueber_ntfs_index() {
 
     // Gleiches Image, gleicher Katalog.
     let mut again = Vec::new();
-    write_catalog(&image, &ctx.volumes, &mut again).unwrap();
+    write_catalog_with(&image, &ctx.volumes, &mut again, mit_inhalten).unwrap();
     assert_eq!(again, out);
     assert_eq!(std::fs::read(&path).unwrap(), original);
 }

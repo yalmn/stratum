@@ -102,6 +102,12 @@ struct Cli {
     #[arg(long, value_name = "DATEI")]
     catalog: Option<PathBuf>,
 
+    /// Im Dateikatalog zusätzlich SHA-256 und Signaturtyp jeder Datei
+    /// bestimmen. Liest dafür jede Datei vollständig und dauert entsprechend
+    /// lange; die Integrität sichert bereits der Image-Hash.
+    #[arg(long, requires = "catalog")]
+    datei_hashes: bool,
+
     /// Vollständige MFT-Zeitachse mit SI-/FN-MACB-Ereignissen als JSON Lines.
     /// Enthält auch lesbare gelöschte Datensätze. Eine vorhandene Datei wird
     /// nicht überschrieben.
@@ -320,11 +326,14 @@ fn main() -> Result<()> {
                     started.elapsed().as_secs()
                 );
             };
-            let summary = stratum_analysis::write_catalog_with_progress(
+            let summary = stratum_analysis::write_catalog_with(
                 &img,
                 &ctx.volumes,
                 &mut w,
-                Some(&progress),
+                stratum_analysis::CatalogOptions {
+                    inhalte: cli.datei_hashes,
+                    progress: Some(&progress),
+                },
             )
             .with_context(|| format!("Katalog nicht schreibbar: {}", path.display()))?;
             let (_, hashes) = w

@@ -47,6 +47,8 @@ pub struct CatalogSummary {
     pub fehler: u64,
     /// Verzeichnisse, deren Inhalt nicht lesbar war (Eintrag mit `inhalt_fehler`).
     pub verzeichnisse_ohne_inhalt: u64,
+    /// Ob Dateiinhalte gelesen wurden (SHA-256 und Signaturtyp je Datei).
+    pub inhalte_gelesen: bool,
     /// Dateien mit vollständigem SHA-256.
     pub dateien_gehasht: u64,
     /// Dateien, deren Inhalt nicht vollständig gelesen und daher nicht gehasht wurde.
@@ -402,23 +404,39 @@ fn inspect_file<R: std::io::Read + std::io::Seek>(
 /// Fortschritt des Katalogs: bearbeitete und gesamte Einträge.
 pub type CatalogProgress<'a> = &'a dyn Fn(u64, u64);
 
-/// Schreibt den Katalog aller Volumes als JSON Lines nach `out`.
+/// Einstellungen des Dateikatalogs.
+#[derive(Default, Clone, Copy)]
+pub struct CatalogOptions<'a> {
+    /// Dateiinhalte lesen, um je Datei SHA-256 und Signaturtyp zu bestimmen.
+    /// Das liest jede Datei vollständig und dauert entsprechend; ohne diese
+    /// Option liest der Katalog nur MFT-Datensätze.
+    pub inhalte: bool,
+    /// Wird nach jedem Block mit bearbeiteten und gesamten Einträgen gerufen.
+    pub progress: Option<CatalogProgress<'a>>,
+}
+
+/// Schreibt den Metadatenkatalog aller Volumes als JSON Lines nach `out`.
+/// Dateiinhalte werden nicht gelesen.
 pub fn write_catalog<W: Write>(
     img: &ImageReader,
     volumes: &[FsIndex],
     out: W,
 ) -> std::io::Result<CatalogSummary> {
-    write_catalog_with_progress(img, volumes, out, None)
+    write_catalog_with(img, volumes, out, CatalogOptions::default())
 }
 
-/// Wie [`write_catalog`], meldet nach jedem Block den Fortschritt.
-pub fn write_catalog_with_progress<W: Write>(
+/// Wie [`write_catalog`], mit wählbaren [`CatalogOptions`].
+pub fn write_catalog_with<W: Write>(
     img: &ImageReader,
     volumes: &[FsIndex],
     mut out: W,
-    progress: Option<CatalogProgress<'_>>,
+    options: CatalogOptions<'_>,
 ) -> std::io::Result<CatalogSummary> {
-    let mut summary = CatalogSummary::default();
+    let CatalogOptions { inhalte, progress } = options;
+    let mut summary = CatalogSummary {
+        inhalte_gelesen: inhalte,
+        ..CatalogSummary::default()
+    };
     let total: u64 = volumes
         .iter()
         .map(|v| (v.files.len() + v.directories.len()) as u64)
@@ -461,7 +479,7 @@ pub fn write_catalog_with_progress<W: Write>(
                                 Err(e) => Err(format!("Volume nicht lesbar: {e}")),
                             };
                             errors += u64::from(info.is_err());
-                            let content = if is_dir || info.is_err() {
+                            let content = if !inhalte || is_dir || info.is_err() {
                                 None
                             } else {
                                 let mut inspect = || match vol {
