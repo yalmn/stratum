@@ -18,5 +18,5 @@ fuzz_target!(|data: &[u8]| {
         }
     }
     let mut sink = std::io::sink();
-    let _ = vol.write_file_by_record(0, "$MFT", &mut sink);
+    let _ = vol.write_file_by_record(0, "$MFT", &|_, _| {}, &mut sink);
 });

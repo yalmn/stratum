@@ -231,7 +231,12 @@ fn gueltige_datenlaenge_wird_beachtet() {
 
     let mut gestreamt = Vec::new();
     let meta = vol
-        .write_file_by_record(datei.meta.mft_record, "teil.bin", &mut gestreamt)
+        .write_file_by_record(
+            datei.meta.mft_record,
+            "teil.bin",
+            &|_, _| {},
+            &mut gestreamt,
+        )
         .unwrap()
         .unwrap();
     assert_eq!(meta.valid_size, Some(10_000));

@@ -72,6 +72,37 @@ impl ReadOnlyMap {
             let _ = self.map.advise(memmap2::Advice::Sequential);
         }
     }
+
+    /// Hinweis, dass wieder verstreut gelesen wird, wie nach dem Öffnen. Ohne
+    /// diesen Rücksetzer liest der Kernel nach dem Hashen bei jedem Sprung
+    /// große Bereiche voraus, die niemand braucht.
+    pub fn advise_random(&self) {
+        #[cfg(unix)]
+        {
+            let _ = self.map.advise(memmap2::Advice::Random);
+        }
+    }
+
+    /// Fordert einen Bereich vorab an, damit er am Stück von der Platte kommt
+    /// statt Seite für Seite beim Zugriff. Nur ein Hinweis; Bereiche außerhalb
+    /// werden gekappt, Fehler sind unkritisch.
+    pub fn prefetch(&self, offset: u64, len: u64) {
+        #[cfg(unix)]
+        {
+            let size = self.map.len() as u64;
+            if offset >= size || len == 0 {
+                return;
+            }
+            let len = len.min(size - offset);
+            if let (Ok(offset), Ok(len)) = (usize::try_from(offset), usize::try_from(len)) {
+                let _ = self
+                    .map
+                    .advise_range(memmap2::Advice::WillNeed, offset, len);
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = (offset, len);
+    }
 }
 
 #[cfg(test)]

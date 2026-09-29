@@ -67,6 +67,17 @@ impl ImageReader {
     pub(crate) fn advise_sequential(&self) {
         self.map.advise_sequential();
     }
+
+    /// Setzt den Zugriffshinweis nach einem sequentiellen Durchlauf zurück.
+    pub(crate) fn advise_random(&self) {
+        self.map.advise_random();
+    }
+
+    /// Fordert `len` Bytes ab `offset` vorab vom Datenträger an. Reiner
+    /// Leistungshinweis ohne Einfluss auf gelesene Inhalte.
+    pub fn prefetch(&self, offset: u64, len: u64) {
+        self.map.prefetch(offset, len);
+    }
 }
 
 /// Geprüfter Teilbereich `data[offset..offset + len]`.

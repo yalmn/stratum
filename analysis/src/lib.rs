@@ -46,7 +46,9 @@ mod zone;
 mod builder;
 
 pub use browser::BrowserAnalyzer;
-pub use catalog::{write_catalog, CatalogSummary, CATALOG_SOURCE};
+pub use catalog::{
+    write_catalog, write_catalog_with_progress, CatalogProgress, CatalogSummary, CATALOG_SOURCE,
+};
 pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
 pub use dpapi::DpapiAnalyzer;
 pub use eventlog::EventLogAnalyzer;

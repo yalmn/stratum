@@ -379,11 +379,13 @@ fn detect_type(
 
 fn inspect_file<R: std::io::Read + std::io::Seek>(
     volume: &mut NtfsVolume<R>,
+    img: &ImageReader,
     entry: &FileEntry,
 ) -> Result<ContentInfo, String> {
     let mut inspector = Inspector::new();
+    let prefetch = |offset: u64, len: u64| img.prefetch(offset, len);
     let meta = volume
-        .write_file_by_record(entry.mft_record, &entry.path, &mut inspector)
+        .write_file_by_record(entry.mft_record, &entry.path, &prefetch, &mut inspector)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "Datei nicht gefunden".to_string())?;
     if inspector.bytes != meta.size {
@@ -397,13 +399,31 @@ fn inspect_file<R: std::io::Read + std::io::Seek>(
     Ok(content)
 }
 
+/// Fortschritt des Katalogs: bearbeitete und gesamte Einträge.
+pub type CatalogProgress<'a> = &'a dyn Fn(u64, u64);
+
 /// Schreibt den Katalog aller Volumes als JSON Lines nach `out`.
 pub fn write_catalog<W: Write>(
     img: &ImageReader,
     volumes: &[FsIndex],
+    out: W,
+) -> std::io::Result<CatalogSummary> {
+    write_catalog_with_progress(img, volumes, out, None)
+}
+
+/// Wie [`write_catalog`], meldet nach jedem Block den Fortschritt.
+pub fn write_catalog_with_progress<W: Write>(
+    img: &ImageReader,
+    volumes: &[FsIndex],
     mut out: W,
+    progress: Option<CatalogProgress<'_>>,
 ) -> std::io::Result<CatalogSummary> {
     let mut summary = CatalogSummary::default();
+    let total: u64 = volumes
+        .iter()
+        .map(|v| (v.files.len() + v.directories.len()) as u64)
+        .sum();
+    let mut done = 0u64;
     for v in volumes {
         let (offset, size) = (v.target.offset, v.target.size);
         let mut entries: Vec<(&FileEntry, bool)> = v
@@ -445,7 +465,7 @@ pub fn write_catalog<W: Write>(
                                 None
                             } else {
                                 let mut inspect = || match vol {
-                                    Ok(vol) => inspect_file(vol, entry),
+                                    Ok(vol) => inspect_file(vol, img, entry),
                                     Err(e) => Err(format!("Volume nicht lesbar: {e}")),
                                 };
                                 let result = if matches!(&info, Ok(i) if i.hard_links > 1) {
@@ -494,6 +514,10 @@ pub fn write_catalog<W: Write>(
                 summary.dateien_gehasht += hashed;
                 summary.hash_fehler += hash_errors;
                 summary.signaturen_erkannt += signatures;
+            }
+            done += batch.len() as u64;
+            if let Some(progress) = progress {
+                progress(done, total);
             }
         }
         summary.verzeichnisse += v.directories.len() as u64;

@@ -313,8 +313,20 @@ fn main() -> Result<()> {
             eprintln!("[*] Schreibe Dateikatalog ...");
             let mut w =
                 std::io::BufWriter::with_capacity(1 << 20, stratum_core::HashingWriter::new(file));
-            let summary = stratum_analysis::write_catalog(&img, &ctx.volumes, &mut w)
-                .with_context(|| format!("Katalog nicht schreibbar: {}", path.display()))?;
+            let started = std::time::Instant::now();
+            let progress = |done: u64, total: u64| {
+                eprintln!(
+                    "[*] Dateikatalog: {done} von {total} Einträgen ({} s)",
+                    started.elapsed().as_secs()
+                );
+            };
+            let summary = stratum_analysis::write_catalog_with_progress(
+                &img,
+                &ctx.volumes,
+                &mut w,
+                Some(&progress),
+            )
+            .with_context(|| format!("Katalog nicht schreibbar: {}", path.display()))?;
             let (_, hashes) = w
                 .into_inner()
                 .map_err(|e| e.into_error())

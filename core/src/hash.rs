@@ -37,7 +37,9 @@ pub fn hash_image(img: &ImageReader) -> ImageHashes {
 /// Wie [`hash_image`], meldet aber den Fortschritt über `progress`.
 pub fn hash_image_with_progress(img: &ImageReader, progress: Option<Progress<'_>>) -> ImageHashes {
     img.advise_sequential();
-    hash_bytes_with_progress(img.as_slice(), progress)
+    let hashes = hash_bytes_with_progress(img.as_slice(), progress);
+    img.advise_random();
+    hashes
 }
 
 /// Berechnet SHA-256 und BLAKE3 über `data`, blockweise und parallel.

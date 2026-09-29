@@ -427,14 +427,20 @@ impl<R: Read + Seek> NtfsVolume<R> {
     /// vollständig im Speicher liegen und unterliegen daher [`MAX_FILE_SIZE`].
     /// Bei einem Lesefehler werden keine Ersatzbytes erzeugt: Der Aufrufer darf
     /// einen bis dahin berechneten Hash nicht als vollständigen Dateihash nutzen.
+    ///
+    /// `prefetch` erhält absolute Image-Bereiche, die demnächst gelesen werden,
+    /// und kann sie vorab anfordern (etwa [`stratum_core::ImageReader::prefetch`]).
     pub fn write_file_by_record<W: std::io::Write>(
         &mut self,
         record: u64,
         path: &str,
+        prefetch: Prefetch<'_>,
         out: &mut W,
     ) -> Result<Option<FileMeta>, NtfsVolumeError> {
         let ntfs = &self.ntfs;
         let fs = &mut self.fs;
+        let part_offset = self.part_offset;
+        let hint = |offset: u64, len: u64| prefetch(part_offset.saturating_add(offset), len);
         write_record(
             ntfs,
             fs,
@@ -442,6 +448,7 @@ impl<R: Read + Seek> NtfsVolume<R> {
             path,
             self.part_offset,
             self.part_size,
+            &hint,
             out,
         )
     }
@@ -771,13 +778,14 @@ fn read_record<R: Read + Seek>(
                 .map(|item| item.to_attribute().map(|a| a.value_length()))
                 .transpose()?
                 .unwrap_or(0);
-            let (stream, _, _) = read_data(ntfs, &file, fs, part_size, wof::WOF_STREAM)?;
+            let (stream, _, _) =
+                read_data(ntfs, &file, fs, part_size, wof::WOF_STREAM, &no_prefetch)?;
             let limit = usize::try_from(MAX_FILE_SIZE.min(part_size)).unwrap_or(usize::MAX);
             let data = wof::decompress(&stream, format, size, limit)?;
             (data, size, size, Some(format.name()))
         }
         None => {
-            let (data, size, valid) = read_data(ntfs, &file, fs, part_size, "")?;
+            let (data, size, valid) = read_data(ntfs, &file, fs, part_size, "", &no_prefetch)?;
             (data, size, valid, None)
         }
     };
@@ -807,13 +815,14 @@ fn read_named_record<R: Read + Seek>(
     if file.data(fs, stream).is_none() {
         return Ok(None);
     }
-    let (data, stream_size, valid) = read_data(ntfs, &file, fs, part_size, stream)?;
+    let (data, stream_size, valid) = read_data(ntfs, &file, fs, part_size, stream, &no_prefetch)?;
     let mut meta = file_meta(&file, path, part_offset, stream_size)?;
     meta.valid_size = (valid < stream_size).then_some(valid);
     Ok(Some(FileData { meta, data }))
 }
 
 /// Schreibt den unbenannten `$DATA`-Strom eines Datensatzes vollständig.
+#[allow(clippy::too_many_arguments)]
 fn write_record<R: Read + Seek, W: std::io::Write>(
     ntfs: &Ntfs,
     fs: &mut R,
@@ -821,6 +830,7 @@ fn write_record<R: Read + Seek, W: std::io::Write>(
     path: &str,
     part_offset: u64,
     part_size: u64,
+    prefetch: Prefetch<'_>,
     out: &mut W,
 ) -> Result<Option<FileMeta>, NtfsVolumeError> {
     let file = ntfs.file(fs, rec)?;
@@ -845,13 +855,13 @@ fn write_record<R: Read + Seek, W: std::io::Write>(
                     limit: MAX_FILE_SIZE,
                 });
             }
-            let (stream, _, _) = read_data(ntfs, &file, fs, part_size, wof::WOF_STREAM)?;
+            let (stream, _, _) = read_data(ntfs, &file, fs, part_size, wof::WOF_STREAM, prefetch)?;
             let data = wof::decompress(&stream, format, size, size as usize)?;
             out.write_all(&data)?;
             (size, size, Some(format.name()))
         }
         None => {
-            let (size, valid) = write_data(ntfs, &file, fs, part_size, path, out)?;
+            let (size, valid) = write_data(ntfs, &file, fs, part_size, path, prefetch, out)?;
             (size, valid, None)
         }
     };
@@ -1048,6 +1058,12 @@ fn initialized_size<R: Read + Seek>(
     Ok(u64_at(0x38).min(size))
 }
 
+/// Rückruf für Vorab-Leseanforderungen: Offset und Länge eines Bereichs, der
+/// gleich gelesen wird. Ändert nie, was gelesen wird.
+pub type Prefetch<'p> = &'p (dyn Fn(u64, u64) + 'p);
+
+fn no_prefetch(_: u64, _: u64) {}
+
 /// Datenläufe als (physischer Offset im Volume, belegte Länge); `None` ist spärlich.
 type DataRuns = Vec<(Option<u64>, u64)>;
 
@@ -1072,6 +1088,7 @@ fn write_data<R: Read + Seek, W: std::io::Write>(
     fs: &mut R,
     part_size: u64,
     path: &str,
+    prefetch: Prefetch<'_>,
     out: &mut W,
 ) -> Result<(u64, u64), NtfsVolumeError> {
     let Some(StreamSource { size, valid, plan }) = stream_source(ntfs, file, fs, "")? else {
@@ -1095,7 +1112,7 @@ fn write_data<R: Read + Seek, W: std::io::Write>(
             }
             out.write_all(&data)?;
         }
-        RunPlan::Runs(runs) => write_runs(fs, &runs, size, valid, out)?,
+        RunPlan::Runs(runs) => write_runs(fs, &runs, size, valid, prefetch, out)?,
         RunPlan::CompressedRuns(runs) => {
             if size > MAX_FILE_SIZE {
                 return Err(NtfsVolumeError::CompressedFileTooLarge {
@@ -1125,9 +1142,13 @@ fn write_runs<R: Read + Seek, W: std::io::Write>(
     runs: &[(Option<u64>, u64)],
     stream_size: u64,
     valid: u64,
+    prefetch: Prefetch<'_>,
     out: &mut W,
 ) -> Result<(), NtfsVolumeError> {
     const BLOCK: usize = 1024 * 1024;
+    // Vorauslesefenster: während ein Block gehasht wird, lädt der Kernel das
+    // nächste Fenster schon am Stück.
+    const AHEAD: u64 = 4 * 1024 * 1024;
     let mut buf = vec![0u8; BLOCK];
     let zeros = vec![0u8; BLOCK];
     let mut done = 0u64;
@@ -1145,6 +1166,15 @@ fn write_runs<R: Read + Seek, W: std::io::Write>(
             fs.seek(SeekFrom::Start(position))?;
             let mut remaining = readable;
             while remaining > 0 {
+                let read = readable - remaining;
+                if read == 0 {
+                    prefetch(position, readable.min(2 * AHEAD));
+                } else if read % AHEAD == 0 && read + AHEAD < readable {
+                    prefetch(
+                        position + read + AHEAD,
+                        (readable - read - AHEAD).min(AHEAD),
+                    );
+                }
                 let n = usize::try_from(remaining.min(BLOCK as u64)).unwrap_or(BLOCK);
                 fs.read_exact(&mut buf[..n])?;
                 out.write_all(&buf[..n])?;
@@ -1207,6 +1237,7 @@ fn read_data<R: Read + Seek>(
     fs: &mut R,
     part_size: u64,
     stream: &str,
+    prefetch: Prefetch<'_>,
 ) -> Result<(Vec<u8>, u64, u64), NtfsVolumeError> {
     let Some(StreamSource { size, valid, plan }) = stream_source(ntfs, file, fs, stream)? else {
         return Ok((Vec::new(), 0, 0));
@@ -1239,7 +1270,7 @@ fn read_data<R: Read + Seek>(
         RunPlan::Resident(data) => data,
         RunPlan::Runs(runs) => {
             let mut buf = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
-            write_runs(fs, &runs, size, valid, &mut buf)?;
+            write_runs(fs, &runs, size, valid, prefetch, &mut buf)?;
             buf
         }
         RunPlan::CompressedRuns(runs) => decompress_runs(ntfs, fs, &runs, size, valid)?,
@@ -1598,7 +1629,7 @@ mod tests {
         let mut source = Cursor::new(vec![1u8, 2, 3, 4]);
         let runs = vec![(Some(0), 4), (None, 3)];
         let mut out = Vec::new();
-        write_runs(&mut source, &runs, 7, 7, &mut out).unwrap();
+        write_runs(&mut source, &runs, 7, 7, &no_prefetch, &mut out).unwrap();
         assert_eq!(out, [1, 2, 3, 4, 0, 0, 0]);
     }
 
@@ -1606,7 +1637,8 @@ mod tests {
     fn gekuerzter_datenlauf_ist_ein_fehler() {
         let mut source = Cursor::new(vec![1u8, 2]);
         let mut out = Vec::new();
-        let error = write_runs(&mut source, &[(Some(0), 4)], 4, 4, &mut out).unwrap_err();
+        let error =
+            write_runs(&mut source, &[(Some(0), 4)], 4, 4, &no_prefetch, &mut out).unwrap_err();
         assert!(matches!(error, NtfsVolumeError::Io(_)));
     }
 
@@ -1621,6 +1653,7 @@ mod tests {
             &[(Some(0), 8), (Some(100), 4)],
             12,
             5,
+            &no_prefetch,
             &mut out,
         )
         .unwrap();
@@ -1685,5 +1718,40 @@ mod tests {
         let mut record = datensatz([9, 1], [[9, 1], [9, 1]]);
         record[..4].copy_from_slice(b"BAAD");
         assert!(apply_fixup(&mut record).is_err());
+    }
+
+    #[test]
+    fn vorauslesen_deckt_genau_den_gelesenen_bereich() {
+        let size = 10 * 1024 * 1024u64;
+        let mut source = Cursor::new(vec![1u8; size as usize + 4096]);
+        let calls = std::cell::RefCell::new(Vec::new());
+        let record = |offset: u64, len: u64| calls.borrow_mut().push((offset, len));
+        let mut sink = std::io::sink();
+        write_runs(
+            &mut source,
+            &[(Some(4096), size)],
+            size,
+            size,
+            &record,
+            &mut sink,
+        )
+        .unwrap();
+        let mib = 1024 * 1024;
+        assert_eq!(
+            *calls.borrow(),
+            [(4096, 8 * mib), (4096 + 8 * mib, 2 * mib)]
+        );
+        // Hinter der gültigen Länge und in spärlichen Läufen wird nichts angefordert.
+        calls.borrow_mut().clear();
+        write_runs(
+            &mut source,
+            &[(None, 100), (Some(0), 100)],
+            200,
+            150,
+            &record,
+            &mut sink,
+        )
+        .unwrap();
+        assert_eq!(*calls.borrow(), [(0, 50)]);
     }
 }
