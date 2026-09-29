@@ -448,6 +448,7 @@ fn reason_names(reason: u32) -> (Vec<&'static str>, u32) {
         (0x0020_0000, "STREAM_CHANGE"),
         (0x0040_0000, "TRANSACTED_CHANGE"),
         (0x0080_0000, "INTEGRITY_CHANGE"),
+        (0x0100_0000, "DESIRED_STORAGE_CLASS_CHANGE"),
         (0x8000_0000, "CLOSE"),
     ];
     let mut names = Vec::new();
@@ -545,7 +546,7 @@ mod tests {
 
     #[test]
     fn v2_felder_und_gruende() {
-        let bytes = v2("alt.txt", 0x8000_1100);
+        let bytes = v2("alt.txt", 0x8100_1100);
         let parsed = parse_record(&bytes, 4096, 8192, Some(12_288)).unwrap();
         assert_eq!(parsed.line.mft_record, Some(42));
         assert_eq!(parsed.line.sequenz, Some(7));
@@ -554,8 +555,14 @@ mod tests {
         assert_eq!(parsed.line.image_offset, Some(12_288));
         assert_eq!(
             parsed.line.gruende,
-            vec!["FILE_CREATE", "RENAME_OLD_NAME", "CLOSE"]
+            vec![
+                "FILE_CREATE",
+                "RENAME_OLD_NAME",
+                "DESIRED_STORAGE_CLASS_CHANGE",
+                "CLOSE"
+            ]
         );
+        assert_eq!(parsed.line.unbekannte_reason_bits, 0);
     }
 
     #[test]
