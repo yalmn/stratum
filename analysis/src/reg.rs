@@ -899,6 +899,8 @@ mod tests {
             timezone: None,
             accounts: vec![],
             ntuser: vec![],
+            usrclass: Vec::new(),
+            ansi_codepage: None,
             hive_status: Vec::new(),
             warnings: vec![],
         };
@@ -1074,6 +1076,8 @@ mod tests {
             timezone: None,
             accounts: vec![],
             ntuser: vec![("alice".into(), ntuser)],
+            usrclass: Vec::new(),
+            ansi_codepage: None,
             hive_status: Vec::new(),
             warnings: vec![],
         };

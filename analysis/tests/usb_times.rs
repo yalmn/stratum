@@ -60,6 +60,8 @@ fn analyze(img: &ImageReader, hive: &[u8], origin: &str) -> Outcome {
         timezone: None,
         accounts: vec![],
         ntuser: vec![],
+        usrclass: Vec::new(),
+        ansi_codepage: None,
         hive_status: Vec::new(),
         warnings: vec![],
     });

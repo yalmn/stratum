@@ -53,6 +53,15 @@ pub struct AnalysisContext<'a> {
 }
 
 impl<'a> AnalysisContext<'a> {
+    /// ANSI-Codepage der Windows-Installation auf dem Volume bei `offset`
+    /// (Live-System, nicht Schattenkopie), falls bekannt.
+    pub fn ansi_codepage(&self, offset: u64) -> Option<&str> {
+        self.installs
+            .iter()
+            .find(|i| i.target.offset == offset && i.origin == "live")
+            .and_then(|i| i.ansi_codepage.as_deref())
+    }
+
     /// Kontext ohne Windows-Grunddaten (z. B. für die reine Keyword-Suche und
     /// für Tests).
     pub fn new(img: &'a ImageReader, ntfs_targets: Vec<NtfsTarget>) -> Self {

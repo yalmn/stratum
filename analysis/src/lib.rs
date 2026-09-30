@@ -33,6 +33,8 @@ mod programexec;
 mod recyclebin;
 mod reg;
 mod runner;
+mod shellbags;
+mod shellitem;
 mod timeline;
 mod tor;
 mod usb;
@@ -67,6 +69,7 @@ pub use programexec::ProgramExecutionAnalyzer;
 pub use recyclebin::RecycleBinAnalyzer;
 pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
 pub use runner::{run_all, AnalysisResult, AnalyzerStatus};
+pub use shellbags::ShellBagsAnalyzer;
 pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
 pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
@@ -132,6 +135,13 @@ pub mod fuzzing {
     pub fn persistence_text(text: &str) {
         let _ = crate::filepersist::task_actions(text);
         let _ = crate::pathrating::rate_command(text);
+    }
+
+    /// Prüft den Shell-Item-Parser (ShellBags, LNK-IDList) mit beliebigen Bytes.
+    pub fn shell_items(data: &[u8]) {
+        let _ = crate::shellitem::parse_list(data);
+        let _ = crate::shellitem::parse_item(data);
+        let _ = crate::lnk::parse_lnk(data);
     }
 
     /// Prüft die Lagebestimmung von EVTX-Datensätzen mit beliebigen Bytes.

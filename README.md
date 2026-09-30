@@ -290,6 +290,35 @@ Wiederherstellung beziehen sich Hive-Offsets in Funden auf den
 wiederhergestellten Stand, der Report weist darauf hin. Das alte Logformat
 (bis Windows 8) wird erkannt, aber nicht eingespielt.
 
+## ShellBags
+
+ShellBags zeigen, welche Ordner ein Benutzer im Explorer geöffnet hat, auch auf
+Wechseldatenträgern und im Netz, und bleiben erhalten, wenn der Ordner längst
+gelöscht ist. stratum liest den Baum `BagMRU` aus der UsrClass.dat und der
+NTUSER.DAT jedes Benutzers (auch aus Schattenkopien) und setzt den Pfad aus der
+Folge der Shell Items zusammen. Jeder Eintrag ist ein Fund mit Pfad, Art des
+Elements, `bagmru`-Position, Hive-Offset des Werts und des Schlüssels, bei
+Ordnern Kurzname, MFT-Datensatz und Sequenz sowie Erstell-, Änderungs- und
+Zugriffszeit (`element_*`, FAT-Zeiten in UTC).
+
+`zuletzt_verwendet` ist abgeleitet: die Änderungszeit des Elternschlüssels, die
+nur für dessen zuletzt verwendeten Eintrag gilt (erste Stelle in `MRUListEx`);
+der Fund sagt das in `zeit_herkunft`. Namen zu Ordner-GUIDs stammen aus
+`SOFTWARE\Classes\CLSID` des untersuchten Systems, sonst bleibt die GUID stehen.
+Nicht beschriebene Shell Items erscheinen als `unbekannt` mit Rohbytes.
+
+Grundlage ist die Beschreibung des Shell-Item-Formats von libyal (libfwsi).
+Gegen echte Windows-11-Daten geprüft: gleiche Einträge und MRU-Zeitpunkte wie
+RegRipper `shellbags`; Namen und MFT-Referenzen aus Ordner-Einträgen stimmen
+mit dem Dateisystem überein, die FAT-Zeiten mit den NTFS-Zeiten. Netzwerkorte
+sind nur nach der Beschreibung umgesetzt.
+
+Derselbe Parser liest die LinkTargetIDList von LNK-Dateien und Jump Lists. Die
+Funde tragen `idlist_pfad` und die MFT-Referenz des Ziels als Gegenprobe zum
+LinkInfo-Pfad. ANSI-Pfade in LNK-Dateien werden mit der Codepage des
+untersuchten Systems gelesen (`Control\Nls\CodePage\ACP`); unterstützt ist
+Windows-1252, andere Codepages nennt `zielpfad_kodierung`.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
@@ -439,7 +468,9 @@ Einige Tests prüfen gegen echte Daten, die nicht im Repository liegen. Sie
 laufen mit `--ignored` und brauchen Verzeichnisse beziehungsweise Dateien über
 Umgebungsvariablen: `STRATUM_USB_REFERENCE_DIR` (SYSTEM-Hive und
 WinScope-Report), `STRATUM_EVTX_REFERENCE` (eine `.evtx`-Datei) und
-`STRATUM_HIVELOG_REFERENCE` (Hives mit ihren `.LOG1`/`.LOG2`).
+`STRATUM_HIVELOG_REFERENCE` (Hives mit ihren `.LOG1`/`.LOG2`) und
+`STRATUM_SHELLITEM_REFERENCE` (LNK-Dateien und die RegRipper-Ausgabe
+`shellbags`).
 
 ## Lizenz
 

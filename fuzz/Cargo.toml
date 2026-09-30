@@ -106,3 +106,10 @@ path = "fuzz_targets/hivelog.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "shellitem"
+path = "fuzz_targets/shellitem.rs"
+test = false
+doc = false
+bench = false

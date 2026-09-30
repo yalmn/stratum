@@ -37,13 +37,21 @@ impl Analyzer for LnkAnalyzer {
                 .filter(|e| e.size > 0 && e.size < 1_000_000)
                 .cloned()
                 .collect();
+            let codepage = ctx.ansi_codepage(v.target.offset);
             for e in dateien {
-                let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
+                let f = match vol.read_file_by_record(e.mft_record, &e.path) {
+                    Ok(Some(f)) => f,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        out.warnings
+                            .push(format!("{}: nicht lesbar: {error}", e.path));
+                        continue;
+                    }
+                };
+                let Some(mut link) = parse_lnk(&f.data) else {
                     continue;
                 };
-                let Some(link) = parse_lnk(&f.data) else {
-                    continue;
-                };
+                link.decode_ansi(codepage);
                 let benutzer = benutzer_aus_pfad(&e.path);
                 let name = if link.target_path.is_empty() {
                     e.path.rsplit('\\').next().unwrap_or(&e.path).to_string()
@@ -104,6 +112,42 @@ pub(crate) fn with_target_times(mut fd: Finding, link: &Lnk) -> Finding {
             "DOS-Epoche 1980-01-01 00:00 Ortszeit, keine echte Zeitangabe des Ziels",
         );
     }
+    if let Some(k) = &link.pfad_kodierung {
+        fd = fd.with("zielpfad_kodierung", k.as_str());
+    }
+    with_idlist(fd, link)
+}
+
+/// CLSID_MyComputer laut Windows SDK (shlguid.h).
+const MY_COMPUTER: &str = "20d04fe0-3aea-1069-a2d8-08002b30309d";
+
+/// Pfad und MFT-Referenz des Ziels aus der LinkTargetIDList. Stammordner ohne
+/// eigenen Namen erscheinen als GUID; der Pfad ist unabhängig vom LinkInfo-Pfad
+/// und dient als Gegenprobe.
+fn with_idlist(mut fd: Finding, link: &Lnk) -> Finding {
+    if link.idlist.is_empty() {
+        return fd;
+    }
+    let teile: Vec<String> = link
+        .idlist
+        .iter()
+        // Der Arbeitsplatz (CLSID_MyComputer) steht vor jedem Laufwerk und
+        // gehört nicht in einen Dateipfad.
+        .filter(|i| i.guid.as_deref() != Some(MY_COMPUTER))
+        .map(|i| match (&i.name, &i.guid) {
+            (Some(n), _) => n.trim_end_matches('\\').to_string(),
+            (None, Some(g)) => format!("{{{g}}}"),
+            (None, None) => format!("[unbekannt {:#04x}]", i.typ),
+        })
+        .collect();
+    fd = fd
+        .with("idlist_pfad", teile.join("\\"))
+        .with("idlist_elemente", link.idlist.len().to_string());
+    if let Some((record, seq)) = link.idlist.last().and_then(|i| i.mft) {
+        fd = fd
+            .with("ziel_mft_record", record.to_string())
+            .with("ziel_mft_sequenz", seq.to_string());
+    }
     fd
 }
 
@@ -124,6 +168,13 @@ fn benutzer_aus_pfad(path: &str) -> String {
 #[derive(Default)]
 pub(crate) struct Lnk {
     pub(crate) target_path: String,
+    /// Rohbytes eines ANSI-Zielpfads mit Nicht-ASCII-Zeichen; die Kodierung
+    /// hängt von der Codepage des Systems ab (MS-SHLLINK 2.3).
+    pub(crate) target_path_ansi: Option<Vec<u8>>,
+    /// Wie ein ANSI-Zielpfad dekodiert wurde, falls er Nicht-ASCII-Zeichen hat.
+    pub(crate) pfad_kodierung: Option<String>,
+    /// Einträge der LinkTargetIDList.
+    pub(crate) idlist: Vec<crate::shellitem::ShellItem>,
     pub(crate) drive_serial: Option<u32>,
     pub(crate) file_size: u32,
     pub(crate) created: Option<i64>,
@@ -143,6 +194,39 @@ fn ft(b: &[u8], at: usize) -> Option<i64> {
         return None;
     }
     stratum_registry::filetime_to_unix(v).map(|(s, _)| s)
+}
+
+impl Lnk {
+    /// Dekodiert einen ANSI-Zielpfad mit der Codepage des untersuchten
+    /// Systems. Unterstützt ist Windows-1252; bei anderen Codepages bleibt der
+    /// Pfad verlustbehaftet und der Fund sagt das.
+    pub(crate) fn decode_ansi(&mut self, codepage: Option<&str>) {
+        let Some(bytes) = &self.target_path_ansi else {
+            return;
+        };
+        if codepage == Some("1252") {
+            self.target_path = bytes.iter().map(|&b| cp1252(b)).collect();
+            self.pfad_kodierung = Some("ansi_1252".into());
+        } else {
+            self.pfad_kodierung = Some(format!(
+                "ansi_codepage_{}_nicht_unterstuetzt",
+                codepage.unwrap_or("unbekannt")
+            ));
+        }
+    }
+}
+
+/// Windows-1252 nach Unicode (Zuordnung laut unicode.org, CP1252.TXT).
+fn cp1252(b: u8) -> char {
+    const HOCH: [u32; 32] = [
+        0x20ac, 0xfffd, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021, 0x02c6, 0x2030, 0x0160,
+        0x2039, 0x0152, 0xfffd, 0x017d, 0xfffd, 0xfffd, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022,
+        0x2013, 0x2014, 0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0xfffd, 0x017e, 0x0178,
+    ];
+    match b {
+        0x80..=0x9f => char::from_u32(HOCH[usize::from(b - 0x80)]).unwrap_or('\u{fffd}'),
+        _ => char::from(b),
+    }
 }
 
 /// Liest eine ANSI- bzw. UTF-16LE-Zeichenkette bis zur Null ab `off`.
@@ -184,10 +268,16 @@ pub(crate) fn parse_lnk(data: &[u8]) -> Option<Lnk> {
     };
 
     let mut off = 76usize;
-    // HasLinkTargetIDList (Bit 0): IDList überspringen.
+    // HasLinkTargetIDList (Bit 0): Shell-Item-Liste auswerten.
     if flags & 0x1 != 0 {
         let idlist_size = data.get(off..off + 2)?;
         let n = u16::from_le_bytes([idlist_size[0], idlist_size[1]]) as usize;
+        if let Some(list) = data.get(off + 2..off + 2 + n) {
+            link.idlist = crate::shellitem::parse_list(list)
+                .into_iter()
+                .map(|(_, item)| item)
+                .collect();
+        }
         off = off.checked_add(2 + n)?;
     }
     // HasLinkInfo (Bit 1): den LinkInfo-Block auswerten.
@@ -222,14 +312,21 @@ fn parse_link_info(li: &[u8], link: &mut Lnk) {
         } else {
             0
         };
-        let path = if uni_base_off != 0 {
-            cstr(li, uni_base_off, true)
+        if uni_base_off != 0 {
+            link.target_path = cstr(li, uni_base_off, true);
         } else if base_off != 0 {
-            cstr(li, base_off, false)
-        } else {
-            String::new()
-        };
-        link.target_path = path;
+            let bytes: Vec<u8> = li
+                .get(base_off..)
+                .unwrap_or(&[])
+                .iter()
+                .copied()
+                .take_while(|&c| c != 0)
+                .collect();
+            link.target_path = String::from_utf8_lossy(&bytes).into_owned();
+            if !bytes.is_ascii() {
+                link.target_path_ansi = Some(bytes);
+            }
+        }
     }
 }
 
@@ -291,6 +388,27 @@ mod tests {
         assert_eq!(link.drive_serial, Some(0xABCD1234));
         assert_eq!(link.file_size, 4096);
         assert!(link.created.unwrap() > 1_700_000_000);
+    }
+
+    #[test]
+    fn ansi_pfad_nach_codepage_des_systems() {
+        let mut link = Lnk {
+            target_path: "kaputt".into(),
+            target_path_ansi: Some(b"F:\\Schl\xfcssel \x80\x81.txt".to_vec()),
+            ..Default::default()
+        };
+        let mut andere = Lnk {
+            target_path_ansi: link.target_path_ansi.clone(),
+            ..Default::default()
+        };
+        link.decode_ansi(Some("1252"));
+        assert_eq!(link.target_path, "F:\\Schlüssel \u{20ac}\u{fffd}.txt");
+        assert_eq!(link.pfad_kodierung.as_deref(), Some("ansi_1252"));
+        andere.decode_ansi(Some("1251"));
+        assert_eq!(
+            andere.pfad_kodierung.as_deref(),
+            Some("ansi_codepage_1251_nicht_unterstuetzt")
+        );
     }
 
     #[test]

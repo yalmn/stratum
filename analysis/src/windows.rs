@@ -116,6 +116,10 @@ pub struct WindowsInstall {
     /// NTUSER.DAT je Benutzer (Benutzername, Rohbytes) für HKCU-basierte
     /// Analyzer.
     pub ntuser: Vec<(String, Vec<u8>)>,
+    /// UsrClass.dat je Benutzer (Benutzername, Rohbytes), etwa für ShellBags.
+    pub usrclass: Vec<(String, Vec<u8>)>,
+    /// ANSI-Codepage des Systems laut `Control\Nls\CodePage\ACP`, z. B. `1252`.
+    pub ansi_codepage: Option<String>,
     /// Zustand der geladenen Hives und ihrer Transaktionslogs.
     pub hive_status: Vec<HiveStatus>,
     /// Auffälligkeiten beim Aufbau.
@@ -139,6 +143,8 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
                 timezone: None,
                 accounts: Vec::new(),
                 ntuser: Vec::new(),
+                usrclass: Vec::new(),
+                ansi_codepage: None,
                 hive_status: Vec::new(),
                 warnings: vec![format!(
                     "NTFS-Partition bei Offset {} nicht lesbar: {e}",
@@ -229,10 +235,11 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
         security: load(vol, SECURITY_PATH, "SECURITY"),
         amcache: load(vol, AMCACHE_PATH, "Amcache.hve"),
     };
-    let ntuser = read_ntuser_hives(vol, &mut status, &mut warnings);
+    let (ntuser, usrclass) = read_user_hives(vol, &mut status, &mut warnings);
 
     let mut computer_name = None;
     let mut timezone = None;
+    let mut ansi_codepage = None;
     let mut accounts = Vec::new();
 
     if let Some(system_bytes) = &hives.system {
@@ -246,6 +253,12 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
                 }
                 let cs = current_control_set(&system_hive);
                 computer_name = read_computer_name(&system_hive, &cs);
+                ansi_codepage = system_hive
+                    .open_key(&format!("{cs}\\Control\\Nls\\CodePage"))
+                    .ok()
+                    .flatten()
+                    .and_then(|k| k.value("ACP").ok().flatten())
+                    .and_then(|v| v.as_string());
                 timezone = read_timezone(&system_hive, &cs);
 
                 // Konten brauchen zusätzlich den SAM-Hive.
@@ -276,21 +289,28 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
         timezone,
         accounts,
         ntuser,
+        usrclass,
+        ansi_codepage,
         hive_status: status,
         warnings,
     }))
 }
 
-/// Liest die NTUSER.DAT jedes Benutzers unter `Users\<name>\NTUSER.DAT`.
-fn read_ntuser_hives<R: std::io::Read + std::io::Seek>(
+/// Nutzer-Hives: `Users\<name>\NTUSER.DAT` und
+/// `Users\<name>\AppData\Local\Microsoft\Windows\UsrClass.dat`.
+type UserHives = (Vec<(String, Vec<u8>)>, Vec<(String, Vec<u8>)>);
+
+/// Liest NTUSER.DAT und UsrClass.dat jedes Benutzers, jeweils mit Log-Prüfung.
+fn read_user_hives<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
     status: &mut Vec<HiveStatus>,
     warnings: &mut Vec<String>,
-) -> Vec<(String, Vec<u8>)> {
+) -> UserHives {
     let mut out = Vec::new();
+    let mut classes = Vec::new();
     let users = match vol.list_dir("Users") {
         Ok(Some(u)) => u,
-        _ => return out,
+        _ => return (out, classes),
     };
     for u in users {
         if !u.is_directory {
@@ -301,8 +321,16 @@ fn read_ntuser_hives<R: std::io::Read + std::io::Seek>(
         if let Some(data) = load_hive(vol, &path, &name, status, warnings) {
             out.push((u.name.clone(), data));
         }
+        let path = format!(
+            "Users\\{}\\AppData\\Local\\Microsoft\\Windows\\UsrClass.dat",
+            u.name
+        );
+        let name = format!("UsrClass.dat ({})", u.name);
+        if let Some(data) = load_hive(vol, &path, &name, status, warnings) {
+            classes.push((u.name.clone(), data));
+        }
     }
-    out
+    (out, classes)
 }
 
 fn read_optional<R: std::io::Read + std::io::Seek>(

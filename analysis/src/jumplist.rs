@@ -35,8 +35,9 @@ impl Analyzer for JumpListAnalyzer {
                     continue;
                 }
             };
-            automatic(&mut vol, v, &mut out);
-            custom(&mut vol, v, &mut out);
+            let codepage = ctx.ansi_codepage(v.target.offset);
+            automatic(&mut vol, v, codepage, &mut out);
+            custom(&mut vol, v, codepage, &mut out);
         }
         out
     }
@@ -45,6 +46,7 @@ impl Analyzer for JumpListAnalyzer {
 fn automatic<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
     v: &FsIndex,
+    codepage: Option<&str>,
     out: &mut Outcome,
 ) {
     let dateien: Vec<_> = v
@@ -73,7 +75,8 @@ fn automatic<R: std::io::Read + std::io::Seek>(
             if name.eq_ignore_ascii_case("DestList") {
                 continue;
             }
-            if let Some(link) = parse_lnk(&bytes) {
+            if let Some(mut link) = parse_lnk(&bytes) {
+                link.decode_ansi(codepage);
                 out.findings
                     .push(lnk_finding(&link, &e.path, &benutzer, &appid, Some(&name)));
             }
@@ -84,6 +87,7 @@ fn automatic<R: std::io::Read + std::io::Seek>(
 fn custom<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
     v: &FsIndex,
+    codepage: Option<&str>,
     out: &mut Outcome,
 ) {
     let dateien: Vec<_> = v
@@ -104,7 +108,8 @@ fn custom<R: std::io::Read + std::io::Seek>(
         let benutzer = benutzer_aus_pfad(&e.path);
         let appid = appid_aus_pfad(&e.path);
         for (offset, lnk) in split_embedded_lnks(&f.data) {
-            if let Some(link) = parse_lnk(lnk) {
+            if let Some(mut link) = parse_lnk(lnk) {
+                link.decode_ansi(codepage);
                 out.findings.push(
                     lnk_finding(&link, &e.path, &benutzer, &appid, None)
                         .with("datei_offset", offset.to_string())
