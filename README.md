@@ -401,8 +401,10 @@ und Zeitraum zerlegt. Für Cache-Einträge setzt stratum den Pfad der
 Cache-Datei aus Containerverzeichnis, Unterordner und `Filename` zusammen
 und sucht ihn im Volume (`cache_datei_im_volume`, MFT-Nummer). Der
 Unterordner ergibt sich aus `SecureDirectory`, einem bei 1 beginnenden Index
-in `SecureDirectories` (Namen zu je 8 Zeichen); geprüft an echten Daten, die
-Dateien lagen dort mit der in `FileSize` genannten Größe.
+in `SecureDirectories` (Namen zu je 8 Zeichen); an echten Daten geprüft, alle
+fünf Dateien lagen dort. Im Container `Content` stimmte die Größe mit
+`FileSize` überein, im Container `DOMStore` nicht (13 statt 2.013 Byte).
+`FileSize` wird deshalb nur ausgegeben, nicht als Dateigröße gedeutet.
 
 Zeitspalten sind FILETIME in UTC und stehen zusätzlich als `<Spalte>_utc`.
 Ausnahme: `ModifiedTime` in `MSHist`-Containern lag in den Testdaten genau

@@ -13,7 +13,8 @@
 //! - `SecureDirectory` ist ein bei 1 beginnender Index in
 //!   `SecureDirectories` (Unterordnernamen zu je 8 Zeichen). Pfad aus
 //!   Containerverzeichnis, Unterordner und `Filename` führt auf die Datei im
-//!   Cache, ihre Größe stimmt mit `FileSize` überein.
+//!   Cache. Die Größe stimmte im Container `Content` mit `FileSize` überein,
+//!   im Container `DOMStore` nicht; `FileSize` wird daher nicht gedeutet.
 //! - `ModifiedTime` in `MSHist`-Containern liegt genau um den UTC-Abstand der
 //!   Systemzeitzone nach dem Besuch; der Wert ist vermutlich Ortszeit. Er wird
 //!   nicht umgerechnet, sondern als Ortszeit gekennzeichnet ausgegeben.
