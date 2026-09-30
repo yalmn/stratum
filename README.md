@@ -351,6 +351,16 @@ Prüfsummen-Datei `<report>.sha256` mit SHA-256 und BLAKE3 des Reports an und gi
 den SHA-256 auf der Fehlerausgabe aus. So ist für die Beweiskette belegbar, dass
 der Report unverändert ist.
 
+`tool.revision` nennt den Git-Commit, aus dem das Binary gebaut wurde, und
+`tool.revision_geaendert`, ob dabei nicht committete Änderungen vorlagen. Dieselbe
+Angabe zeigt `stratum --version`. Unter `analyzers` steht je Analyzer, wie viele
+Funde und Warnungen er geliefert hat und wie lange er lief; null Funde heißt nur,
+dass dieser Analyzer nichts gemeldet hat, Lesehindernisse stehen in den
+Warnungen. Jeder Fund trägt eine `id` aus den ersten 16 Hexzeichen eines
+SHA-256 über seinen Inhalt. Dasselbe Image ergibt in jedem Lauf dieselben
+Kennungen, so lassen sich Funde über Läufe und Werkzeugstände hinweg
+vergleichen; die Timeline verweist mit `finding_id` darauf.
+
 Für die Weiterverarbeitung in Cortex XSOAR liegt unter `xsoar/` eine Vorlage
 (Automation, Playbook), die den JSON-Report einliest, `.onion`-Adressen als
 Indikatoren anlegt und den Incident bei Belegen für einen Hidden Service

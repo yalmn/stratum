@@ -54,7 +54,7 @@ pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
 pub use dpapi::DpapiAnalyzer;
 pub use eventlog::EventLogAnalyzer;
 pub use filepersist::FilePersistenceAnalyzer;
-pub use finding::Finding;
+pub use finding::{assign_ids, Finding};
 pub use fsindex::{FileEntry, FsIndex};
 pub use jumplist::JumpListAnalyzer;
 pub use keyword::KeywordAnalyzer;
@@ -66,7 +66,7 @@ pub use prefetch::PrefetchAnalyzer;
 pub use programexec::ProgramExecutionAnalyzer;
 pub use recyclebin::RecycleBinAnalyzer;
 pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
-pub use runner::{run_all, AnalysisResult};
+pub use runner::{run_all, AnalysisResult, AnalyzerStatus};
 pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
 pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
@@ -103,6 +103,13 @@ impl Outcome {
 pub trait Analyzer: Sync {
     /// Kurzname der Domäne, erscheint im Report.
     fn domain(&self) -> &str;
+
+    /// Name des Analyzers im Report. Standard ist der Typname ohne Modulpfad.
+    fn name(&self) -> &'static str {
+        let full = std::any::type_name::<Self>();
+        let base = full.split('<').next().unwrap_or(full);
+        base.rsplit("::").next().unwrap_or(base)
+    }
 
     /// Führt die Analyse auf dem Kontext aus.
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome;

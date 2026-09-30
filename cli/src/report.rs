@@ -6,7 +6,8 @@
 use serde::Serialize;
 
 use stratum_analysis::{
-    CatalogSummary, Finding, MftTimelineSummary, TimeZone, TimelineEntry, UsnJournalSummary,
+    AnalyzerStatus, CatalogSummary, Finding, MftTimelineSummary, TimeZone, TimelineEntry,
+    UsnJournalSummary,
 };
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
@@ -25,6 +26,8 @@ pub struct Report {
     pub partitions: PartitionTable,
     /// Ergebnisse je Windows-Installation.
     pub windows: Vec<WindowsReport>,
+    /// Laufstatus je Analyzer: Funde, Warnungen, Laufzeit.
+    pub analyzers: Vec<AnalyzerStatus>,
     /// Funde aller Domänen-Analyzer (Keyword, Tor, ...), mit Domäne, Name und
     /// Pfad.
     pub findings: Vec<Finding>,
@@ -110,6 +113,12 @@ pub struct Tool {
     pub name: &'static str,
     /// Version aus dem Cargo-Manifest.
     pub version: &'static str,
+    /// Git-Commit, aus dem das Binary gebaut wurde.
+    pub revision: &'static str,
+    /// Ob beim Bauen nicht committete Änderungen an versionierten Dateien
+    /// vorlagen (`ja`, `nein`, `unbekannt`). Bei `ja` belegt die Revision
+    /// allein den Stand nicht.
+    pub revision_geaendert: &'static str,
 }
 
 impl Default for Tool {
@@ -117,6 +126,8 @@ impl Default for Tool {
         Self {
             name: "stratum",
             version: env!("CARGO_PKG_VERSION"),
+            revision: env!("STRATUM_REVISION"),
+            revision_geaendert: env!("STRATUM_REVISION_GEAENDERT"),
         }
     }
 }

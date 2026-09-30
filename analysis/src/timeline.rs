@@ -26,6 +26,9 @@ pub struct TimelineEntry {
     pub source: String,
     /// Index des ursprünglichen Funds innerhalb desselben Reports.
     pub finding_index: usize,
+    /// Stabile Kennung des ursprünglichen Funds, falls vergeben.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub finding_id: String,
     /// Attribut des Funds, aus dem dieser Zeitpunkt stammt.
     pub time_key: &'static str,
     /// Physischer Image-Offset, sofern am Fund vorhanden.
@@ -70,6 +73,7 @@ pub fn build(findings: &[Finding]) -> Vec<TimelineEntry> {
                         name: f.name.clone(),
                         source: f.source.clone(),
                         finding_index,
+                        finding_id: f.id.clone(),
                         time_key: key,
                         offset: f.offset,
                         volume: f.attributes.get("volume").cloned(),

@@ -38,7 +38,18 @@ use report::{
 
 /// Automatisierte, gerichtsverwertbare Inhaltsanalyse eines Roh-Images (read-only).
 #[derive(Parser, Debug)]
-#[command(name = "stratum", version, about)]
+#[command(
+    name = "stratum",
+    version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (Revision ",
+        env!("STRATUM_REVISION"),
+        ", nicht committete Änderungen: ",
+        env!("STRATUM_REVISION_GEAENDERT"),
+        ")"
+    ),
+    about
+)]
 struct Cli {
     /// Pfad zum Roh-Image (z. B. merged.dd).
     image: PathBuf,
@@ -527,6 +538,7 @@ fn main() -> Result<()> {
         analysis.findings.append(&mut live);
     }
 
+    stratum_analysis::assign_ids(&mut analysis.findings);
     let timeline = stratum_analysis::build_timeline(&analysis.findings);
     eprintln!("[+] Zeitstrahl mit {} Ereignissen", timeline.len());
 
@@ -545,6 +557,7 @@ fn main() -> Result<()> {
         },
         partitions,
         windows,
+        analyzers: analysis.analyzers,
         findings: analysis.findings,
         timeline,
         keywords,
