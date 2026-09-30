@@ -34,7 +34,8 @@ Cargo-Workspace aus mehreren Crates:
 ```
 mmap/      Read-only Memory-Mapping (einzige unsafe-Grenze, gekapselt)
 core/      Image-IO, Hashing, Partitionen, Analyzer-Trait
-registry/  Parser für Windows-Registry-Hives (regf)
+registry/  Parser für Windows-Registry-Hives (regf) und ihre Transaktionslogs
+ese/       Parser für ESE-Datenbanken (SRUM, WebCache)
 ntfs/      NTFS-Zugriff, Datei per Pfad lesen
 search/    Keyword- und Muster-Suche
 creds/     lokale Windows-Konten aus SAM und SYSTEM

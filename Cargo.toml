@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "mmap", "registry", "search", "ntfs", "creds", "analysis", "cli"]
+members = ["core", "mmap", "registry", "ese", "search", "ntfs", "creds", "analysis", "cli"]
 exclude = ["fuzz"]
 
 [workspace.package]
@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 stratum-mmap = { path = "mmap" }
 stratum-registry = { path = "registry" }
+stratum-ese = { path = "ese" }
 stratum-core = { path = "core" }
 memmap2 = "0.9.11"
 sha2 = "0.11.0"

@@ -1,0 +1,12 @@
+[package]
+name = "stratum-ese"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser für ESE-Datenbanken (Extensible Storage Engine) für stratum"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.151"
