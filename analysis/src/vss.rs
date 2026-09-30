@@ -1,20 +1,12 @@
 //! Domäne „VSS": erkennt und listet Volume Shadow Copies (Schattenkopien).
 //!
-//! Schattenkopien enthalten frühere Zustände des Dateisystems und sind
-//! forensisch sehr wertvoll (gelöschte oder veränderte Dateien). Dieser
-//! Analyzer meldet, welche Schattenkopien vorhanden sind und wann sie angelegt
-//! wurden.
-//!
-//! Das vollständige Wiederherstellen einer Schattenkopie (jeden Snapshot als
-//! zusätzliches Volume behandeln und die Datei-Analyzer erneut darauf laufen
-//! lassen) ist ein grösserer, eigener Ausbauschritt und hier noch nicht
-//! umgesetzt.
+//! Gelesen mit dem eigenen Parser (Crate `stratum-vss`), blockweise gegen
+//! libvshadow geprüft. Je Schattenkopie ein Fund mit Kennungen, Zeitpunkt,
+//! Attributen und Zahl der Blockdeskriptoren. Die Nummer (`VSS#n`) zählt nach
+//! Erstellungszeit, 1 ist die älteste.
 
-use std::io::Cursor;
-
-use vshadow::VssVolume;
-
-use stratum_core::Guid;
+use stratum_core::time::filetime_to_iso;
+use stratum_vss::{guid, Volume};
 
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
@@ -36,31 +28,47 @@ impl Analyzer for VssAnalyzer {
                 Some(e) if e <= data.len() => e,
                 _ => continue,
             };
-            let mut cursor = Cursor::new(&data[start..end]);
-
-            // Kein VSS-Katalog vorhanden -> kein Fehler, nur keine Funde.
-            let Ok(vss) = VssVolume::new(&mut cursor) else {
-                continue;
-            };
-            let count = vss.store_count();
-            if count == 0 {
-                continue;
-            }
-
-            for i in 0..count {
-                let Ok(info) = vss.store_info(i) else {
+            let vss = match Volume::open(&data[start..end]) {
+                Ok(Some(v)) => v,
+                Ok(None) => continue,
+                Err(e) => {
+                    out.warnings.push(format!(
+                        "Offset {}: Schattenkopien nicht lesbar: {e}",
+                        target.offset
+                    ));
                     continue;
-                };
+                }
+            };
+            for w in vss.warnings() {
+                out.warnings.push(format!("Offset {}: {w}", target.offset));
+            }
+            for info in vss.stores() {
                 let mut f = Finding::new(
                     "vss",
-                    format!("Schattenkopie {}", Guid(info.store_id)),
+                    format!("Schattenkopie {}", guid(&info.id)),
                     format!("Offset {}", target.offset),
                 )
-                .with("nummer", (i + 1).to_string())
+                .with("nummer", (info.index + 1).to_string())
+                .with("store_id", guid(&info.id))
                 .with("volume_groesse", info.volume_size.to_string())
-                .with("sequenz", info.sequence.to_string());
+                .with("sequenz", info.sequence.to_string())
+                .with("blockdeskriptoren", info.block_descriptors.to_string())
+                .with("vss_version", vss.version().to_string())
+                .with("volume_offset", target.offset.to_string());
                 if let Some(u) = filetime_to_unix(info.creation_time) {
                     f = f.with("erstellt_unix", u.to_string());
+                }
+                if let Some(iso) = filetime_to_iso(info.creation_time) {
+                    f = f.with("erstellt_utc", iso);
+                }
+                if let Some(id) = &info.copy_id {
+                    f = f.with("schattenkopie_id", guid(id));
+                }
+                if let Some(id) = &info.copy_set_id {
+                    f = f.with("satz_id", guid(id));
+                }
+                if let Some(a) = info.attribute_flags {
+                    f = f.with("attribute", format!("{a:#010x}"));
                 }
                 out.findings.push(f);
             }
@@ -87,14 +95,5 @@ mod tests {
             Some(1_609_459_200)
         );
         assert_eq!(filetime_to_unix(0), None);
-    }
-
-    #[test]
-    fn guid_darstellung() {
-        let g = Guid([
-            0x28, 0x73, 0x2A, 0xC1, 0x1F, 0xF8, 0xD2, 0x11, 0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E,
-            0xC9, 0x3B,
-        ]);
-        assert_eq!(g.to_string(), "C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
     }
 }

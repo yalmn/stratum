@@ -160,7 +160,6 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
 /// Copies (frühere Zustände). Registry-basierte Analyzer laufen dadurch
 /// automatisch auch auf diese Snapshots.
 pub fn extract_snapshots(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<WindowsInstall> {
-    use std::io::Cursor;
     let data = img.as_slice();
     let mut out = Vec::new();
 
@@ -170,22 +169,20 @@ pub fn extract_snapshots(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Windo
             Some(e) if e <= data.len() => e,
             _ => continue,
         };
-        let mut cursor = Cursor::new(&data[start..end]);
-        let Ok(vss) = vshadow::VssVolume::new(&mut cursor) else {
+        // Fehler meldet der VSS-Analyzer; hier nur überspringen.
+        let Ok(Some(vss)) = stratum_vss::Volume::open(&data[start..end]) else {
             continue;
         };
-        for i in 0..vss.store_count() {
-            let created = vss
-                .store_info(i)
-                .ok()
-                .and_then(|s| filetime_to_unix(s.creation_time))
+        for info in vss.stores() {
+            let created = filetime_to_unix(info.creation_time)
                 .map(|u| format!(" ({u})"))
                 .unwrap_or_default();
-            let origin = format!("VSS#{}{}", i + 1, created);
-            let Ok(reader) = vss.store_reader(&mut cursor, i) else {
+            let origin = format!("VSS#{}{}", info.index + 1, created);
+            let Ok(reader) = vss.reader(info.index) else {
                 continue;
             };
-            let mut vol = match NtfsVolume::from_reader(reader, 0, target.size) {
+            let size = reader.size();
+            let mut vol = match NtfsVolume::from_reader(reader, 0, size) {
                 Ok(v) => v,
                 Err(_) => continue,
             };

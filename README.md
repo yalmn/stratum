@@ -36,6 +36,7 @@ mmap/      Read-only Memory-Mapping (einzige unsafe-Grenze, gekapselt)
 core/      Image-IO, Hashing, Partitionen, Analyzer-Trait
 registry/  Parser für Windows-Registry-Hives (regf) und ihre Transaktionslogs
 ese/       Parser für ESE-Datenbanken (SRUM, WebCache)
+vss/       Parser für Volume Shadow Copies
 ntfs/      NTFS-Zugriff, Datei per Pfad lesen
 search/    Keyword- und Muster-Suche
 creds/     lokale Windows-Konten aus SAM und SYSTEM
@@ -419,6 +420,26 @@ wie bei SRUM; die Übersicht zählt nicht ausgewertete Werte
 Geprüft gegen dissect.esedb an einer Windows-11-WebCacheV01.dat: 35
 Datensätze, alle Ganzzahlwerte identisch.
 
+## Schattenkopien (VSS)
+
+stratum liest Volume Shadow Copies mit einem eigenen Parser (Crate `vss`)
+nach der Formatbeschreibung von libvshadow. Ein Snapshot entsteht, indem die
+Stores vom jüngsten bis zum gewünschten über das aktuelle Volume gelegt
+werden; dabei werden Forwarder, Overlays (512-Byte-Abschnitte) und die
+Belegungs-Bitmaps berücksichtigt. Für jede Stelle eines Snapshots lässt sich
+angeben, ob die Bytes aus einer Store-Kopie oder aus dem aktuellen Volume
+stammen und wo sie physisch liegen.
+
+Je Schattenkopie entsteht ein Fund mit Store-, Schattenkopie- und
+Satzkennung, Erstellungszeit, Attributen und Zahl der Blockdeskriptoren. Die
+Nummer `VSS#n` zählt nach Erstellungszeit, 1 ist die älteste. Registry-
+basierte Analyzer laufen auch auf den Snapshots.
+
+Geprüft gegen libvshadow am öffentlichen Testimage `vss.raw` aus dfvfs (zwei
+Stores): beide Snapshots Block für Block identisch. Die zuvor genutzte Crate
+`vshadow` wich dort in 11 bzw. 75 von 5.052 Blöcken ab und stand unter
+AGPL-3.0; sie wird nicht mehr verwendet.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
@@ -571,7 +592,8 @@ WinScope-Report), `STRATUM_EVTX_REFERENCE` (eine `.evtx`-Datei) und
 `STRATUM_SHELLITEM_REFERENCE` (LNK-Dateien, RegRipper-Ausgaben
 `shellbags` und `userassist` sowie eine `ActivitiesCache.db`) und
 `STRATUM_ESE_REFERENCE` (`SRUDB.dat`, `WebCacheV01.dat` und die
-dissect-Referenzen als JSON).
+dissect-Referenzen als JSON) und `STRATUM_VSS_REFERENCE` (`vss.raw` aus den
+dfvfs-Testdaten und die libvshadow-Referenz als JSON).
 
 ## Lizenz
 

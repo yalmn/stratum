@@ -1,0 +1,13 @@
+[package]
+name = "stratum-vss"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Parser für Volume Shadow Copies (VSS) für stratum"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json = "1.0.151"
+sha2.workspace = true
