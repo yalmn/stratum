@@ -25,23 +25,30 @@ Das Werkzeug schliesst an [ForensiCUnlock](https://github.com/yalmn/ForensiCUnlo
 | Artefakt-Domänen | Autostart, USB, Programmausführung (Amcache, Shimcache, Prefetch, BAM/DAM), Benutzeraktivität (UserAssist, ShellBags, ActivitiesCache, TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs), Ressourcennutzung (SRUM), EventLog, Browser-Verlauf (auch WebCache) und -Passwörter, LSA/DCC2, DPAPI, Tor, Volume Shadow Copies |
 | Keyword-Suche | Begriffe aus einer Tabelle, in ASCII und UTF-16LE, Zugangsdaten als Paar (Benutzer- und Passwort-Feld in geringem Abstand), validierte v3-Onion-Adressen |
 
-Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro Fall gepflegten und versionierten TOML-Tabelle. So bleibt nachvollziehbar, wonach gesucht wurde, und das Rauschen lässt sich pro Fall über die aktiven Kategorien steuern. Eine Beispieltabelle liegt unter `search/examples/begriffe.toml`.
+Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro Fall gepflegten und versionierten TOML-Tabelle. So bleibt nachvollziehbar, wonach gesucht wurde, und das Rauschen lässt sich pro Fall über die aktiven Kategorien steuern. Eine Beispieltabelle liegt unter `stratum_backend/search/examples/begriffe.toml`.
 
 ## Aufbau
 
-Cargo-Workspace aus mehreren Crates:
+Das Projekt ist in Teile gegliedert. Heute gibt es `stratum_backend/` mit
+Analyse-Kern und CLI; ein Datenmodell (`stratum_model/`) und eine Oberfläche
+(`stratum_frontend/`) folgen. Das Cargo-Workspace liegt im
+Wurzelverzeichnis, Build-Befehle und `target/` bleiben dort.
 
 ```
-mmap/      Read-only Memory-Mapping (einzige unsafe-Grenze, gekapselt)
-core/      Image-IO, Hashing, Partitionen, Analyzer-Trait
-registry/  Parser für Windows-Registry-Hives (regf) und ihre Transaktionslogs
-ese/       Parser für ESE-Datenbanken (SRUM, WebCache)
-vss/       Parser für Volume Shadow Copies
-ntfs/      NTFS-Zugriff, Datei per Pfad lesen
-search/    Keyword- und Muster-Suche
-creds/     lokale Windows-Konten aus SAM und SYSTEM
-cli/       Binary "stratum", JSON-Report
-fuzz/      cargo-fuzz-Targets
+stratum_backend/
+  mmap/      Read-only Memory-Mapping (einzige unsafe-Grenze, gekapselt)
+  core/      Image-IO, Hashing, Partitionen, Analyzer-Trait
+  registry/  Parser für Windows-Registry-Hives (regf) und ihre Transaktionslogs
+  ese/       Parser für ESE-Datenbanken (SRUM, WebCache)
+  vss/       Parser für Volume Shadow Copies
+  ntfs/      NTFS-Zugriff, Datei per Pfad lesen
+  search/    Keyword- und Muster-Suche
+  creds/     lokale Windows-Konten aus SAM und SYSTEM
+  analysis/  Domänen-Analyzer und gemeinsamer Kontext
+  cli/       Binary "stratum", JSON-Report
+  fuzz/      cargo-fuzz-Targets
+  begriffe/  Begriffslisten für die Keyword-Suche
+  xsoar/     Vorlage für Cortex XSOAR
 ```
 
 Neue Artefakt-Analysen werden als eigene Implementierung des `Analyzer`-Traits ergänzt, der Kern bleibt unberührt.
@@ -255,9 +262,9 @@ stratum merged.dd --bdp bdp.info --firefox-password 'Hauptpasswort'
 
 ### Keyword-Listen
 
-Eine umfangreiche Begriffsliste zu häufigen Deliktsfeldern ist fest eingebaut und läuft bei jeder Analyse mit (Kategorien wie Zugangsdaten, Darknet, Kryptowährung, Finanzbetrug, Dokumente, Cybercrime, Waffen und weitere). Die lesbare Fassung liegt unter `begriffe/strafverfolgung.toml`.
+Eine umfangreiche Begriffsliste zu häufigen Deliktsfeldern ist fest eingebaut und läuft bei jeder Analyse mit (Kategorien wie Zugangsdaten, Darknet, Kryptowährung, Finanzbetrug, Dokumente, Cybercrime, Waffen und weitere). Die lesbare Fassung liegt unter `stratum_backend/begriffe/strafverfolgung.toml`.
 
-Eigene, fallbezogene Begriffe kommen in eine zweite Tabelle und werden zusätzlich übergeben. Die Vorlage dafür ist `begriffe/eigene.toml`:
+Eigene, fallbezogene Begriffe kommen in eine zweite Tabelle und werden zusätzlich übergeben. Die Vorlage dafür ist `stratum_backend/begriffe/eigene.toml`:
 
 ```sh
 stratum merged.dd -o report.json --bdp bdp.info -k eigene.toml
@@ -579,7 +586,7 @@ SHA-256 über seinen Inhalt. Dasselbe Image ergibt in jedem Lauf dieselben
 Kennungen, so lassen sich Funde über Läufe und Werkzeugstände hinweg
 vergleichen; die Timeline verweist mit `finding_id` darauf.
 
-Für die Weiterverarbeitung in Cortex XSOAR liegt unter `xsoar/` eine Vorlage
+Für die Weiterverarbeitung in Cortex XSOAR liegt unter `stratum_backend/xsoar/` eine Vorlage
 (Automation, Playbook), die den JSON-Report einliest, `.onion`-Adressen als
 Indikatoren anlegt und den Incident bei Belegen für einen Hidden Service
 hochstuft.
@@ -593,10 +600,12 @@ cargo clippy --all-targets -- -D warnings
 
 Jeder Parser hat Unit-Tests gegen synthetische Fixtures und mindestens einen Integrationstest. Die Krypto-Bausteine der Konten-Extraktion sind gegen veröffentlichte Testvektoren geprüft. Die abschliessende Bestätigung der Konten gegen echte Hives (Vergleich mit `samdump2` oder `secretsdump.py`) gehört auf die Analyse-Umgebung.
 
-Die Fuzz-Targets liegen unter `fuzz/` und brauchen eine nightly-Toolchain:
+Die Fuzz-Targets liegen unter `stratum_backend/fuzz/` und brauchen eine
+nightly-Toolchain:
 
 ```sh
 cargo install cargo-fuzz
+cd stratum_backend
 cargo +nightly fuzz run hive
 ```
 

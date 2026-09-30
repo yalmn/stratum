@@ -1,7 +1,20 @@
 [workspace]
 resolver = "2"
-members = ["core", "mmap", "registry", "ese", "vss", "search", "ntfs", "creds", "analysis", "cli"]
-exclude = ["fuzz"]
+# stratum_backend: Analyse-Kern und CLI. Weitere Teile (stratum_model,
+# stratum_frontend, ...) kommen als eigene Ordner daneben.
+members = [
+    "stratum_backend/core",
+    "stratum_backend/mmap",
+    "stratum_backend/registry",
+    "stratum_backend/ese",
+    "stratum_backend/vss",
+    "stratum_backend/search",
+    "stratum_backend/ntfs",
+    "stratum_backend/creds",
+    "stratum_backend/analysis",
+    "stratum_backend/cli",
+]
+exclude = ["stratum_backend/fuzz"]
 
 [workspace.package]
 version = "0.1.0"
@@ -9,11 +22,11 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-stratum-mmap = { path = "mmap" }
-stratum-registry = { path = "registry" }
-stratum-ese = { path = "ese" }
-stratum-vss = { path = "vss" }
-stratum-core = { path = "core" }
+stratum-mmap = { path = "stratum_backend/mmap" }
+stratum-registry = { path = "stratum_backend/registry" }
+stratum-ese = { path = "stratum_backend/ese" }
+stratum-vss = { path = "stratum_backend/vss" }
+stratum-core = { path = "stratum_backend/core" }
 memmap2 = "0.9.11"
 sha2 = "0.11.0"
 blake3 = "1.8.7"
