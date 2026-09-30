@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod activities;
 mod browser;
 mod catalog;
 mod context;
@@ -48,6 +49,7 @@ mod zone;
 #[path = "../tests/common/builder.rs"]
 mod builder;
 
+pub use activities::ActivitiesCacheAnalyzer;
 pub use browser::BrowserAnalyzer;
 pub use catalog::{
     write_catalog, write_catalog_with, CatalogOptions, CatalogProgress, CatalogSummary,
@@ -136,6 +138,11 @@ pub mod fuzzing {
     pub fn persistence_text(text: &str) {
         let _ = crate::filepersist::task_actions(text);
         let _ = crate::pathrating::rate_command(text);
+    }
+
+    /// Prüft die Auswertung von ActivitiesCache-Inhalten mit beliebigen Bytes.
+    pub fn activities_payload(data: &[u8]) {
+        crate::activities::fuzz(data);
     }
 
     /// Prüft den Shell-Item-Parser (ShellBags, LNK-IDList) mit beliebigen Bytes.

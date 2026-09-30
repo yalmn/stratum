@@ -341,6 +341,20 @@ KNOWNFOLDERID-Tabelle, die Variablen darin (`windir`, `ProgramFiles`,
 untersuchten Systems. Ordner, deren Standardpfad laut Tabelle nur für 32-Bit-
 Systeme gilt oder von der Sprache abhängt, erhalten nur den Namen.
 
+## Windows-Zeitachse (ActivitiesCache)
+
+Je Benutzer liest stratum `ActivitiesCache.db` unter
+`AppData\Local\ConnectedDevicesPlatform\<Konto>\`, samt WAL-Datei, in einer
+temporären Kopie. Jede Zeile der Tabellen `Activity` und `ActivityOperation`
+wird ein Fund mit Tabelle, Zeilennummer (`rowid`), Aktivitäts-ID, Anwendung
+aus `AppId`, Typnummer sowie Start, Ende und letzter Änderung als Unix-Zeit in
+UTC; diese erscheinen in der Timeline. Der Ablaufzeitpunkt ist ein geplanter
+Wert und kein Ereignis. Die Bedeutung der Typnummern ist nicht von Microsoft
+dokumentiert und wird nicht gedeutet. Aus JSON-Inhalten werden nur benannte
+Felder übernommen (`displayText`, `appDisplayName`, `activeDurationSeconds`
+und weitere), binäre Inhalte bleiben als Länge und Anfangsbytes erhalten. Ab
+Windows 11 schreibt Windows hier nur noch wenige Aktivitäten.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
@@ -491,8 +505,8 @@ laufen mit `--ignored` und brauchen Verzeichnisse beziehungsweise Dateien über
 Umgebungsvariablen: `STRATUM_USB_REFERENCE_DIR` (SYSTEM-Hive und
 WinScope-Report), `STRATUM_EVTX_REFERENCE` (eine `.evtx`-Datei) und
 `STRATUM_HIVELOG_REFERENCE` (Hives mit ihren `.LOG1`/`.LOG2`) und
-`STRATUM_SHELLITEM_REFERENCE` (LNK-Dateien und die RegRipper-Ausgabe
-`shellbags`).
+`STRATUM_SHELLITEM_REFERENCE` (LNK-Dateien, RegRipper-Ausgaben
+`shellbags` und `userassist` sowie eine `ActivitiesCache.db`).
 
 ## Lizenz
 

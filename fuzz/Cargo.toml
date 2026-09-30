@@ -113,3 +113,10 @@ path = "fuzz_targets/shellitem.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "activities"
+path = "fuzz_targets/activities.rs"
+test = false
+doc = false
+bench = false
