@@ -23,6 +23,7 @@ mod finding;
 mod fsindex;
 mod jumplist;
 mod keyword;
+mod knownfolder;
 mod lnk;
 mod lsa;
 mod mfttimeline;

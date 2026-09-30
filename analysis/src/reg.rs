@@ -7,6 +7,7 @@
 
 use stratum_registry::Hive;
 
+use crate::knownfolder::Umgebung;
 use crate::pathrating::{rate_command, PathStatus};
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
@@ -455,11 +456,18 @@ impl Analyzer for UserActivityAnalyzer {
         let mut out = Outcome::default();
         for inst in &ctx.installs {
             let before = out.findings.len();
+            let software = inst
+                .hives
+                .software
+                .as_deref()
+                .and_then(|b| Hive::parse(b).ok());
+            let system_env = Umgebung::system(software.as_ref());
             for (user, bytes) in &inst.ntuser {
                 match Hive::parse(bytes) {
                     Ok(hive) => {
+                        let env = system_env.mit_benutzer(software.as_ref(), &hive, user);
                         typed_urls(&hive, user, &mut out);
-                        userassist(&hive, user, &mut out);
+                        userassist(&hive, user, &env, &mut out);
                         run_mru(&hive, user, &mut out);
                         typed_paths(&hive, user, &mut out);
                         word_wheel(&hive, user, &mut out);
@@ -496,7 +504,7 @@ fn typed_urls(hive: &Hive, user: &str, out: &mut Outcome) {
     }
 }
 
-fn userassist(hive: &Hive, user: &str, out: &mut Outcome) {
+fn userassist(hive: &Hive, user: &str, env: &Umgebung, out: &mut Outcome) {
     let Ok(Some(root)) = hive.open_key(USERASSIST) else {
         return;
     };
@@ -524,8 +532,24 @@ fn userassist(hive: &Hive, user: &str, out: &mut Outcome) {
                 .with("benutzer", user)
                 .with("wertname_roh", v.name())
                 .with("hive_offset", v.file_offset().to_string());
+            let f = with_known_folder(f, env);
             out.findings.push(userassist_data(f, version, v.data()));
         }
+    }
+}
+
+/// Löst ein führendes `{KNOWNFOLDERID}` im Namen auf (siehe [`crate::knownfolder`]).
+fn with_known_folder(f: Finding, env: &Umgebung) -> Finding {
+    let Some((ordner, pfad)) = crate::knownfolder::resolve(&f.name, env) else {
+        return f;
+    };
+    let f = f.with("knownfolder", format!("FOLDERID_{ordner}"));
+    match pfad {
+        Some(p) => f.with("pfad_aufgeloest", p).with(
+            "pfad_herkunft",
+            "Standardpfad laut Microsoft KNOWNFOLDERID, Variablen aus der Registry des Systems",
+        ),
+        None => f,
     }
 }
 
@@ -1088,7 +1112,21 @@ mod tests {
         let ntuser = std::fs::read(hives.join("ntuser.dat")).unwrap();
         let hive = Hive::parse(&ntuser).unwrap();
         let mut out = Outcome::default();
-        userassist(&hive, "ich", &mut out);
+        let software_bytes = std::fs::read(hives.join("SOFTWARE")).unwrap();
+        let software = Hive::parse(&software_bytes).unwrap();
+        let env = Umgebung::system(Some(&software)).mit_benutzer(Some(&software), &hive, "ich");
+        userassist(&hive, "ich", &env, &mut out);
+        // Jeder Name mit Ordner-GUID wird aufgelöst; die Pfade sind gegen den
+        // Dateikatalog des Images geprüft.
+        let mit_guid: Vec<_> = out
+            .findings
+            .iter()
+            .filter(|f| f.name.starts_with('{'))
+            .collect();
+        assert!(!mit_guid.is_empty());
+        for f in mit_guid {
+            assert!(f.attributes.contains_key("pfad_aufgeloest"), "{}", f.name);
+        }
         let rr = std::fs::read_to_string(items.join("regripper_userassist.txt")).unwrap();
         let (mut guid, mut zeit, mut mit, mut ohne) = (String::new(), None::<String>, 0, 0);
         for zeile in rr.lines() {
@@ -1163,7 +1201,7 @@ mod tests {
 
         let hive = Hive::parse(&ntuser).unwrap();
         let mut out = Outcome::default();
-        userassist(&hive, "alice", &mut out);
+        userassist(&hive, "alice", &Umgebung::default(), &mut out);
         assert_eq!(out.findings.len(), 2);
         let (a, c) = (&out.findings[0], &out.findings[1]);
         assert_eq!(a.name, "UEME_CTLSESSION");

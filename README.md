@@ -332,6 +332,15 @@ Windows-11-Daten geprüft. Andere Versionen und Längen, etwa die
 Sitzungsdaten `UEME_CTLSESSION`, bleiben unausgewertet und tragen
 `daten_status`.
 
+Viele Namen beginnen mit der GUID eines bekannten Ordners, etwa
+`{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\cmd.exe`. stratum nennt dazu
+`knownfolder` (hier `FOLDERID_System`) und `pfad_aufgeloest`
+(`C:\WINDOWS\system32\cmd.exe`). Die Standardpfade stammen aus Microsofts
+KNOWNFOLDERID-Tabelle, die Variablen darin (`windir`, `ProgramFiles`,
+`ALLUSERSPROFILE`, `USERPROFILE`, `APPDATA` und weitere) aus der Registry des
+untersuchten Systems. Ordner, deren Standardpfad laut Tabelle nur für 32-Bit-
+Systeme gilt oder von der Sprache abhängt, erhalten nur den Namen.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
