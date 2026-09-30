@@ -92,3 +92,10 @@ path = "fuzz_targets/zone_identifier.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "evtx"
+path = "fuzz_targets/evtx.rs"
+test = false
+doc = false
+bench = false

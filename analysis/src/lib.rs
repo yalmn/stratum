@@ -134,6 +134,11 @@ pub mod fuzzing {
         let _ = crate::pathrating::rate_command(text);
     }
 
+    /// Prüft die Lagebestimmung von EVTX-Datensätzen mit beliebigen Bytes.
+    pub fn evtx_records(data: &[u8]) {
+        let _ = crate::eventlog::record_index(data);
+    }
+
     /// Prüft den USN-Scanner mit beliebigen Bytes.
     pub fn usn(data: &[u8]) {
         crate::usn::fuzz(data);

@@ -217,6 +217,18 @@ Die Auswertung ist auf 64 KiB je Strom und 100.000 Funde begrenzt. UTF-8 sowie
 UTF-16 mit Byte Order Mark werden unterstützt. Eine gespeicherte Herkunftszone
 belegt weder einen erfolgreichen Download noch die Ausführung der Datei.
 
+### Ereignisprotokolle
+
+Aus den `.evtx`-Dateien unter `winevt\Logs` meldet stratum ausgewählte
+Ereignisse (Anmeldungen, Konten, Dienste, Protokolllöschung, RDP). Jeder Fund
+trägt `event_record_id`, die Zeit als `zeit_utc` mit 100-ns-Auflösung und als
+FILETIME sowie den Anker der Protokolldatei (Volume-Offset, MFT-Nummer, Offset
+des MFT-Datensatzes). `datei_offset` nennt den Beginn des Datensatzes in der
+Datei und wird nur gesetzt, wenn EventRecordID und Zeitstempel im Datensatzkopf
+genau zu dem passen, was der Parser gelesen hat; der Offset des Fundes ist dann
+die zugehörige Stelle im Image. Ereignisse ohne bestätigten Offset und nicht
+lesbare Protokolle erscheinen als Warnung.
+
 ### Browser-Passwörter (DPAPI)
 
 Die in Chromium-Browsern (Edge, Chrome, Brave, Opera) gespeicherten Passwörter liegen mit AES-GCM verschlüsselt in `Login Data`; der GCM-Schlüssel steckt DPAPI-geschützt in `Local State` und hängt letztlich am Passwort des Benutzers, nicht an dessen NT-Hash. Ohne dieses Passwort weist stratum nur Anzahl und Speicherort aus. Ist das Passwort bekannt (üblicherweise vorher aus dem NT-Hash geknackt), entschlüsselt stratum die komplette Kette selbst:
