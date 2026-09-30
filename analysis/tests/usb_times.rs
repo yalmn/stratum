@@ -45,7 +45,7 @@ fn fixture(properties: &[(&str, u32, &[u8])]) -> (Vec<u8>, Vec<u64>) {
 
 fn analyze(img: &ImageReader, hive: &[u8], origin: &str) -> Outcome {
     let mut ctx = AnalysisContext::new(img, vec![]);
-    ctx.installs.push(WindowsInstall {
+    ctx.installs = std::sync::Arc::new(vec![WindowsInstall {
         origin: origin.into(),
         target: NtfsTarget {
             index: 0,
@@ -64,7 +64,7 @@ fn analyze(img: &ImageReader, hive: &[u8], origin: &str) -> Outcome {
         ansi_codepage: None,
         hive_status: Vec::new(),
         warnings: vec![],
-    });
+    }]);
     UsbAnalyzer.run(&ctx)
 }
 

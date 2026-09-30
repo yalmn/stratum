@@ -14,7 +14,6 @@
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use stratum_core::time::filetime_to_iso;
-use stratum_ntfs::NtfsVolume;
 
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
@@ -25,6 +24,10 @@ const DB_NAME: &str = "activitiescache.db";
 pub struct ActivitiesCacheAnalyzer;
 
 impl Analyzer for ActivitiesCacheAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "useraktivitaet"
     }
@@ -45,8 +48,8 @@ impl Analyzer for ActivitiesCacheAnalyzer {
             if dateien.is_empty() {
                 continue;
             }
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, _) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));

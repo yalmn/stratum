@@ -19,7 +19,7 @@ impl Analyzer for ProgramExecutionAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             if let Some(bytes) = &inst.hives.amcache {
                 match Hive::parse(bytes) {

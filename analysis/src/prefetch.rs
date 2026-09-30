@@ -11,14 +11,16 @@
 //! (Windows 7 und älter) liefern zusätzlich den intern gespeicherten
 //! Programmnamen.
 
-use stratum_ntfs::NtfsVolume;
-
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
 /// Analyzer für Prefetch-Dateien.
 pub struct PrefetchAnalyzer;
 
 impl Analyzer for PrefetchAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "prefetch"
     }
@@ -34,8 +36,8 @@ impl Analyzer for PrefetchAnalyzer {
             if entries.is_empty() {
                 continue;
             }
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, _) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));

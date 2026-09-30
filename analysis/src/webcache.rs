@@ -27,7 +27,6 @@ use std::collections::HashMap;
 
 use stratum_core::time::filetime_to_iso;
 use stratum_ese::{Database, Value};
-use stratum_ntfs::NtfsVolume;
 use stratum_registry::filetime_to_unix;
 
 use crate::esewerte::{self, benutzer_aus_pfad, render, Quelle};
@@ -59,6 +58,10 @@ const MAX_FINDINGS: usize = 500_000;
 pub struct WebCacheAnalyzer;
 
 impl Analyzer for WebCacheAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         DOMAIN
     }
@@ -70,8 +73,8 @@ impl Analyzer for WebCacheAnalyzer {
             if dateien.is_empty() {
                 continue;
             }
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));
@@ -90,6 +93,7 @@ impl Analyzer for WebCacheAnalyzer {
                     volume_offset: v.target.offset,
                     layout: layout.as_ref(),
                     ohne_image,
+                    abbildung,
                 };
                 analyze(&data, &quelle, &mut out);
             }
@@ -394,7 +398,7 @@ pub(crate) fn fuzz(data: &[u8]) {
 mod tests {
     use super::*;
     use crate::esebau::{datenbank, Spalte, Tabelle};
-    use crate::fsindex::FileEntry;
+    use crate::fsindex::{FileEntry, Herkunft};
     use crate::NtfsTarget;
 
     const PFAD: &str = "Users\\ich\\AppData\\Local\\Microsoft\\Windows\\WebCache\\WebCacheV01.dat";
@@ -605,6 +609,7 @@ mod tests {
                 offset: 0,
                 size: 0,
             },
+            herkunft: Herkunft::Live,
             files: vec![FileEntry {
                 path: "Users\\ICH\\INetCache\\IE\\BBBBBBBB\\b[1].js".into(),
                 mft_record: 77,

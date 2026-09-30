@@ -21,7 +21,6 @@ use std::collections::HashMap;
 
 use stratum_core::time::filetime_to_iso;
 use stratum_ese::{Database, Value};
-use stratum_ntfs::NtfsVolume;
 use stratum_registry::Hive;
 
 use crate::esewerte::{self, hex, render, utf16, Quelle};
@@ -37,6 +36,10 @@ const MAX_FINDINGS: usize = 500_000;
 pub struct SrumAnalyzer;
 
 impl Analyzer for SrumAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "srum"
     }
@@ -50,8 +53,8 @@ impl Analyzer for SrumAnalyzer {
             if dateien.is_empty() {
                 continue;
             }
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));
@@ -77,6 +80,7 @@ impl Analyzer for SrumAnalyzer {
                     volume_offset: v.target.offset,
                     layout: layout.as_ref(),
                     ohne_image,
+                    abbildung,
                 };
                 analyze(&data, &quelle, &anbieter, &mut out);
             }
@@ -392,6 +396,7 @@ mod tests {
             volume_offset: 0,
             layout: None,
             ohne_image: "test",
+            abbildung: crate::schatten::Abbildung::live(),
         }
     }
 
@@ -536,6 +541,7 @@ mod tests {
             volume_offset: 0,
             layout: None,
             ohne_image: "test",
+            abbildung: crate::schatten::Abbildung::live(),
         };
         let mut out = Outcome::default();
         analyze(&data, &quelle, &anbieter, &mut out);

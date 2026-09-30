@@ -431,12 +431,38 @@ angeben, ob die Bytes aus einer Store-Kopie oder aus dem aktuellen Volume
 stammen und wo sie physisch liegen.
 
 Je Schattenkopie entsteht ein Fund mit Store-, Schattenkopie- und
-Satzkennung, Erstellungszeit, Attributen und Zahl der Blockdeskriptoren. Die
-Nummer `VSS#n` zählt nach Erstellungszeit, 1 ist die älteste. Registry-
-basierte Analyzer laufen auch auf den Snapshots.
+Satzkennung, Erstellungszeit, Attributen, Zahl der Blockdeskriptoren und der
+Dateien. Die Nummer `VSS#n` zählt nach Erstellungszeit, 1 ist die älteste.
+Registry-basierte Analyzer laufen auch auf den Snapshots.
+
+**Dateiabgleich.** Jeder Snapshot wird durchlaufen und mit dem Live-Stand
+verglichen. Eine Datei gilt nur dann als unverändert, wenn ihr Inhalt
+nachweislich gleich ist: gleiche Datenläufe, und kein Block dieser Läufe wurde
+seit dem Snapshot in einen Store kopiert; andernfalls werden die Bytes des
+Blocks verglichen. Residente Inhalte werden direkt verglichen, bei
+verschiedenen Datenläufen oder komprimierten Strömen der ganze Inhalt (bis
+256 MiB, darüber `nicht_pruefbar`). Je abweichender Datei entsteht ein Fund
+(`art` = `vss_datei`) mit `status` (`nur_im_snapshot`, `inhalt_abweichend`,
+`nicht_pruefbar`), Metadaten aus Snapshot und Live-Stand und dem Image-Offset
+des MFT-Datensatzes im Snapshot. NTFS-Metadateien sind mit `ntfs_metadatei`
+gekennzeichnet. Verglichen wird der unbenannte Datenstrom.
+
+**Artefakte aus Snapshots.** Die dateibasierten Analyzer (Ereignisprotokolle,
+Prefetch, LNK, Jump Lists, Papierkorb, Browser, PowerShell, Aufgaben und
+Autostart, Tor, DPAPI, ActivitiesCache, SRUM, WebCache) laufen zusätzlich auf
+den abweichenden Dateien jedes Snapshots. Unveränderte Dateien werden nicht
+erneut ausgewertet. Aus einer geänderten Datei können Funde stammen, die auch
+im Live-Stand vorkommen (etwa ältere Einträge eines weitergeschriebenen
+Protokolls); sie sind über die Herkunft unterscheidbar. Solche Funde tragen
+`herkunft` (`VSS#n`), `vss_erstellt_utc` und `vss_volume_offset`; ihre
+Image-Offsets sind über die Schattenkopie auf die physische Stelle der Bytes
+umgerechnet.
 
 Geprüft gegen libvshadow am öffentlichen Testimage `vss.raw` aus dfvfs (zwei
-Stores): beide Snapshots Block für Block identisch. Die zuvor genutzte Crate
+Stores): beide Snapshots Block für Block identisch. Der Dateiabgleich stimmt
+dort mit einem vollständigen Inhaltsvergleich aller Dateien überein. Das
+Testimage enthält keine später gelöschten Dateien und keine Artefakte; diese
+Fälle sind nur mit synthetischen Daten geprüft. Die zuvor genutzte Crate
 `vshadow` wich dort in 11 bzw. 75 von 5.052 Blöcken ab und stand unter
 AGPL-3.0; sie wird nicht mehr verwendet.
 
@@ -485,8 +511,9 @@ Eingaben bleiben als einzelne Quellzeilen mit Fortsetzungsmarkierung erhalten.
 Abweichende, frei konfigurierte Dateinamen werden nicht automatisch erkannt.
 
 Grenzen: 16 MiB je Verlaufsdatei, 50.000 physische Zeilen, 64 KiB je Zeile.
-Überschreitungen und ungültiges UTF-8 erscheinen als Warnungen. Der Analyzer
-arbeitet derzeit auf den indizierten Live-NTFS-Volumes, nicht auf Schattenkopien.
+Überschreitungen und ungültiges UTF-8 erscheinen als Warnungen. Verläufe, die
+in einer Schattenkopie vom Live-Stand abweichen, werden zusätzlich ausgewertet
+(siehe Schattenkopien).
 Die Standardpfade beschreibt die [PSReadLine-Dokumentation](https://learn.microsoft.com/en-us/powershell/module/psreadline/set-psreadlineoption).
 
 Die Timeline enthält alle unterstützten Zeitfelder eines Funds. `finding_index`
@@ -522,7 +549,6 @@ keine Aussage über Schadsoftware; `auffaellig_grund` nennt den Anlass.
 
 Geplant, noch nicht implementiert:
 
-- Dateibasierte Analyse von Schattenkopien.
 - Linux-Dateisysteme und Serviceanalysen für Web, Datenbanken, Authentifizierung,
   VPN und Gateways.
 - Chat-Artefakte, unter anderem WhatsApp, Signal und Threema. Erkennung,

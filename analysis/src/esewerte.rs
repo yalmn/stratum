@@ -6,6 +6,7 @@ use stratum_ese::{Column, Node, Record, Value};
 use stratum_ntfs::{DataStreamLayout, NtfsVolume, NtfsVolumeError};
 
 use crate::fsindex::FileEntry;
+use crate::schatten::Abbildung;
 use crate::{Finding, Outcome};
 
 /// Obergrenze für Binärwerte im Fund; längere werden gekürzt und ihre Länge
@@ -20,6 +21,8 @@ pub(crate) struct Quelle<'a> {
     pub layout: Option<&'a DataStreamLayout>,
     /// Grund, falls ein Datei-Offset keinem Image-Offset zugeordnet wird.
     pub ohne_image: &'static str,
+    /// Umrechnung in Image-Offsets (bei Schattenkopien über den Store).
+    pub abbildung: Abbildung<'a>,
 }
 
 impl<'a> Quelle<'a> {
@@ -31,15 +34,20 @@ impl<'a> Quelle<'a> {
             volume_offset: 0,
             layout: None,
             ohne_image,
+            abbildung: Abbildung::live(),
         }
     }
 
     /// Physischer Image-Offset zu einem Offset in der Datei.
     pub fn image_offset(&self, datei_offset: u64) -> Option<u64> {
-        self.layout?.runs.iter().find_map(|run| {
-            let rel = datei_offset.checked_sub(run.logical_offset)?;
-            (rel < run.length).then_some(run.image_offset? + rel)
-        })
+        self.layout?
+            .runs
+            .iter()
+            .find_map(|run| {
+                let rel = datei_offset.checked_sub(run.logical_offset)?;
+                (rel < run.length).then_some(run.image_offset? + rel)
+            })
+            .and_then(|o| self.abbildung.image(o))
     }
 
     /// Hängt Seite, Datei- und Image-Offset eines Datensatzes an den Fund.

@@ -24,11 +24,39 @@ pub struct FileEntry {
     pub parent_record: u64,
 }
 
+/// Woher ein Pfad-Index stammt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Herkunft {
+    /// Aktueller Stand des Volumes.
+    #[default]
+    Live,
+    /// Schattenkopie; der Index enthält nur Dateien, die vom Live-Stand
+    /// abweichen oder nur dort existieren.
+    Snapshot {
+        /// Store-Index (0 = älteste Schattenkopie).
+        store: usize,
+        /// Erstellungszeit (FILETIME, UTC).
+        erstellt: u64,
+    },
+}
+
+impl Herkunft {
+    /// Bezeichnung im Report, z. B. `VSS#2`.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Live => "live".into(),
+            Self::Snapshot { store, .. } => format!("VSS#{}", store + 1),
+        }
+    }
+}
+
 /// Der Pfad-Index eines NTFS-Bereichs.
 #[derive(Debug, Clone)]
 pub struct FsIndex {
     /// Der zugrunde liegende NTFS-Bereich.
     pub target: NtfsTarget,
+    /// Live-Stand oder Schattenkopie.
+    pub herkunft: Herkunft,
     /// Alle Dateien des Bereichs.
     pub files: Vec<FileEntry>,
     /// Alle Verzeichnisse des Bereichs (für den Dateikatalog).
@@ -46,6 +74,27 @@ impl FsIndex {
     /// Baut den Index für einen NTFS-Bereich auf.
     pub fn build(img: &ImageReader, target: NtfsTarget) -> Result<Self, NtfsVolumeError> {
         let mut vol = NtfsVolume::open(img, target.offset, target.size)?;
+        Self::from_volume(&mut vol, target, Herkunft::Live)
+    }
+
+    /// Leerer Index (etwa für einen nicht lesbaren Snapshot).
+    pub fn leer(target: NtfsTarget, herkunft: Herkunft) -> Self {
+        Self {
+            target,
+            herkunft,
+            files: Vec::new(),
+            directories: Vec::new(),
+            warnings: Vec::new(),
+            unreadable_dirs: Vec::new(),
+        }
+    }
+
+    /// Baut den Index aus einem bereits geöffneten Volume.
+    pub fn from_volume<R: std::io::Read + std::io::Seek>(
+        vol: &mut NtfsVolume<R>,
+        target: NtfsTarget,
+        herkunft: Herkunft,
+    ) -> Result<Self, NtfsVolumeError> {
         let mut files = Vec::new();
         let mut directories = Vec::new();
         let walk = vol.walk_report()?;
@@ -96,6 +145,7 @@ impl FsIndex {
         }
         Ok(Self {
             target,
+            herkunft,
             files,
             directories,
             warnings,
@@ -167,6 +217,7 @@ mod tests {
                 offset: 0,
                 size: 0,
             },
+            herkunft: Herkunft::Live,
             files: paths
                 .iter()
                 .map(|(p, r)| FileEntry {

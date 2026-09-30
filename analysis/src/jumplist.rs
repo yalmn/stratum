@@ -20,6 +20,10 @@ use crate::{AnalysisContext, Analyzer, Finding, FsIndex, Outcome};
 pub struct JumpListAnalyzer;
 
 impl Analyzer for JumpListAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "useraktivitaet"
     }
@@ -27,8 +31,8 @@ impl Analyzer for JumpListAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for v in &ctx.volumes {
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, _) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));

@@ -13,8 +13,9 @@ use std::io::Cursor;
 use evtx::EvtxParser;
 use serde_json::Value;
 
-use stratum_ntfs::{DataStreamLayout, NtfsVolume, NtfsVolumeError};
+use stratum_ntfs::{DataStreamLayout, NtfsVolumeError};
 
+use crate::schatten::Abbildung;
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
 /// Obergrenze für gemeldete Ereignisse je Protokolldatei.
@@ -24,6 +25,10 @@ const MAX_PER_LOG: usize = 50_000;
 pub struct EventLogAnalyzer;
 
 impl Analyzer for EventLogAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "eventlog"
     }
@@ -39,8 +44,8 @@ impl Analyzer for EventLogAnalyzer {
             if logs.is_empty() {
                 continue;
             }
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));
@@ -76,8 +81,9 @@ impl Analyzer for EventLogAnalyzer {
                     path: &e.path,
                     volume_offset: v.target.offset,
                     mft_record: e.mft_record,
-                    mft_record_offset: file.meta.record_offset,
+                    mft_record_offset: file.meta.record_offset.and_then(|o| abbildung.image(o)),
                     layout: layout.as_ref(),
+                    abbildung,
                     ohne_image,
                 };
                 parse_log(&file.data, &quelle, &mut out);
@@ -94,6 +100,8 @@ struct LogSource<'a> {
     mft_record: u64,
     mft_record_offset: Option<u64>,
     layout: Option<&'a DataStreamLayout>,
+    /// Umrechnung in Image-Offsets (bei Schattenkopien über den Store).
+    abbildung: Abbildung<'a>,
     /// Grund, falls ein Datei-Offset keinem Image-Offset zugeordnet wird.
     ohne_image: &'static str,
 }
@@ -101,10 +109,14 @@ struct LogSource<'a> {
 impl LogSource<'_> {
     /// Physischer Image-Offset zu einem Offset in der Datei.
     fn image_offset(&self, datei_offset: u64) -> Option<u64> {
-        self.layout?.runs.iter().find_map(|run| {
-            let rel = datei_offset.checked_sub(run.logical_offset)?;
-            (rel < run.length).then_some(run.image_offset? + rel)
-        })
+        self.layout?
+            .runs
+            .iter()
+            .find_map(|run| {
+                let rel = datei_offset.checked_sub(run.logical_offset)?;
+                (rel < run.length).then_some(run.image_offset? + rel)
+            })
+            .and_then(|o| self.abbildung.image(o))
     }
 }
 

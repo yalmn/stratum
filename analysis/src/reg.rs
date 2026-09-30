@@ -31,7 +31,7 @@ impl Analyzer for PersistenceAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             // HKLM aus dem SOFTWARE-Hive: Run-Schluessel plus Winlogon,
             // AppInit_DLLs und Image File Execution Options.
@@ -241,7 +241,7 @@ impl Analyzer for UsbAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             let Some(bytes) = &inst.hives.system else {
                 continue;
@@ -373,7 +373,7 @@ impl Analyzer for BamAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             let Some(bytes) = &inst.hives.system else {
                 continue;
@@ -454,7 +454,7 @@ impl Analyzer for UserActivityAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             let software = inst
                 .hives
@@ -916,7 +916,7 @@ mod tests {
     // Baut einen Kontext mit einem Install, dessen Hive-Bytes vorgegeben sind.
     fn ctx_with(img: &stratum_core::ImageReader, inst: WindowsInstall) -> AnalysisContext<'_> {
         let mut c = AnalysisContext::new(img, vec![]);
-        c.installs = vec![inst];
+        c.installs = vec![inst].into();
         c
     }
 

@@ -4,11 +4,21 @@
 //! libvshadow geprüft. Je Schattenkopie ein Fund mit Kennungen, Zeitpunkt,
 //! Attributen und Zahl der Blockdeskriptoren. Die Nummer (`VSS#n`) zählt nach
 //! Erstellungszeit, 1 ist die älteste.
+//!
+//! Dazu je Datei, die in einem Snapshot vom Live-Stand abweicht, ein Fund
+//! (`art` = `vss_datei`): nur im Snapshot vorhanden, Inhalt abweichend oder
+//! nicht prüfbar, mit Metadaten aus Snapshot und Live-Stand. Der Image-Offset
+//! zeigt auf den MFT-Datensatz im Snapshot, aufgelöst über den Store.
 
 use stratum_core::time::filetime_to_iso;
-use stratum_vss::{guid, Volume};
+use stratum_ntfs::RecordInfo;
+use stratum_vss::{guid, Location, Volume};
 
+use crate::schatten::Abweichung;
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
+
+/// Obergrenze für Abgleich-Funde.
+const MAX_ABGLEICH: usize = 200_000;
 
 /// Analyzer für Volume Shadow Copies.
 pub struct VssAnalyzer;
@@ -70,11 +80,99 @@ impl Analyzer for VssAnalyzer {
                 if let Some(a) = info.attribute_flags {
                     f = f.with("attribute", format!("{a:#010x}"));
                 }
+                if let Some((_, _, n)) = ctx
+                    .snapshot_dateien
+                    .iter()
+                    .find(|(o, s, _)| *o == target.offset && *s == info.index)
+                {
+                    let zahl = |st: &str| {
+                        ctx.abweichungen
+                            .iter()
+                            .filter(|a| {
+                                a.volume_offset == target.offset
+                                    && a.store == info.index
+                                    && a.status.name() == st
+                            })
+                            .count()
+                            .to_string()
+                    };
+                    f = f
+                        .with("dateien_im_snapshot", n.to_string())
+                        .with("nur_im_snapshot", zahl("nur_im_snapshot"))
+                        .with("inhalt_abweichend", zahl("inhalt_abweichend"))
+                        .with("nicht_pruefbar", zahl("nicht_pruefbar"));
+                }
                 out.findings.push(f);
             }
         }
+        for (i, a) in ctx.abweichungen.iter().enumerate() {
+            if i >= MAX_ABGLEICH {
+                out.warnings.push(format!(
+                    "{} weitere abweichende Dateien in Schattenkopien nicht einzeln gemeldet",
+                    ctx.abweichungen.len() - MAX_ABGLEICH
+                ));
+                break;
+            }
+            let mut f = abgleich(a);
+            let vss = ctx
+                .schatten
+                .iter()
+                .find(|s| s.target.offset == a.volume_offset);
+            let record = a.snapshot.as_ref().and_then(|i| i.record_offset);
+            if let (Some(s), Some(r)) = (vss, record) {
+                if let Ok((Location::Volume { offset, .. }, _)) = s.vss.locate(a.store, r) {
+                    f = f.at(a.volume_offset + offset);
+                }
+            }
+            out.findings.push(f);
+        }
         out
     }
+}
+
+fn zeiten(mut f: Finding, praefix: &str, info: &RecordInfo) -> Finding {
+    if let Some(t) = info.si_times {
+        for (name, ft) in [
+            ("erstellt", t.created),
+            ("geaendert", t.modified),
+            ("mft_geaendert", t.mft_modified),
+            ("zugriff", t.accessed),
+        ] {
+            if let Some(iso) = filetime_to_iso(ft) {
+                f = f.with(format!("{praefix}{name}_utc"), iso);
+            }
+        }
+    }
+    if let Some(g) = info.data_size {
+        f = f.with(format!("{praefix}groesse"), g.to_string());
+    }
+    f.with(format!("{praefix}sequenz"), info.sequence.to_string())
+}
+
+/// Fund zu einer abweichenden Datei.
+fn abgleich(a: &Abweichung) -> Finding {
+    let e = &a.eintrag;
+    let name = e.path.rsplit('\\').next().unwrap_or(&e.path);
+    let mut f = Finding::new("vss", name, &e.path)
+        .with("art", "vss_datei")
+        .with("status", a.status.name())
+        .with("herkunft", format!("VSS#{}", a.store + 1))
+        .with("vss_volume_offset", a.volume_offset.to_string())
+        .with("mft_record", e.mft_record.to_string())
+        .with("parent_record", e.parent_record.to_string());
+    if let Some(i) = &a.snapshot {
+        f = zeiten(f, "", i);
+    }
+    if let Some(i) = &a.live {
+        f = zeiten(f, "live_", i).with("live_mft_record", i.mft_record.to_string());
+    }
+    if let Some(h) = &a.hinweis {
+        f = f.with("hinweis", h);
+    }
+    if e.path.starts_with('$') {
+        f = f.with("ntfs_metadatei", "ja");
+    }
+    f
 }
 
 /// FILETIME (100-ns seit 1601) -> Unix-Sekunden, `None` vor 1970.

@@ -36,6 +36,7 @@ mod programexec;
 mod recyclebin;
 mod reg;
 mod runner;
+mod schatten;
 mod shellbags;
 mod shellitem;
 mod srum;
@@ -67,7 +68,7 @@ pub use dpapi::DpapiAnalyzer;
 pub use eventlog::EventLogAnalyzer;
 pub use filepersist::FilePersistenceAnalyzer;
 pub use finding::{assign_ids, Finding};
-pub use fsindex::{FileEntry, FsIndex};
+pub use fsindex::{FileEntry, FsIndex, Herkunft};
 pub use jumplist::JumpListAnalyzer;
 pub use keyword::KeywordAnalyzer;
 pub use lnk::LnkAnalyzer;
@@ -79,6 +80,7 @@ pub use programexec::ProgramExecutionAnalyzer;
 pub use recyclebin::RecycleBinAnalyzer;
 pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
 pub use runner::{run_all, AnalysisResult, AnalyzerStatus};
+pub use schatten::{Abbildung, Abweichung, Schatten, Status, VolumeReader};
 pub use shellbags::ShellBagsAnalyzer;
 pub use srum::SrumAnalyzer;
 pub use timeline::{build as build_timeline, TimelineEntry};
@@ -128,6 +130,14 @@ pub trait Analyzer: Sync {
 
     /// Führt die Analyse auf dem Kontext aus.
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome;
+
+    /// `true`, wenn der Analyzer Dateien über den Pfad-Index liest und
+    /// Volumes mit [`AnalysisContext::open_volume`] öffnet. Solche Analyzer
+    /// laufen zusätzlich auf den Dateien jeder Schattenkopie, die vom
+    /// Live-Stand abweichen.
+    fn dateibasiert(&self) -> bool {
+        false
+    }
 }
 
 /// Einstiegspunkte für die Fuzz-Targets. Nicht Teil der stabilen API.

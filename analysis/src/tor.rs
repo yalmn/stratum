@@ -28,6 +28,10 @@ const MAX_CONFIG: usize = 1 << 20;
 pub struct TorAnalyzer;
 
 impl Analyzer for TorAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "tor"
     }
@@ -36,8 +40,8 @@ impl Analyzer for TorAnalyzer {
         let mut out = Outcome::default();
 
         for v in &ctx.volumes {
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, _) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));

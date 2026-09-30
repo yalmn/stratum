@@ -38,7 +38,7 @@ impl Analyzer for ShellBagsAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             let software = inst
                 .hives

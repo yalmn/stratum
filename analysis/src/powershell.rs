@@ -4,8 +4,6 @@
 //! weder eine Ausführung noch deren Erfolg. Mehrzeilige Eingaben werden hier
 //! nicht zu einem vermeintlich sicher rekonstruierten Befehl zusammengefügt.
 
-use stratum_ntfs::NtfsVolume;
-
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
 const MAX_FILE_BYTES: usize = 16 * 1024 * 1024;
@@ -16,6 +14,10 @@ const MAX_LINE_BYTES: usize = 64 * 1024;
 pub struct PowerShellHistoryAnalyzer;
 
 impl Analyzer for PowerShellHistoryAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "powershell"
     }
@@ -27,8 +29,8 @@ impl Analyzer for PowerShellHistoryAnalyzer {
             if candidates.is_empty() {
                 continue;
             }
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("PowerShell, Volume {}: {e}", v.target.offset));
@@ -61,7 +63,7 @@ impl Analyzer for PowerShellHistoryAnalyzer {
                     finding
                         .attributes
                         .insert("volume_offset".into(), v.target.offset.to_string());
-                    if let Some(offset) = f.meta.record_offset {
+                    if let Some(offset) = f.meta.record_offset.and_then(|o| abbildung.image(o)) {
                         finding
                             .attributes
                             .insert("mft_record_offset".into(), offset.to_string());

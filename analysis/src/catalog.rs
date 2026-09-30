@@ -684,6 +684,7 @@ mod tests {
                 offset: 0,
                 size: 4096,
             },
+            herkunft: crate::fsindex::Herkunft::Live,
             files: vec![entry("b.txt"), entry("a.txt")],
             directories: vec![entry("ordner")],
             warnings: Vec::new(),

@@ -609,11 +609,21 @@ impl<R: Read + Seek> NtfsVolume<R> {
         path: &str,
         stream: &str,
     ) -> Result<Option<DataStreamLayout>, NtfsVolumeError> {
-        let ntfs = &self.ntfs;
-        let fs = &mut self.fs;
-        let Some(record) = resolve(ntfs, fs, path)? else {
+        let Some(record) = resolve(&self.ntfs, &mut self.fs, path)? else {
             return Ok(None);
         };
+        self.data_stream_layout_by_record(record, stream)
+    }
+
+    /// Wie [`data_stream_layout`](Self::data_stream_layout), aber direkt über
+    /// die MFT-Datensatznummer ohne Pfadauflösung.
+    pub fn data_stream_layout_by_record(
+        &mut self,
+        record: u64,
+        stream: &str,
+    ) -> Result<Option<DataStreamLayout>, NtfsVolumeError> {
+        let ntfs = &self.ntfs;
+        let fs = &mut self.fs;
         let file = ntfs.file(fs, record)?;
         let Some(StreamSource { size, valid, plan }) = stream_source(ntfs, &file, fs, stream)?
         else {

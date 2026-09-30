@@ -22,7 +22,7 @@ impl Analyzer for LsaAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
             let (Some(system), Some(security)) = (&inst.hives.system, &inst.hives.security) else {
                 continue;

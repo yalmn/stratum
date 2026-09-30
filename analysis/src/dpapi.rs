@@ -15,7 +15,6 @@
 //! entschlüsselten Masterkey als Hex aus.
 
 use stratum_creds::{dpapi, extract_lsa_secrets};
-use stratum_ntfs::NtfsVolume;
 use stratum_registry::Hive;
 
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
@@ -24,6 +23,10 @@ use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 pub struct DpapiAnalyzer;
 
 impl Analyzer for DpapiAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "dpapi"
     }
@@ -32,7 +35,7 @@ impl Analyzer for DpapiAnalyzer {
         let mut out = Outcome::default();
         let debug = std::env::var_os("STRATUM_DEBUG").is_some();
 
-        for inst in &ctx.installs {
+        for inst in ctx.installs.iter() {
             let before = out.findings.len();
 
             // DPAPI_SYSTEM aus den Hives holen: Maschinen- und Benutzerschlüssel.
@@ -68,8 +71,8 @@ impl Analyzer for DpapiAnalyzer {
             else {
                 continue;
             };
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, _) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings.push(format!(
                         "DPAPI: Offset {} nicht lesbar: {e}",

@@ -450,7 +450,7 @@ fn main() -> Result<()> {
     };
 
     let mut windows = Vec::new();
-    for inst in &ctx.installs {
+    for inst in ctx.installs.iter() {
         // Reine Datenpartitionen (kein SYSTEM-Hive) liefern keinen Eintrag; hier
         // erscheinen nur echte Windows-Installationen und Fehlerfaelle.
         if inst.hives.system.is_none() && inst.accounts.is_empty() {

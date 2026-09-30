@@ -38,6 +38,10 @@ enum TimeBase {
 pub struct BrowserAnalyzer;
 
 impl Analyzer for BrowserAnalyzer {
+    fn dateibasiert(&self) -> bool {
+        true
+    }
+
     fn domain(&self) -> &str {
         "browser"
     }
@@ -46,8 +50,8 @@ impl Analyzer for BrowserAnalyzer {
         let mut out = Outcome::default();
 
         for v in &ctx.volumes {
-            let mut vol = match NtfsVolume::open(ctx.img, v.target.offset, v.target.size) {
-                Ok(vol) => vol,
+            let (mut vol, _) = match ctx.open_volume(v) {
+                Ok(x) => x,
                 Err(e) => {
                     out.warnings
                         .push(format!("Offset {} nicht lesbar: {e}", v.target.offset));
