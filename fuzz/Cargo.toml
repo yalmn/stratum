@@ -128,3 +128,10 @@ path = "fuzz_targets/ese.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "srum"
+path = "fuzz_targets/srum.rs"
+test = false
+doc = false
+bench = false

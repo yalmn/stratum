@@ -1825,6 +1825,7 @@ dependencies = [
  "sha2",
  "stratum-core",
  "stratum-creds",
+ "stratum-ese",
  "stratum-ntfs",
  "stratum-registry",
  "stratum-search",

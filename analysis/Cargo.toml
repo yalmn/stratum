@@ -9,6 +9,7 @@ description = "Domaenen-Analyzer und gemeinsamer Kontext fuer stratum"
 stratum-core.workspace = true
 stratum-ntfs = { path = "../ntfs" }
 stratum-registry.workspace = true
+stratum-ese.workspace = true
 stratum-search = { path = "../search" }
 stratum-creds = { path = "../creds" }
 serde = { workspace = true }

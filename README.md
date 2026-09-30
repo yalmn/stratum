@@ -22,7 +22,7 @@ Das Werkzeug schliesst an [ForensiCUnlock](https://github.com/yalmn/ForensiCUnlo
 | NTFS | gezielter Zugriff auf einzelne Dateien per Pfad, ohne Einhängen |
 | Registry | eigener regf-Parser, Zugriff per Pfad, Zeitzone und Rechnername |
 | Konten | lokale Windows-Konten mit Benutzername und NT-Hash aus SAM und SYSTEM |
-| Artefakt-Domänen | Autostart, USB, Programmausführung (Amcache, Shimcache, Prefetch, BAM/DAM), Benutzeraktivität (UserAssist, TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs), EventLog, Browser-Verlauf und -Passwörter, LSA/DCC2, DPAPI, Tor, Volume Shadow Copies |
+| Artefakt-Domänen | Autostart, USB, Programmausführung (Amcache, Shimcache, Prefetch, BAM/DAM), Benutzeraktivität (UserAssist, ShellBags, ActivitiesCache, TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs), Ressourcennutzung (SRUM), EventLog, Browser-Verlauf und -Passwörter, LSA/DCC2, DPAPI, Tor, Volume Shadow Copies |
 | Keyword-Suche | Begriffe aus einer Tabelle, in ASCII und UTF-16LE, Zugangsdaten als Paar (Benutzer- und Passwort-Feld in geringem Abstand), validierte v3-Onion-Adressen |
 
 Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro Fall gepflegten und versionierten TOML-Tabelle. So bleibt nachvollziehbar, wonach gesucht wurde, und das Rauschen lässt sich pro Fall über die aktiven Kategorien steuern. Eine Beispieltabelle liegt unter `search/examples/begriffe.toml`.
@@ -356,6 +356,34 @@ Felder übernommen (`displayText`, `appDisplayName`, `activeDurationSeconds`
 und weitere), binäre Inhalte bleiben als Länge und Anfangsbytes erhalten. Ab
 Windows 11 schreibt Windows hier nur noch wenige Aktivitäten.
 
+## SRUM (Ressourcennutzung)
+
+stratum liest jede `SRUDB.dat` auf den NTFS-Volumes, üblicherweise
+`Windows\System32\sru\SRUDB.dat`, mit dem eigenen ESE-Parser. Jeder
+Datensatz der Anbietertabellen (Tabellennamen als GUID) wird ein Fund mit
+allen belegten Spalten, etwa gesendete und empfangene Bytes je Programm oder
+CPU-Zeiten und Datenträgerzugriffe. Die Anbieternamen stammen aus
+`SOFTWARE\Microsoft\Windows NT\CurrentVersion\SRUM\Extensions` des
+untersuchten Systems. `AppId` und `UserId` werden über `SruDbIdMapTable`
+aufgelöst: eine gültige SID als SID, sonst UTF-16-Text (Pfad, Dienst- oder
+Paketname). Die Typnummer des Eintrags bleibt als Zahl erhalten, Einträge ohne
+Inhalt werden als `IdBlob leer` gekennzeichnet.
+
+`TimeStamp` ist ein OLE-Datum und erscheint als `zeitpunkt_utc`. FILETIME-
+Spalten (`EndTime`, `StartTime`, `ConnectStartTime`, `EventTimestamp`) stehen
+zusätzlich als `<Spalte>_utc`. An echten Daten liegen sie höchstens zehn
+Minuten vor diesem Zeitpunkt. SRUM fasst Messwerte zusammen; die Funde
+erscheinen deshalb nicht in der Timeline. Jeder Fund trägt Tabelle, Seite,
+Datei-Offset und, soweit die Datenläufe bekannt sind, den Image-Offset des
+Datensatzes. Textspalten, die laut Katalog nicht UTF-16 sind, aber Nullbytes
+enthalten, bleiben als Hex erhalten, die UTF-16-Lesart steht getrennt
+daneben. Eine unsauber geschlossene Datenbank wird gemeldet; die SRU-Logdateien
+werden nicht eingespielt. Long Values, komprimierte und mehrwertige Spalten
+werden als `nicht_ausgewertet` mit ihren Flags ausgegeben.
+
+Geprüft gegen dissect.esedb an einer Windows-11-SRUDB.dat: 5.064 Datensätze
+in acht Anbietertabellen, alle Ganzzahlwerte identisch.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
@@ -438,7 +466,7 @@ keine Aussage über Schadsoftware; `auffaellig_grund` nennt den Anlass.
 
 Geplant, noch nicht implementiert:
 
-- Weitere Windows-Artefakte: SRUM, ActivitiesCache, WebCache.
+- Weitere Windows-Artefakte: WebCache.
 - Dateibasierte Analyse von Schattenkopien.
 - Linux-Dateisysteme und Serviceanalysen für Web, Datenbanken, Authentifizierung,
   VPN und Gateways.
@@ -507,7 +535,9 @@ Umgebungsvariablen: `STRATUM_USB_REFERENCE_DIR` (SYSTEM-Hive und
 WinScope-Report), `STRATUM_EVTX_REFERENCE` (eine `.evtx`-Datei) und
 `STRATUM_HIVELOG_REFERENCE` (Hives mit ihren `.LOG1`/`.LOG2`) und
 `STRATUM_SHELLITEM_REFERENCE` (LNK-Dateien, RegRipper-Ausgaben
-`shellbags` und `userassist` sowie eine `ActivitiesCache.db`).
+`shellbags` und `userassist` sowie eine `ActivitiesCache.db`) und
+`STRATUM_ESE_REFERENCE` (`SRUDB.dat`, `WebCacheV01.dat` und die
+dissect-Referenzen als JSON).
 
 ## Lizenz
 

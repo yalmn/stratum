@@ -24,7 +24,7 @@ use stratum_analysis::{
     DpapiAnalyzer, DpapiInput, EventLogAnalyzer, FilePersistenceAnalyzer, JumpListAnalyzer,
     KeywordAnalyzer, LnkAnalyzer, LsaAnalyzer, NtfsTarget, PersistenceAnalyzer,
     PowerShellHistoryAnalyzer, PrefetchAnalyzer, ProgramExecutionAnalyzer, RecycleBinAnalyzer,
-    ShellBagsAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
+    ShellBagsAnalyzer, SrumAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
     ZoneIdentifierAnalyzer,
 };
 use stratum_core::{
@@ -503,6 +503,7 @@ fn main() -> Result<()> {
         Box::new(ZoneIdentifierAnalyzer),
         Box::new(ShellBagsAnalyzer),
         Box::new(ActivitiesCacheAnalyzer),
+        Box::new(SrumAnalyzer),
     ];
 
     let mut keyword_bar = None;

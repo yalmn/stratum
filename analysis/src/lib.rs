@@ -37,6 +37,7 @@ mod reg;
 mod runner;
 mod shellbags;
 mod shellitem;
+mod srum;
 mod timeline;
 mod tor;
 mod usb;
@@ -48,6 +49,10 @@ mod zone;
 #[cfg(test)]
 #[path = "../tests/common/builder.rs"]
 mod builder;
+
+#[cfg(test)]
+#[path = "../../ese/tests/common/bau.rs"]
+mod esebau;
 
 pub use activities::ActivitiesCacheAnalyzer;
 pub use browser::BrowserAnalyzer;
@@ -73,6 +78,7 @@ pub use recyclebin::RecycleBinAnalyzer;
 pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
 pub use runner::{run_all, AnalysisResult, AnalyzerStatus};
 pub use shellbags::ShellBagsAnalyzer;
+pub use srum::SrumAnalyzer;
 pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
 pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
@@ -160,6 +166,12 @@ pub mod fuzzing {
     /// Prüft den USN-Scanner mit beliebigen Bytes.
     pub fn usn(data: &[u8]) {
         crate::usn::fuzz(data);
+    }
+
+    /// Prüft den SRUM-Analyzer (ESE-Datenbank, IdMap, Zeiten) mit beliebigen
+    /// Bytes.
+    pub fn srum(data: &[u8]) {
+        crate::srum::fuzz(data);
     }
 
     /// Prüft den `Zone.Identifier`-Parser mit beliebigen Bytes.
