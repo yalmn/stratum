@@ -319,6 +319,19 @@ LinkInfo-Pfad. ANSI-Pfade in LNK-Dateien werden mit der Codepage des
 untersuchten Systems gelesen (`Control\Nls\CodePage\ACP`); unterstützt ist
 Windows-1252, andere Codepages nennt `zielpfad_kodierung`.
 
+## UserAssist
+
+UserAssist-Einträge der NTUSER.DAT nennen Programme und Verknüpfungen, die ein
+Benutzer über die Oberfläche gestartet hat. Die Namen sind ROT13-verschleiert,
+stratum gibt Klartext und Rohnamen aus, dazu Quelle mit GUID und Hive-Offset.
+Im Format ab Windows 7 (Version 5, 72 Byte) stehen `ausfuehrungen`,
+`fokus_anzahl`, `fokus_zeit_ms` und die letzte Ausführung als FILETIME; sie
+erscheint als Ereignis `ausgefuehrt` in der Timeline. Microsoft dokumentiert das
+Format nicht; die Felder sind gegen RegRipper `userassist` auf echten
+Windows-11-Daten geprüft. Andere Versionen und Längen, etwa die
+Sitzungsdaten `UEME_CTLSESSION`, bleiben unausgewertet und tragen
+`daten_status`.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter

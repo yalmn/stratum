@@ -509,20 +509,57 @@ fn userassist(hive: &Hive, user: &str, out: &mut Outcome) {
         // Windows führt mehrere UserAssist-GUIDs; derselbe Wertname kann in
         // mehreren stehen. Erst GUID und Zellen-Offset machen den Fund eindeutig.
         let source = format!("HKCU {user}\\{USERASSIST}\\{}\\Count", guid.name());
+        let version = guid
+            .value("Version")
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_u32());
         for v in values {
             let name = rot13(v.name());
             if name.is_empty() {
                 continue;
             }
-            out.findings.push(
-                Finding::new("useraktivitaet", name, &source)
-                    .with("art", "userassist")
-                    .with("benutzer", user)
-                    .with("wertname_roh", v.name())
-                    .with("hive_offset", v.file_offset().to_string()),
-            );
+            let f = Finding::new("useraktivitaet", name, &source)
+                .with("art", "userassist")
+                .with("benutzer", user)
+                .with("wertname_roh", v.name())
+                .with("hive_offset", v.file_offset().to_string());
+            out.findings.push(userassist_data(f, version, v.data()));
         }
     }
+}
+
+/// Daten eines UserAssist-Werts. Ausgewertet wird nur das Format ab Windows 7
+/// (Version 5, 72 Byte): Ausführungen an 4, Fokus-Anzahl an 8, Fokuszeit in
+/// Millisekunden an 12, letzte Ausführung als FILETIME an 60. Microsoft
+/// dokumentiert das Format nicht; die Felder sind gegen RegRipper `userassist`
+/// auf echten Windows-11-Daten geprüft. Andere Versionen und Längen, etwa
+/// `UEME_CTLSESSION`, bleiben unausgewertet und sind so gekennzeichnet.
+fn userassist_data(f: Finding, version: Option<u32>, data: &[u8]) -> Finding {
+    let u32_at = |o: usize| u32::from_le_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+    if version != Some(5) || data.len() != 72 {
+        let v = version.map_or("unbekannt".to_string(), |v| v.to_string());
+        return f.with(
+            "daten_status",
+            format!("nicht_ausgewertet (Version {v}, {} Byte)", data.len()),
+        );
+    }
+    let mut f = f
+        .with("daten_status", "ausgewertet")
+        .with("ausfuehrungen", u32_at(4).to_string())
+        .with("fokus_anzahl", u32_at(8).to_string())
+        .with("fokus_zeit_ms", u32_at(12).to_string());
+    let ft = u64::from(u32_at(60)) | (u64::from(u32_at(64)) << 32);
+    if ft != 0 {
+        f = f.with("letzte_ausfuehrung_filetime", ft.to_string());
+        if let Some(utc) = stratum_core::time::filetime_to_iso(ft) {
+            f = f.with("letzte_ausfuehrung_utc", utc);
+        }
+        if let Some((unix, _)) = stratum_registry::filetime_to_unix(ft) {
+            f = f.with("letzte_ausfuehrung_unix", unix.to_string());
+        }
+    }
+    f
 }
 
 /// Ausführen-Dialog: `Explorer\RunMRU`. Jeder Wert (ausser `MRUList`) ist ein
@@ -1004,6 +1041,95 @@ mod tests {
         recent_docs(&hive, "alice", &mut out);
         assert!(out.findings.iter().any(|f| f.name == "brief.txt"
             && f.attributes.get("art").map(String::as_str) == Some("recent_doc")));
+    }
+
+    #[test]
+    fn userassist_daten_version_5() {
+        let mut data = vec![0u8; 72];
+        data[4..8].copy_from_slice(&3u32.to_le_bytes());
+        data[8..12].copy_from_slice(&7u32.to_le_bytes());
+        data[12..16].copy_from_slice(&26_875u32.to_le_bytes());
+        // 2021-01-01T00:00:00Z
+        data[60..68].copy_from_slice(&132_539_328_000_000_000u64.to_le_bytes());
+        let f = userassist_data(Finding::new("u", "x", "s"), Some(5), &data);
+        assert_eq!(f.attributes["daten_status"], "ausgewertet");
+        assert_eq!(f.attributes["ausfuehrungen"], "3");
+        assert_eq!(f.attributes["fokus_anzahl"], "7");
+        assert_eq!(f.attributes["fokus_zeit_ms"], "26875");
+        assert_eq!(f.attributes["letzte_ausfuehrung_unix"], "1609459200");
+        assert_eq!(
+            f.attributes["letzte_ausfuehrung_utc"],
+            "2021-01-01T00:00:00.0000000Z"
+        );
+        // Ohne Zeitpunkt kein Zeitfeld.
+        data[60..68].fill(0);
+        let f = userassist_data(Finding::new("u", "x", "s"), Some(5), &data);
+        assert!(!f.attributes.contains_key("letzte_ausfuehrung_unix"));
+        // Andere Version oder Länge: nicht deuten.
+        let f = userassist_data(Finding::new("u", "x", "s"), Some(3), &[0; 16]);
+        assert_eq!(
+            f.attributes["daten_status"],
+            "nicht_ausgewertet (Version 3, 16 Byte)"
+        );
+        let f = userassist_data(Finding::new("u", "x", "s"), Some(5), &[0; 1612]);
+        assert!(!f.attributes.contains_key("ausfuehrungen"));
+    }
+
+    /// Gegen die echte NTUSER.DAT und RegRipper `userassist`: gleiche
+    /// Ausführungszahl und letzte Ausführung für jeden Eintrag mit Zeit, keine
+    /// Zeit bei den Einträgen, die RegRipper ohne Zeit führt.
+    #[test]
+    #[ignore = "benötigt STRATUM_HIVELOG_REFERENCE und STRATUM_SHELLITEM_REFERENCE"]
+    fn userassist_regripper_referenz() {
+        let hives =
+            std::path::PathBuf::from(std::env::var_os("STRATUM_HIVELOG_REFERENCE").unwrap());
+        let items =
+            std::path::PathBuf::from(std::env::var_os("STRATUM_SHELLITEM_REFERENCE").unwrap());
+        let ntuser = std::fs::read(hives.join("ntuser.dat")).unwrap();
+        let hive = Hive::parse(&ntuser).unwrap();
+        let mut out = Outcome::default();
+        userassist(&hive, "ich", &mut out);
+        let rr = std::fs::read_to_string(items.join("regripper_userassist.txt")).unwrap();
+        let (mut guid, mut zeit, mut mit, mut ohne) = (String::new(), None::<String>, 0, 0);
+        for zeile in rr.lines() {
+            let t = zeile.trim();
+            if t.starts_with('{') && t.ends_with('}') && !zeile.starts_with("  ") {
+                guid = t.to_string();
+                zeit = None;
+            } else if t.starts_with("Value names with no time stamps") {
+                zeit = Some(String::new());
+            } else if t.len() == 20 && t.ends_with('Z') && t.as_bytes()[4] == b'-' {
+                zeit = Some(t.trim_end_matches('Z').replace(' ', "T"));
+            } else if zeile.starts_with("  ") {
+                let (name, anzahl) = match t.rsplit_once(" (") {
+                    Some((n, a)) if a.ends_with(')') => (n, Some(a.trim_end_matches(')'))),
+                    _ => (t, None),
+                };
+                let f = out
+                    .findings
+                    .iter()
+                    .find(|f| f.name == name && f.source.contains(&guid))
+                    .unwrap_or_else(|| panic!("{guid} {name} fehlt"));
+                match (zeit.as_deref(), anzahl) {
+                    (Some(z), Some(a)) if !z.is_empty() => {
+                        assert!(
+                            f.attributes["letzte_ausfuehrung_utc"].starts_with(z),
+                            "{name}"
+                        );
+                        assert_eq!(f.attributes["ausfuehrungen"], a, "{name}");
+                        mit += 1;
+                    }
+                    _ => {
+                        assert!(
+                            !f.attributes.contains_key("letzte_ausfuehrung_unix"),
+                            "{name}"
+                        );
+                        ohne += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!((mit, ohne), (12, 12));
     }
 
     #[test]
