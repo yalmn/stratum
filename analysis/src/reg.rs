@@ -899,6 +899,7 @@ mod tests {
             timezone: None,
             accounts: vec![],
             ntuser: vec![],
+            hive_status: Vec::new(),
             warnings: vec![],
         };
         let (_f, img) = dummy_img();
@@ -1073,6 +1074,7 @@ mod tests {
             timezone: None,
             accounts: vec![],
             ntuser: vec![("alice".into(), ntuser)],
+            hive_status: Vec::new(),
             warnings: vec![],
         };
         let (_f, img) = dummy_img();

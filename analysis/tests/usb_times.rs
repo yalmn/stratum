@@ -60,6 +60,7 @@ fn analyze(img: &ImageReader, hive: &[u8], origin: &str) -> Outcome {
         timezone: None,
         accounts: vec![],
         ntuser: vec![],
+        hive_status: Vec::new(),
         warnings: vec![],
     });
     UsbAnalyzer.run(&ctx)

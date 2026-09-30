@@ -184,7 +184,7 @@ pub(crate) fn file_offset(cell: u32) -> u64 {
 
 /// XOR über die ersten 127 Doppelwörter, mit den Sonderfällen aus der
 /// Spezifikation.
-fn checksum(block: &[u8]) -> u32 {
+pub(crate) fn checksum(block: &[u8]) -> u32 {
     let x = block.chunks_exact(4).fold(0u32, |acc, c| {
         acc ^ u32::from_le_bytes([c[0], c[1], c[2], c[3]])
     });

@@ -99,3 +99,10 @@ path = "fuzz_targets/evtx.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "hivelog"
+path = "fuzz_targets/hivelog.rs"
+test = false
+doc = false
+bench = false

@@ -473,6 +473,7 @@ fn main() -> Result<()> {
             computer_name: inst.computer_name.clone(),
             timezone: inst.timezone.clone(),
             accounts: inst.accounts.clone(),
+            hives: inst.hive_status.clone(),
             warnings: inst.warnings.clone(),
         });
     }

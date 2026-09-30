@@ -71,7 +71,7 @@ pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
 pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
 pub use vss::VssAnalyzer;
-pub use windows::{extract_snapshots, Hives, TimeZone, WindowsInstall};
+pub use windows::{extract_snapshots, HiveStatus, Hives, LogStatus, TimeZone, WindowsInstall};
 pub use zone::ZoneIdentifierAnalyzer;
 
 /// Ergebnis eines einzelnen Analyzers.

@@ -18,6 +18,7 @@
 mod error;
 mod hive;
 mod key;
+mod txlog;
 mod value;
 
 #[cfg(test)]
@@ -27,6 +28,9 @@ mod builder;
 pub use error::HiveError;
 pub use hive::{BaseBlock, Hive};
 pub use key::Key;
+pub use txlog::{
+    marvin64, recover, Applied, LogEntry, LogFormat, Recovery, TransactionLog, MAX_HBINS_SIZE,
+};
 pub use value::{Value, ValueType};
 
 /// Wandelt einen Windows-FILETIME (100-ns-Intervalle seit 1601-01-01 UTC)

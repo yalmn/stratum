@@ -13,7 +13,7 @@ use serde::Serialize;
 use stratum_core::ImageReader;
 use stratum_creds::{extract_local_accounts, Account};
 use stratum_ntfs::NtfsVolume;
-use stratum_registry::Hive;
+use stratum_registry::{recover, Hive, LogFormat, Recovery, TransactionLog};
 
 use crate::context::NtfsTarget;
 
@@ -48,6 +48,57 @@ pub struct TimeZone {
     pub active_bias_minutes: Option<i32>,
 }
 
+/// Zustand einer Transaktionslogdatei.
+#[derive(Debug, Clone, Serialize)]
+pub struct LogStatus {
+    /// Dateiname, z. B. `SYSTEM.LOG1`.
+    pub datei: String,
+    /// Größe in Byte.
+    pub groesse: u64,
+    /// `neu`, `alt_nicht_unterstuetzt`, `leer` oder `ungueltig`.
+    pub format: &'static str,
+    /// Lesbare Logeinträge (auch bereits eingespielte).
+    pub eintraege: usize,
+    /// Einträge mit falscher Marvin-Prüfsumme.
+    pub hash_fehler: usize,
+    /// Sequenzbereich der Einträge, z. B. `380..384`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequenzen: Option<String>,
+}
+
+/// Zustand eines Hives nach der Prüfung gegen seine Transaktionslogs.
+#[derive(Debug, Clone, Serialize)]
+pub struct HiveStatus {
+    /// Kurzname, z. B. `SYSTEM` oder `NTUSER.DAT (alice)`.
+    pub name: String,
+    /// Pfad im Volume.
+    pub pfad: String,
+    /// `sauber`, `wiederhergestellt` oder `unsauber_nicht_wiederhergestellt`.
+    pub zustand: &'static str,
+    /// Sequenznummern und Prüfsumme des Kopfs im Image.
+    pub sequenz_primaer: u32,
+    /// Siehe `sequenz_primaer`.
+    pub sequenz_sekundaer: u32,
+    /// Prüfsumme des Kopfs im Image stimmt.
+    pub pruefsumme_ok: bool,
+    /// Eingespielte Abschnitte, z. B. `SYSTEM.LOG1: 390..391`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub eingespielt: Vec<String>,
+    /// Einträge, die neuer als ein sauberer Hive sind; Windows spielt sie
+    /// ebenfalls nicht ein.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub neuere_eintraege_ignoriert: usize,
+    /// Grund, falls ein unsauberer Hive nicht wiederhergestellt werden konnte.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grund: Option<&'static str>,
+    /// Geprüfte Logdateien.
+    pub logs: Vec<LogStatus>,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
 /// Eine Windows-Installation auf einer NTFS-Partition mitsamt Grunddaten.
 pub struct WindowsInstall {
     /// Herkunft des Volumes: `"live"` oder z. B. `"VSS#1 (2021-01-01)"`.
@@ -65,6 +116,8 @@ pub struct WindowsInstall {
     /// NTUSER.DAT je Benutzer (Benutzername, Rohbytes) für HKCU-basierte
     /// Analyzer.
     pub ntuser: Vec<(String, Vec<u8>)>,
+    /// Zustand der geladenen Hives und ihrer Transaktionslogs.
+    pub hive_status: Vec<HiveStatus>,
     /// Auffälligkeiten beim Aufbau.
     pub warnings: Vec<String>,
 }
@@ -86,6 +139,7 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
                 timezone: None,
                 accounts: Vec::new(),
                 ntuser: Vec::new(),
+                hive_status: Vec::new(),
                 warnings: vec![format!(
                     "NTFS-Partition bei Offset {} nicht lesbar: {e}",
                     target.offset
@@ -159,18 +213,23 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
     target: NtfsTarget,
     origin: String,
 ) -> Result<Option<WindowsInstall>, stratum_ntfs::NtfsVolumeError> {
-    let Some(system) = vol.read_file(SYSTEM_PATH)? else {
+    if !vol.exists(SYSTEM_PATH)? {
         return Ok(None);
-    };
+    }
 
     let mut warnings = Vec::new();
-    let hives = Hives {
-        sam: read_optional(vol, SAM_PATH, &mut warnings),
-        software: read_optional(vol, SOFTWARE_PATH, &mut warnings),
-        security: read_optional(vol, SECURITY_PATH, &mut warnings),
-        amcache: read_optional(vol, AMCACHE_PATH, &mut warnings),
-        system: Some(system.data),
+    let mut status = Vec::new();
+    let mut load = |vol: &mut NtfsVolume<R>, path: &str, name: &str| {
+        load_hive(vol, path, name, &mut status, &mut warnings)
     };
+    let hives = Hives {
+        system: load(vol, SYSTEM_PATH, "SYSTEM"),
+        sam: load(vol, SAM_PATH, "SAM"),
+        software: load(vol, SOFTWARE_PATH, "SOFTWARE"),
+        security: load(vol, SECURITY_PATH, "SECURITY"),
+        amcache: load(vol, AMCACHE_PATH, "Amcache.hve"),
+    };
+    let ntuser = read_ntuser_hives(vol, &mut status, &mut warnings);
 
     let mut computer_name = None;
     let mut timezone = None;
@@ -179,8 +238,11 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
     if let Some(system_bytes) = &hives.system {
         match Hive::parse(system_bytes) {
             Ok(system_hive) => {
+                // Der unsaubere Zustand steht bereits im Hive-Status.
                 for w in system_hive.warnings() {
-                    warnings.push(format!("SYSTEM: {w}"));
+                    if !system_hive.base_block().is_dirty() || !w.starts_with("Hive unsauber") {
+                        warnings.push(format!("SYSTEM: {w}"));
+                    }
                 }
                 let cs = current_control_set(&system_hive);
                 computer_name = read_computer_name(&system_hive, &cs);
@@ -206,9 +268,6 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
         }
     }
 
-    // NTUSER.DAT je Benutzer (für HKCU-basierte Analyzer).
-    let ntuser = read_ntuser_hives(vol, &mut warnings);
-
     Ok(Some(WindowsInstall {
         origin,
         target,
@@ -217,6 +276,7 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
         timezone,
         accounts,
         ntuser,
+        hive_status: status,
         warnings,
     }))
 }
@@ -224,6 +284,7 @@ fn install_from_volume<R: std::io::Read + std::io::Seek>(
 /// Liest die NTUSER.DAT jedes Benutzers unter `Users\<name>\NTUSER.DAT`.
 fn read_ntuser_hives<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
+    status: &mut Vec<HiveStatus>,
     warnings: &mut Vec<String>,
 ) -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
@@ -236,10 +297,9 @@ fn read_ntuser_hives<R: std::io::Read + std::io::Seek>(
             continue;
         }
         let path = format!("Users\\{}\\NTUSER.DAT", u.name);
-        match vol.read_file(&path) {
-            Ok(Some(f)) => out.push((u.name.clone(), f.data)),
-            Ok(None) => {}
-            Err(e) => warnings.push(format!("NTUSER.DAT von {} nicht lesbar: {e}", u.name)),
+        let name = format!("NTUSER.DAT ({})", u.name);
+        if let Some(data) = load_hive(vol, &path, &name, status, warnings) {
+            out.push((u.name.clone(), data));
         }
     }
     out
@@ -258,6 +318,120 @@ fn read_optional<R: std::io::Read + std::io::Seek>(
             None
         }
     }
+}
+
+/// Liest einen Hive samt `.LOG1`/`.LOG2`, prüft ihn wie der Windows-Kern beim
+/// Laden und spielt die Logs bei einem unsauberen Hive im Speicher ein. Die
+/// Dateien im Image bleiben unverändert. Der Zustand landet in `status`.
+fn load_hive<R: std::io::Read + std::io::Seek>(
+    vol: &mut NtfsVolume<R>,
+    path: &str,
+    name: &str,
+    status: &mut Vec<HiveStatus>,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<u8>> {
+    let primary = read_optional(vol, path, warnings)?;
+    let rohe: Vec<(String, Vec<u8>)> = [".LOG1", ".LOG2"]
+        .iter()
+        .filter_map(|suffix| {
+            let log_path = format!("{path}{suffix}");
+            read_optional(vol, &log_path, warnings).map(|d| (log_path, d))
+        })
+        .collect();
+    Some(evaluate_hive(primary, &rohe, path, name, status, warnings))
+}
+
+/// Prüft einen gelesenen Hive gegen seine Logs (`rohe`: Pfad und Inhalt) und
+/// liefert die zu verwendenden Bytes, bei Bedarf wiederhergestellt.
+pub(crate) fn evaluate_hive(
+    primary: Vec<u8>,
+    rohe: &[(String, Vec<u8>)],
+    path: &str,
+    name: &str,
+    status: &mut Vec<HiveStatus>,
+    warnings: &mut Vec<String>,
+) -> Vec<u8> {
+    let logs: Vec<TransactionLog<'_>> =
+        rohe.iter().map(|(_, d)| TransactionLog::parse(d)).collect();
+    let datei = |log_path: &str| {
+        log_path
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(log_path)
+            .to_string()
+    };
+    let log_status = rohe
+        .iter()
+        .zip(&logs)
+        .map(|((log_path, data), log)| LogStatus {
+            datei: datei(log_path),
+            groesse: data.len() as u64,
+            format: log.format.name(),
+            eintraege: log.entries.len(),
+            hash_fehler: log.entries.iter().filter(|e| !e.hashes_ok).count(),
+            sequenzen: match (log.entries.first(), log.entries.last()) {
+                (Some(a), Some(b)) => Some(format!("{}..{}", a.sequence, b.sequence)),
+                _ => None,
+            },
+        })
+        .collect();
+    let (seq1, seq2, pruefsumme_ok) = match Hive::parse(&primary) {
+        Ok(h) => {
+            let b = h.base_block();
+            (b.primary_seq, b.secondary_seq, b.checksum_ok())
+        }
+        Err(_) => (0, 0, false),
+    };
+    let mut st = HiveStatus {
+        name: name.to_string(),
+        pfad: path.to_string(),
+        zustand: "sauber",
+        sequenz_primaer: seq1,
+        sequenz_sekundaer: seq2,
+        pruefsumme_ok,
+        eingespielt: Vec::new(),
+        neuere_eintraege_ignoriert: 0,
+        grund: None,
+        logs: log_status,
+    };
+    let data = match recover(&primary, &logs) {
+        Recovery::Clean { ignored } => {
+            st.neuere_eintraege_ignoriert = ignored;
+            primary
+        }
+        Recovery::Recovered {
+            data,
+            applied,
+            base_from_log,
+        } => {
+            st.zustand = "wiederhergestellt";
+            st.eingespielt = applied
+                .iter()
+                .map(|a| format!("{}: {}..{}", datei(&rohe[a.log].0), a.from, a.to))
+                .collect();
+            warnings.push(format!(
+                "{name}: aus Transaktionslogs wiederhergestellt ({}{}); Hive-Offsets in Funden beziehen sich auf den wiederhergestellten Stand",
+                st.eingespielt.join(", "),
+                if base_from_log { ", Kopf aus dem Log" } else { "" }
+            ));
+            data
+        }
+        Recovery::Failed(reason) => {
+            st.zustand = "unsauber_nicht_wiederhergestellt";
+            st.grund = Some(reason);
+            warnings.push(format!(
+                "{name}: unsauber geschrieben (Sequenz {seq1}/{seq2}), Transaktionslogs nicht einspielbar: {reason}"
+            ));
+            primary
+        }
+    };
+    if logs.iter().any(|l| l.format == LogFormat::Alt) && st.zustand != "sauber" {
+        warnings.push(format!(
+            "{name}: Transaktionslog im alten Format (vor Windows 8.1) wird nicht eingespielt"
+        ));
+    }
+    status.push(st);
+    data
 }
 
 /// Bestimmt das aktive ControlSet, z. B. "ControlSet001".
@@ -302,4 +476,142 @@ fn read_timezone(system: &Hive, cs: &str) -> Option<TimeZone> {
         key_name,
         active_bias_minutes,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::builder::HiveBuilder;
+    use stratum_registry::marvin64;
+
+    fn pruefsumme(data: &mut [u8]) {
+        let x = data[..508].chunks_exact(4).fold(0u32, |acc, c| {
+            acc ^ u32::from_le_bytes([c[0], c[1], c[2], c[3]])
+        });
+        let x = match x {
+            0xFFFF_FFFF => 0xFFFF_FFFE,
+            0 => 1,
+            x => x,
+        };
+        data[508..512].copy_from_slice(&x.to_le_bytes());
+    }
+
+    fn hive(primary: u32, secondary: u32) -> Vec<u8> {
+        let mut b = HiveBuilder::new();
+        let root = b.key("ROOT", None, &[]);
+        let mut data = b.finish(root);
+        data[4..8].copy_from_slice(&primary.to_le_bytes());
+        data[8..12].copy_from_slice(&secondary.to_le_bytes());
+        pruefsumme(&mut data);
+        data
+    }
+
+    /// Logdatei mit einem Eintrag, der die erste Hive-Bin-Seite ersetzt.
+    fn log(primary: &[u8], seq: u32, fuell: u8) -> Vec<u8> {
+        let mut log = primary[..512].to_vec();
+        log[4..8].copy_from_slice(&seq.to_le_bytes());
+        log[8..12].copy_from_slice(&seq.to_le_bytes());
+        log[28..32].copy_from_slice(&6u32.to_le_bytes());
+        pruefsumme(&mut log);
+        let hbins = u32::from_le_bytes(primary[40..44].try_into().unwrap());
+        let mut seite = primary[4096..8192].to_vec();
+        seite[100] = fuell;
+        let mut e = vec![0u8; 48 + 4096];
+        e.resize(e.len().div_ceil(512) * 512, 0);
+        let size = e.len() as u32;
+        e[..4].copy_from_slice(b"HvLE");
+        e[4..8].copy_from_slice(&size.to_le_bytes());
+        e[12..16].copy_from_slice(&seq.to_le_bytes());
+        e[16..20].copy_from_slice(&hbins.to_le_bytes());
+        e[20..24].copy_from_slice(&1u32.to_le_bytes());
+        e[44..48].copy_from_slice(&4096u32.to_le_bytes());
+        e[48..48 + 4096].copy_from_slice(&seite);
+        let seed = 0x82EF_4D88_7A4E_55C5;
+        let h1 = marvin64(&e[40..], seed);
+        e[24..32].copy_from_slice(&h1.to_le_bytes());
+        let h2 = marvin64(&e[..32], seed);
+        e[32..40].copy_from_slice(&h2.to_le_bytes());
+        log.extend_from_slice(&e);
+        log
+    }
+
+    fn pruefe(primary: Vec<u8>, logs: &[(String, Vec<u8>)]) -> (Vec<u8>, HiveStatus, Vec<String>) {
+        let (mut status, mut warnings) = (Vec::new(), Vec::new());
+        let data = evaluate_hive(
+            primary,
+            logs,
+            "cfg/SYSTEM",
+            "SYSTEM",
+            &mut status,
+            &mut warnings,
+        );
+        (data, status.pop().unwrap(), warnings)
+    }
+
+    #[test]
+    fn sauberer_hive_ohne_hinweis() {
+        let h = hive(5, 5);
+        let (data, st, warnings) = pruefe(h.clone(), &[("cfg/SYSTEM.LOG1".into(), Vec::new())]);
+        assert_eq!(data, h);
+        assert_eq!(st.zustand, "sauber");
+        assert_eq!(st.logs[0].format, "leer");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn unsauberer_hive_wird_aus_dem_log_wiederhergestellt() {
+        let h = hive(6, 5);
+        let logs = [("cfg/SYSTEM.LOG1".to_string(), log(&h, 5, 0xab))];
+        let (data, st, warnings) = pruefe(h.clone(), &logs);
+        assert_eq!(st.zustand, "wiederhergestellt");
+        assert_eq!(st.eingespielt, ["SYSTEM.LOG1: 5..5"]);
+        assert_eq!(st.logs[0].eintraege, 1);
+        assert_eq!(st.logs[0].hash_fehler, 0);
+        assert_eq!(data[4096 + 100], 0xab);
+        assert!(warnings[0].contains("wiederhergestellt"));
+        // Der wiederhergestellte Hive ist sauber und lesbar.
+        let parsed = Hive::parse(&data).unwrap();
+        assert!(!parsed.base_block().is_dirty());
+        assert!(parsed.root().is_ok());
+    }
+
+    #[test]
+    fn unsauber_ohne_logs_bleibt_mit_hinweis() {
+        let h = hive(6, 5);
+        let (data, st, warnings) = pruefe(h.clone(), &[]);
+        assert_eq!(data, h);
+        assert_eq!(st.zustand, "unsauber_nicht_wiederhergestellt");
+        assert!(st.grund.is_some());
+        assert!(warnings[0].contains("nicht einspielbar"));
+    }
+
+    /// Echter SYSTEM-Hive samt Logs, in den unsauberen Zustand vor dem
+    /// jüngsten Logeintrag versetzt: Das Einspielen muss den Hive-Stand im
+    /// Image exakt ergeben.
+    #[test]
+    #[ignore = "benötigt STRATUM_HIVELOG_REFERENCE mit SYSTEM und SYSTEM.LOG1/LOG2"]
+    fn echte_logs_stellen_system_wieder_her() {
+        let dir = std::path::PathBuf::from(std::env::var_os("STRATUM_HIVELOG_REFERENCE").unwrap());
+        let original = std::fs::read(dir.join("SYSTEM")).unwrap();
+        let logs: Vec<(String, Vec<u8>)> = ["SYSTEM.LOG1", "SYSTEM.LOG2"]
+            .iter()
+            .map(|n| (format!("cfg/{n}"), std::fs::read(dir.join(n)).unwrap()))
+            .collect();
+        let (_, st, warnings) = pruefe(original.clone(), &logs);
+        assert_eq!(st.zustand, "sauber");
+        assert!(warnings.is_empty());
+
+        let letzte = TransactionLog::parse(&logs[0].1).entries[0].sequence;
+        let mut dirty = original.clone();
+        dirty[8..12].copy_from_slice(&letzte.to_le_bytes());
+        pruefsumme(&mut dirty);
+        let (data, st, _) = pruefe(dirty, &logs);
+        assert_eq!(st.zustand, "wiederhergestellt");
+        assert_eq!(st.eingespielt, [format!("SYSTEM.LOG1: {letzte}..{letzte}")]);
+        assert_eq!(data[4096..], original[4096..]);
+        let hive = Hive::parse(&data).unwrap();
+        let cs = current_control_set(&hive);
+        assert!(read_computer_name(&hive, &cs).is_some());
+        eprintln!("{st:?}");
+    }
 }

@@ -263,6 +263,33 @@ stratum merged.dd -o report.json --bdp bdp.info -k eigene.toml
 
 Die eingebaute Liste ist ein neutraler Ausgangspunkt, kein fertiger Fallkatalog. Pro Fall lässt sich abschalten, was nicht passt (`aktiv = false`), und mit `--no-default-keywords` deaktiviert man sie ganz. Sensible oder fallbezogene Wortlisten gehören nicht in dieses Repository, sondern in die eigene Tabelle, die getrennt geführt wird. Name und Version der verwendeten Tabellen stehen im Report, damit nachvollziehbar bleibt, wonach gesucht wurde.
 
+## Registry-Transaktionslogs
+
+Seit Windows 8.1 schreibt Windows Registry-Änderungen zuerst in die
+Transaktionslogs (`.LOG1`, `.LOG2`) und erst später, bis zu einer Stunde danach,
+in den Hive. Wird ein laufendes oder abgestürztes System gesichert, stehen die
+jüngsten Änderungen deshalb nur in den Logs. stratum prüft jeden geladenen Hive
+(SYSTEM, SAM, SOFTWARE, SECURITY, Amcache, NTUSER.DAT) wie der Windows-Kern:
+Nur wenn der Kopf eine falsche Prüfsumme hat oder die Sequenznummern abweichen,
+werden die Logeinträge im Speicher eingespielt. Das Image bleibt unverändert.
+
+Eingespielt werden fortlaufende Einträge ab der Sequenznummer im Kopf der
+Logdatei, beide Logs in Sequenzreihenfolge; eine Lücke, eine falsche
+Marvin32-Prüfsumme oder eine unplausible Größe beendet das Einspielen. Grundlage
+ist die Spezifikation von Maxim Suhanov und für Marvin32 der Referenzcode von
+Microsoft. Gegen echte Windows-11-Logs geprüft: alle Prüfsummen stimmen, und
+das Einspielen des jüngsten, bereits übernommenen Eintrags ergibt exakt den
+Hive im Image.
+
+Unter `windows[].hives` steht je Hive der Zustand (`sauber`, `wiederhergestellt`,
+`unsauber_nicht_wiederhergestellt` mit Grund), die eingespielten Sequenzbereiche
+und je Logdatei Format, Zahl der Einträge, Prüfsummenfehler und
+Sequenzbereich. `neuere_eintraege_ignoriert` zählt Einträge, die neuer als ein
+sauberer Hive sind; Windows spielt sie ebenfalls nicht ein. Nach einer
+Wiederherstellung beziehen sich Hive-Offsets in Funden auf den
+wiederhergestellten Stand, der Report weist darauf hin. Das alte Logformat
+(bis Windows 8) wird erkannt, aber nicht eingespielt.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
@@ -407,6 +434,12 @@ cargo test -p stratum-analysis --test powershell_ntfs -- --ignored
 
 Der zusätzliche Mini-Image-Test prüft read-only Zugriff, Dateipositionen und
 Serialisierung ohne externe Werkzeuge. Das Fuzz-Target heißt `powershell`.
+
+Einige Tests prüfen gegen echte Daten, die nicht im Repository liegen. Sie
+laufen mit `--ignored` und brauchen Verzeichnisse beziehungsweise Dateien über
+Umgebungsvariablen: `STRATUM_USB_REFERENCE_DIR` (SYSTEM-Hive und
+WinScope-Report), `STRATUM_EVTX_REFERENCE` (eine `.evtx`-Datei) und
+`STRATUM_HIVELOG_REFERENCE` (Hives mit ihren `.LOG1`/`.LOG2`).
 
 ## Lizenz
 

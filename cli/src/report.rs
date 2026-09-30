@@ -6,8 +6,8 @@
 use serde::Serialize;
 
 use stratum_analysis::{
-    AnalyzerStatus, CatalogSummary, Finding, MftTimelineSummary, TimeZone, TimelineEntry,
-    UsnJournalSummary,
+    AnalyzerStatus, CatalogSummary, Finding, HiveStatus, MftTimelineSummary, TimeZone,
+    TimelineEntry, UsnJournalSummary,
 };
 use stratum_core::{ImageHashes, PartitionTable};
 use stratum_creds::Account;
@@ -161,6 +161,8 @@ pub struct WindowsReport {
     pub timezone: Option<TimeZone>,
     /// Lokale Konten mit NT-Hash.
     pub accounts: Vec<Account>,
+    /// Zustand der Hives und ihrer Transaktionslogs.
+    pub hives: Vec<HiveStatus>,
     /// Hinweise zu dieser Installation.
     pub warnings: Vec<String>,
 }
