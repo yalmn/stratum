@@ -53,8 +53,14 @@ fn automatic<R: std::io::Read + std::io::Seek>(
         .cloned()
         .collect();
     for e in dateien {
-        let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
-            continue;
+        let f = match vol.read_file_by_record(e.mft_record, &e.path) {
+            Ok(Some(f)) => f,
+            Ok(None) => continue,
+            Err(error) => {
+                out.warnings
+                    .push(format!("{}: nicht lesbar: {error}", e.path));
+                continue;
+            }
         };
         let benutzer = benutzer_aus_pfad(&e.path);
         let appid = appid_aus_pfad(&e.path);
@@ -86,15 +92,24 @@ fn custom<R: std::io::Read + std::io::Seek>(
         .cloned()
         .collect();
     for e in dateien {
-        let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
-            continue;
+        let f = match vol.read_file_by_record(e.mft_record, &e.path) {
+            Ok(Some(f)) => f,
+            Ok(None) => continue,
+            Err(error) => {
+                out.warnings
+                    .push(format!("{}: nicht lesbar: {error}", e.path));
+                continue;
+            }
         };
         let benutzer = benutzer_aus_pfad(&e.path);
         let appid = appid_aus_pfad(&e.path);
-        for lnk in split_embedded_lnks(&f.data) {
+        for (offset, lnk) in split_embedded_lnks(&f.data) {
             if let Some(link) = parse_lnk(lnk) {
-                out.findings
-                    .push(lnk_finding(&link, &e.path, &benutzer, &appid, None));
+                out.findings.push(
+                    lnk_finding(&link, &e.path, &benutzer, &appid, None)
+                        .with("datei_offset", offset.to_string())
+                        .with("mft_record", e.mft_record.to_string()),
+                );
             }
         }
     }
@@ -154,7 +169,8 @@ fn appid_aus_pfad(path: &str) -> String {
 
 /// Zerlegt eine CustomDestinations-Datei in ihre eingebetteten LNK-Strukturen,
 /// indem nach der Shell-Link-Signatur (HeaderSize 0x4C + Link-CLSID) gesucht wird.
-fn split_embedded_lnks(data: &[u8]) -> Vec<&[u8]> {
+/// Liefert je Struktur ihren Offset in der Datei mit.
+fn split_embedded_lnks(data: &[u8]) -> Vec<(usize, &[u8])> {
     const SIG: [u8; 20] = [
         0x4c, 0, 0, 0, 0x01, 0x14, 0x02, 0, 0, 0, 0, 0, 0xc0, 0, 0, 0, 0, 0, 0, 0x46,
     ];
@@ -171,7 +187,7 @@ fn split_embedded_lnks(data: &[u8]) -> Vec<&[u8]> {
     let mut out = Vec::new();
     for (idx, &s) in starts.iter().enumerate() {
         let end = starts.get(idx + 1).copied().unwrap_or(data.len());
-        out.push(&data[s..end]);
+        out.push((s, &data[s..end]));
     }
     out
 }
@@ -385,7 +401,8 @@ mod tests {
         data.extend_from_slice(&sig);
         let parts = split_embedded_lnks(&data);
         assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0].len(), 76);
+        assert_eq!(parts[0].1.len(), 76);
+        assert_eq!((parts[0].0, parts[1].0), (8, 84));
     }
 
     #[test]

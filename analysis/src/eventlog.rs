@@ -13,7 +13,7 @@ use std::io::Cursor;
 use evtx::EvtxParser;
 use serde_json::Value;
 
-use stratum_ntfs::{DataStreamLayout, NtfsVolume};
+use stratum_ntfs::{DataStreamLayout, NtfsVolume, NtfsVolumeError};
 
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
@@ -59,15 +59,26 @@ impl Analyzer for EventLogAnalyzer {
                     }
                 };
                 // Ablage im Image, damit jeder Datensatz einen physischen Offset
-                // erhält. Fehlt sie (etwa bei Kompression), bleibt es beim
-                // Datei-Offset.
-                let layout = vol.data_stream_layout(&e.path, "").ok().flatten();
+                // erhält. In NTFS-komprimierten Dateien liegen nur gepackte
+                // Bytes, ein Datensatz hat dort keine einzelne Image-Stelle.
+                let (layout, ohne_image) = match vol.data_stream_layout(&e.path, "") {
+                    Ok(layout) => (layout, "ablage_unbekannt"),
+                    Err(NtfsVolumeError::CompressedDataStream { .. }) => {
+                        (None, "datei_ntfs_komprimiert")
+                    }
+                    Err(error) => {
+                        out.warnings
+                            .push(format!("{}: Ablage nicht bestimmbar: {error}", e.path));
+                        (None, "ablage_nicht_lesbar")
+                    }
+                };
                 let quelle = LogSource {
                     path: &e.path,
                     volume_offset: v.target.offset,
                     mft_record: e.mft_record,
                     mft_record_offset: file.meta.record_offset,
                     layout: layout.as_ref(),
+                    ohne_image,
                 };
                 parse_log(&file.data, &quelle, &mut out);
             }
@@ -83,6 +94,8 @@ struct LogSource<'a> {
     mft_record: u64,
     mft_record_offset: Option<u64>,
     layout: Option<&'a DataStreamLayout>,
+    /// Grund, falls ein Datei-Offset keinem Image-Offset zugeordnet wird.
+    ohne_image: &'static str,
 }
 
 impl LogSource<'_> {
@@ -144,8 +157,9 @@ fn parse_log(data: &[u8], quelle: &LogSource<'_>, out: &mut Outcome) {
         match (index.get(&record.event_record_id), filetime) {
             (Some(Some((offset, ft))), Some(parsed)) if *ft == parsed => {
                 f = f.with("datei_offset", offset.to_string());
-                if let Some(image) = quelle.image_offset(*offset) {
-                    f = f.at(image);
+                match quelle.image_offset(*offset) {
+                    Some(image) => f = f.at(image),
+                    None => f = f.with("image_offset_fehlt", quelle.ohne_image),
                 }
             }
             _ => ohne_offset += 1,

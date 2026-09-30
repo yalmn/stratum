@@ -226,8 +226,12 @@ FILETIME sowie den Anker der Protokolldatei (Volume-Offset, MFT-Nummer, Offset
 des MFT-Datensatzes). `datei_offset` nennt den Beginn des Datensatzes in der
 Datei und wird nur gesetzt, wenn EventRecordID und Zeitstempel im Datensatzkopf
 genau zu dem passen, was der Parser gelesen hat; der Offset des Fundes ist dann
-die zugehörige Stelle im Image. Ereignisse ohne bestätigten Offset und nicht
-lesbare Protokolle erscheinen als Warnung.
+die zugehörige Stelle im Image. Windows legt die Protokolle häufig
+NTFS-komprimiert ab. Dort stehen im Image nur gepackte Bytes, ein Datensatz hat
+keine einzelne Image-Stelle; der Fund nennt dann `image_offset_fehlt =
+datei_ntfs_komprimiert` und bleibt über Datei-Offset und MFT-Datensatz
+nachvollziehbar. Ereignisse ohne bestätigten Offset und nicht lesbare
+Protokolle erscheinen als Warnung.
 
 ### Browser-Passwörter (DPAPI)
 

@@ -506,15 +506,20 @@ fn userassist(hive: &Hive, user: &str, out: &mut Outcome) {
             continue;
         };
         let Ok(values) = count.values() else { continue };
+        // Windows führt mehrere UserAssist-GUIDs; derselbe Wertname kann in
+        // mehreren stehen. Erst GUID und Zellen-Offset machen den Fund eindeutig.
+        let source = format!("HKCU {user}\\{USERASSIST}\\{}\\Count", guid.name());
         for v in values {
             let name = rot13(v.name());
             if name.is_empty() {
                 continue;
             }
             out.findings.push(
-                Finding::new("useraktivitaet", name, format!("HKCU {user}\\UserAssist"))
+                Finding::new("useraktivitaet", name, &source)
                     .with("art", "userassist")
-                    .with("benutzer", user),
+                    .with("benutzer", user)
+                    .with("wertname_roh", v.name())
+                    .with("hive_offset", v.file_offset().to_string()),
             );
         }
     }
@@ -996,6 +1001,49 @@ mod tests {
         recent_docs(&hive, "alice", &mut out);
         assert!(out.findings.iter().any(|f| f.name == "brief.txt"
             && f.attributes.get("art").map(String::as_str) == Some("recent_doc")));
+    }
+
+    #[test]
+    fn userassist_unterscheidet_guids() {
+        let mut b = HiveBuilder::new();
+        // ROT13 von UEME_CTLSESSION, in beiden GUIDs vorhanden.
+        let mut guids = Vec::new();
+        for guid in [
+            "{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}",
+            "{F4E57C4B-2036-45F0-A9AB-443BCFE33D9F}",
+        ] {
+            let wert = b.vk("HRZR_PGYFRFFVBA", 3, &[0u8; 72]);
+            let count = b.key("Count", None, &[wert]);
+            let list = b.lh(&[count]);
+            guids.push(b.key_with_list(guid, list, 1, &[]));
+        }
+        let ua_list = b.lh(&guids);
+        let mut key = b.key_with_list("UserAssist", ua_list, 2, &[]);
+        for name in [
+            "Explorer",
+            "CurrentVersion",
+            "Windows",
+            "Microsoft",
+            "Software",
+            "ROOT",
+        ] {
+            let list = b.lh(&[key]);
+            key = b.key_with_list(name, list, 1, &[]);
+        }
+        let ntuser = b.finish(key);
+
+        let hive = Hive::parse(&ntuser).unwrap();
+        let mut out = Outcome::default();
+        userassist(&hive, "alice", &mut out);
+        assert_eq!(out.findings.len(), 2);
+        let (a, c) = (&out.findings[0], &out.findings[1]);
+        assert_eq!(a.name, "UEME_CTLSESSION");
+        assert_eq!(a.attributes["wertname_roh"], "HRZR_PGYFRFFVBA");
+        assert_ne!(a.source, c.source);
+        assert!(a
+            .source
+            .contains("{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}\\Count"));
+        assert_ne!(a.attributes["hive_offset"], c.attributes["hive_offset"]);
     }
 
     #[test]
