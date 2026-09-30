@@ -18,6 +18,7 @@ mod browser;
 mod catalog;
 mod context;
 mod dpapi;
+mod esewerte;
 mod eventlog;
 mod filepersist;
 mod finding;
@@ -43,6 +44,7 @@ mod tor;
 mod usb;
 mod usn;
 mod vss;
+mod webcache;
 mod windows;
 mod zone;
 
@@ -83,6 +85,7 @@ pub use timeline::{build as build_timeline, TimelineEntry};
 pub use tor::TorAnalyzer;
 pub use usn::{write_usn_journal, UsnJournalSummary, USN_JOURNAL_SOURCE};
 pub use vss::VssAnalyzer;
+pub use webcache::WebCacheAnalyzer;
 pub use windows::{extract_snapshots, HiveStatus, Hives, LogStatus, TimeZone, WindowsInstall};
 pub use zone::ZoneIdentifierAnalyzer;
 
@@ -172,6 +175,11 @@ pub mod fuzzing {
     /// Bytes.
     pub fn srum(data: &[u8]) {
         crate::srum::fuzz(data);
+    }
+
+    /// Prüft den WebCache-Analyzer mit beliebigen Bytes.
+    pub fn webcache(data: &[u8]) {
+        crate::webcache::fuzz(data);
     }
 
     /// Prüft den `Zone.Identifier`-Parser mit beliebigen Bytes.

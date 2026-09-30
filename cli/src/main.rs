@@ -25,7 +25,7 @@ use stratum_analysis::{
     KeywordAnalyzer, LnkAnalyzer, LsaAnalyzer, NtfsTarget, PersistenceAnalyzer,
     PowerShellHistoryAnalyzer, PrefetchAnalyzer, ProgramExecutionAnalyzer, RecycleBinAnalyzer,
     ShellBagsAnalyzer, SrumAnalyzer, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer, VssAnalyzer,
-    ZoneIdentifierAnalyzer,
+    WebCacheAnalyzer, ZoneIdentifierAnalyzer,
 };
 use stratum_core::{
     hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
@@ -504,6 +504,7 @@ fn main() -> Result<()> {
         Box::new(ShellBagsAnalyzer),
         Box::new(ActivitiesCacheAnalyzer),
         Box::new(SrumAnalyzer),
+        Box::new(WebCacheAnalyzer),
     ];
 
     let mut keyword_bar = None;

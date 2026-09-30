@@ -21,9 +21,10 @@ use std::collections::HashMap;
 
 use stratum_core::time::filetime_to_iso;
 use stratum_ese::{Database, Value};
-use stratum_ntfs::{DataStreamLayout, NtfsVolume, NtfsVolumeError};
+use stratum_ntfs::NtfsVolume;
 use stratum_registry::Hive;
 
+use crate::esewerte::{self, hex, render, utf16, Quelle};
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
 
 const DB_NAME: &str = "SRUDB.dat";
@@ -66,27 +67,9 @@ impl Analyzer for SrumAnalyzer {
                 .map(|h| provider_names(&h))
                 .unwrap_or_default();
             for entry in dateien {
-                let data = match vol.read_file_by_record(entry.mft_record, &entry.path) {
-                    Ok(Some(f)) => f.data,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        out.warnings
-                            .push(format!("{}: nicht lesbar: {e}", entry.path));
-                        continue;
-                    }
-                };
-                // Ablage im Image, damit jeder Datensatz einen physischen
-                // Offset erhält (wie bei den Ereignisprotokollen).
-                let (layout, ohne_image) = match vol.data_stream_layout(&entry.path, "") {
-                    Ok(layout) => (layout, "ablage_unbekannt"),
-                    Err(NtfsVolumeError::CompressedDataStream { .. }) => {
-                        (None, "datei_ntfs_komprimiert")
-                    }
-                    Err(e) => {
-                        out.warnings
-                            .push(format!("{}: Ablage nicht bestimmbar: {e}", entry.path));
-                        (None, "ablage_nicht_lesbar")
-                    }
+                let Some((data, layout, ohne_image)) = esewerte::lesen(&mut vol, &entry, &mut out)
+                else {
+                    continue;
                 };
                 let quelle = Quelle {
                     pfad: &entry.path,
@@ -99,25 +82,6 @@ impl Analyzer for SrumAnalyzer {
             }
         }
         out
-    }
-}
-
-struct Quelle<'a> {
-    pfad: &'a str,
-    mft_record: u64,
-    volume_offset: u64,
-    layout: Option<&'a DataStreamLayout>,
-    /// Grund, falls ein Datei-Offset keinem Image-Offset zugeordnet wird.
-    ohne_image: &'static str,
-}
-
-impl Quelle<'_> {
-    /// Physischer Image-Offset zu einem Offset in der Datei.
-    fn image_offset(&self, datei_offset: u64) -> Option<u64> {
-        self.layout?.runs.iter().find_map(|run| {
-            let rel = datei_offset.checked_sub(run.logical_offset)?;
-            (rel < run.length).then_some(run.image_offset? + rel)
-        })
     }
 }
 
@@ -160,15 +124,7 @@ fn analyze(
             return;
         }
     };
-    for w in db.warnings() {
-        out.warnings.push(format!("{}: {w}", quelle.pfad));
-    }
-    if db.header().state == 2 {
-        out.warnings.push(format!(
-            "{}: Datenbank unsauber geschlossen; Änderungen aus den SRU-Logdateien sind nicht eingespielt",
-            quelle.pfad
-        ));
-    }
+    esewerte::zustand_melden(&db, quelle.pfad, out);
     let ids = id_map(&db);
     let mut summary = Finding::new("srum", "SRUM-Datenbank geprüft", quelle.pfad)
         .with("art", "srum_db")
@@ -201,22 +157,14 @@ fn analyze(
                 ));
                 return;
             }
-            let mut f = Finding::new("srum", "", quelle.pfad)
-                .with("art", "srum")
-                .with("tabelle", &table.name)
-                .with("seite", rec.node.page.to_string())
-                .with("datei_offset", rec.node.file_offset.to_string())
-                .with("mft_record", quelle.mft_record.to_string())
-                .with("volume_offset", quelle.volume_offset.to_string());
-            match quelle.image_offset(rec.node.file_offset) {
-                Some(image) => f = f.at(image),
-                None => f = f.with("image_offset_fehlt", quelle.ohne_image),
-            }
+            let mut f = quelle.herkunft(
+                Finding::new("srum", "", quelle.pfad)
+                    .with("art", "srum")
+                    .with("tabelle", &table.name),
+                &rec.node,
+            );
             if let Some(n) = name {
                 f = f.with("anbieter", n);
-            }
-            if rec.node.is_deleted() {
-                f = f.with("geloescht_markiert", "ja");
             }
             let mut titel = None;
             for c in &table.columns {
@@ -250,37 +198,8 @@ fn analyze(
                         Some(iso) => f = f.with("zeitpunkt_utc", iso),
                         None => f = f.with("TimeStamp_roh", render(&v)),
                     },
-                    n if FILETIME_SPALTEN.contains(&n) => {
-                        f = f.with(n, render(&v));
-                        if let Value::I64(ft) = v {
-                            if let Some(iso) = u64::try_from(ft).ok().and_then(filetime_to_iso) {
-                                f = f.with(format!("{n}_utc"), iso);
-                            }
-                        }
-                    }
-                    _ => {
-                        if let (Value::Text(t), Some((raw, _))) = (&v, rec.raw(c)) {
-                            if c.codepage != 1200 && t.contains('\0') {
-                                // Katalog nennt keine UTF-16-Codepage, der Inhalt
-                                // enthält aber Nullbytes: roh ausgeben, Deutung
-                                // als UTF-16 getrennt und gekennzeichnet.
-                                f = f
-                                    .with(&c.name, hex(raw))
-                                    .with(
-                                        format!("{}_hinweis", c.name),
-                                        format!(
-                                            "Codepage laut Katalog {}, Inhalt mit Nullbytes; Wert als Hex",
-                                            c.codepage
-                                        ),
-                                    );
-                                if let Some(u) = utf16(raw) {
-                                    f = f.with(format!("{}_als_utf16", c.name), u);
-                                }
-                                continue;
-                            }
-                        }
-                        f = f.with(&c.name, render(&v));
-                    }
+                    n if FILETIME_SPALTEN.contains(&n) => f = esewerte::filetime(f, n, &v),
+                    _ => f = esewerte::spalte(f, rec, c, &v),
                 }
             }
             f.name = titel.unwrap_or_else(|| name.cloned().unwrap_or_else(|| table.name.clone()));
@@ -362,54 +281,9 @@ fn ole_iso(v: &Value) -> Option<String> {
     filetime_to_iso(ole_filetime(*raw)?)
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
-fn utf16(b: &[u8]) -> Option<String> {
-    if !b.len().is_multiple_of(2) {
-        return None;
-    }
-    let units: Vec<u16> = b
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
-    String::from_utf16(&units)
-        .ok()
-        .map(|s| s.trim_end_matches('\0').to_string())
-}
-
-fn render(v: &Value) -> String {
-    match v {
-        Value::Bit(b) => b.to_string(),
-        Value::U8(x) => x.to_string(),
-        Value::I16(x) => x.to_string(),
-        Value::U16(x) => x.to_string(),
-        Value::I32(x) => x.to_string(),
-        Value::U32(x) => x.to_string(),
-        Value::I64(x) => x.to_string(),
-        Value::F32(x) => x.to_string(),
-        Value::F64(x) => x.to_string(),
-        Value::DateTime(x) => x.to_string(),
-        Value::Guid(g) => g.clone(),
-        Value::Text(t) => t.clone(),
-        Value::Binary(b) => hex(b),
-        Value::Special { flags, data } => format!(
-            "nicht_ausgewertet(flags {flags:#04x}): {}",
-            hex(&data[..data.len().min(64)])
-        ),
-    }
-}
-
 /// Einstieg für das Fuzz-Target: beliebige Bytes als SRUDB.dat.
 pub(crate) fn fuzz(data: &[u8]) {
-    let quelle = Quelle {
-        pfad: DB_NAME,
-        mft_record: 0,
-        volume_offset: 0,
-        layout: None,
-        ohne_image: "fuzz",
-    };
+    let quelle = Quelle::ohne_ablage(DB_NAME, "fuzz");
     analyze(data, &quelle, &HashMap::new(), &mut Outcome::default());
 }
 

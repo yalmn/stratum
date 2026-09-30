@@ -22,7 +22,7 @@ Das Werkzeug schliesst an [ForensiCUnlock](https://github.com/yalmn/ForensiCUnlo
 | NTFS | gezielter Zugriff auf einzelne Dateien per Pfad, ohne Einhängen |
 | Registry | eigener regf-Parser, Zugriff per Pfad, Zeitzone und Rechnername |
 | Konten | lokale Windows-Konten mit Benutzername und NT-Hash aus SAM und SYSTEM |
-| Artefakt-Domänen | Autostart, USB, Programmausführung (Amcache, Shimcache, Prefetch, BAM/DAM), Benutzeraktivität (UserAssist, ShellBags, ActivitiesCache, TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs), Ressourcennutzung (SRUM), EventLog, Browser-Verlauf und -Passwörter, LSA/DCC2, DPAPI, Tor, Volume Shadow Copies |
+| Artefakt-Domänen | Autostart, USB, Programmausführung (Amcache, Shimcache, Prefetch, BAM/DAM), Benutzeraktivität (UserAssist, ShellBags, ActivitiesCache, TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs), Ressourcennutzung (SRUM), EventLog, Browser-Verlauf (auch WebCache) und -Passwörter, LSA/DCC2, DPAPI, Tor, Volume Shadow Copies |
 | Keyword-Suche | Begriffe aus einer Tabelle, in ASCII und UTF-16LE, Zugangsdaten als Paar (Benutzer- und Passwort-Feld in geringem Abstand), validierte v3-Onion-Adressen |
 
 Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro Fall gepflegten und versionierten TOML-Tabelle. So bleibt nachvollziehbar, wonach gesucht wurde, und das Rauschen lässt sich pro Fall über die aktiven Kategorien steuern. Eine Beispieltabelle liegt unter `search/examples/begriffe.toml`.
@@ -384,6 +384,39 @@ werden als `nicht_ausgewertet` mit ihren Flags ausgegeben.
 Geprüft gegen dissect.esedb an einer Windows-11-SRUDB.dat: 5.064 Datensätze
 in acht Anbietertabellen, alle Ganzzahlwerte identisch.
 
+## WebCache (WinINet)
+
+Je Benutzer liest stratum `WebCacheV01.dat` unter
+`AppData\Local\Microsoft\Windows\WebCache\` mit dem eigenen ESE-Parser. Die
+Datenbank sammelt Verlauf, Cache, Cookies und weitere Einträge der
+WinINet-Komponente, die Internet Explorer, Edge Legacy, der Explorer und
+manche Apps nutzen. Jeder Datensatz jeder Tabelle außer dem Systemkatalog
+wird ein Fund mit allen belegten Spalten. Einträge der Container
+(`Container_<Id>`) erhalten Name, Verzeichnis und Partition ihres Containers
+aus der Tabelle `Containers`.
+
+Verlaufs-URLs der Formen `Visited: <Konto>@<URL>` und
+`:<Zeitraum>: <Konto>@<URL>` (Tagesverlauf `MSHist...`) werden in Konto, URL
+und Zeitraum zerlegt. Für Cache-Einträge setzt stratum den Pfad der
+Cache-Datei aus Containerverzeichnis, Unterordner und `Filename` zusammen
+und sucht ihn im Volume (`cache_datei_im_volume`, MFT-Nummer). Der
+Unterordner ergibt sich aus `SecureDirectory`, einem bei 1 beginnenden Index
+in `SecureDirectories` (Namen zu je 8 Zeichen); geprüft an echten Daten, die
+Dateien lagen dort mit der in `FileSize` genannten Größe.
+
+Zeitspalten sind FILETIME in UTC und stehen zusätzlich als `<Spalte>_utc`.
+Ausnahme: `ModifiedTime` in `MSHist`-Containern lag in den Testdaten genau
+um den UTC-Abstand der Systemzeitzone nach dem Besuch. Sie wird deshalb als
+`ModifiedTime_ortszeit` ohne Umrechnung und mit Hinweis ausgegeben. Der
+Höchstwert (kein Ablauf) wird nicht als Datum dargestellt. In die Timeline
+gehen `AccessedTime` und `CreationTime` der Containereinträge. Herkunft,
+Umgang mit unsauber geschlossenen Datenbanken und nicht ausgewerteten Werten
+wie bei SRUM; die Übersicht zählt nicht ausgewertete Werte
+(`nicht_ausgewertete_werte`).
+
+Geprüft gegen dissect.esedb an einer Windows-11-WebCacheV01.dat: 35
+Datensätze, alle Ganzzahlwerte identisch.
+
 ## USB-Zeitpunkte
 
 USBSTOR-Geräte erhalten Zeitpunkte aus den Standardwerten unter
@@ -466,7 +499,6 @@ keine Aussage über Schadsoftware; `auffaellig_grund` nennt den Anlass.
 
 Geplant, noch nicht implementiert:
 
-- Weitere Windows-Artefakte: WebCache.
 - Dateibasierte Analyse von Schattenkopien.
 - Linux-Dateisysteme und Serviceanalysen für Web, Datenbanken, Authentifizierung,
   VPN und Gateways.
