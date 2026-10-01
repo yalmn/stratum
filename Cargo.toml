@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-# stratum_backend: Analyse-Kern und CLI. Weitere Teile (stratum_model,
-# stratum_frontend, ...) kommen als eigene Ordner daneben.
+# stratum_backend: Analyse-Engine und CLI; stratum_model: gemeinsames
+# Datenmodell. Weitere Teile (stratum_frontend, ...) kommen daneben.
 members = [
     "stratum_backend/core",
     "stratum_backend/mmap",
@@ -14,6 +14,7 @@ members = [
     "stratum_backend/creds",
     "stratum_backend/analysis",
     "stratum_backend/cli",
+    "stratum_model",
 ]
 exclude = ["stratum_backend/fuzz"]
 

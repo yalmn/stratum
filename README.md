@@ -30,9 +30,9 @@ Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro F
 
 ## Aufbau
 
-Das Projekt ist in Teile gegliedert. Heute gibt es `stratum_backend/` mit
-Analyse-Kern und CLI; ein Datenmodell (`stratum_model/`) und eine Oberfläche
-(`stratum_frontend/`) folgen. Das Cargo-Workspace liegt im
+Das Projekt ist in Teile gegliedert: `stratum_backend/` mit Analyse-Engine
+und CLI, `stratum_model/` mit dem gemeinsamen Datenmodell; eine Oberfläche
+(`stratum_frontend/`) folgt. Das Cargo-Workspace liegt im
 Wurzelverzeichnis, Build-Befehle und `target/` bleiben dort.
 
 ```
@@ -51,6 +51,9 @@ stratum_backend/
   fuzz/      cargo-fuzz-Targets
   begriffe/  Begriffslisten für die Keyword-Suche
   xsoar/     Vorlage für Cortex XSOAR
+stratum_model/
+  src/       Fall, Evidence, Artefakte, Observationen, Entitäten,
+             Ereignisse, Beziehungen, Findings, Herkunft, Zeitangaben, IDs
 ```
 
 Neue Artefakt-Analysen werden als eigene Implementierung des `Analyzer`-Traits ergänzt, der Kern bleibt unberührt.
@@ -428,6 +431,33 @@ wie bei SRUM; die Übersicht zählt nicht ausgewertete Werte
 
 Geprüft gegen dissect.esedb an einer Windows-11-WebCacheV01.dat: 35
 Datensätze, alle Ganzzahlwerte identisch.
+
+## Datenmodell
+
+`stratum_model` beschreibt den Weg von der Evidence zur Bewertung: Evidence,
+Artefakt, Observation, Entität und Ereignis, Beziehung, Finding. Jedes
+Objekt über der rohen Evidence trägt einen Ableitungsstatus (beobachtet,
+geparst, abgeleitet, korreliert, rekonstruiert, vom Analysten gesetzt,
+externe Threat Intelligence, Vorschlag eines Sprachmodells) und eine
+Herkunft bis zur Fundstelle, bei NTFS mit MFT-Nummer, Datei- und
+Image-Offset und gegebenenfalls Schattenkopie. Beobachtetes und
+Gefolgertes werden nie gleich behandelt.
+
+IDs: Verwaltungsobjekte (Fall, Evidence-Import, Analyselauf, Finding)
+erhalten eine zeitlich sortierbare UUIDv7. Was aus Evidence abgeleitet wird
+(Artefakt, Observation, Entität, Ereignis, Beziehung), erhält eine
+deterministische UUIDv5 aus Fall, SHA-256 der Evidence und einem
+kanonischen Schlüssel. Ein erneuter Lauf über dieselbe Evidence im selben
+Fall ergibt dieselben IDs. Entitäten werden über kanonische Schlüssel
+identifiziert (Windows-Benutzer: SID vor Domäne und Name vor Name; IP- und
+Domänennamen normalisiert; Hashes mit Algorithmus), nie über Anzeigenamen.
+Zeitangaben tragen UTC-Zeitpunkt, Originalwert, Genauigkeit und Bedeutung
+(Artefaktzeit, Ereigniszeit, Akquisezeit, Analysezeit, Analystenaktion);
+Ortszeiten ohne bekannte Zone werden nicht umgerechnet.
+
+Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das. Die Funde
+der Engine werden in einem nächsten Schritt über einen Normalizer auf das
+Modell abgebildet.
 
 ## E01-Images
 
