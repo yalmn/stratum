@@ -953,3 +953,95 @@ fn aufgaben_und_run_schluessel() {
         l => panic!("{l:?}"),
     }
 }
+
+#[test]
+fn browser_verlauf_datei_und_keine_passwoerter() {
+    let webcache = "Users\\ich\\AppData\\Local\\Microsoft\\Windows\\WebCache\\WebCacheV01.dat";
+    let ese = [
+        ("volume_offset", "122683392"),
+        ("mft_record", "109631"),
+        ("tabelle", "Container_1"),
+        ("seite", "40"),
+        ("datei_offset", "1310720"),
+    ];
+    let mut verlauf = fund(
+        "browser",
+        "file:///F:/Bericht%20neu.txt",
+        webcache,
+        &[
+            ("art", "webcache_eintrag"),
+            ("container", "History"),
+            ("url", "file:///F:/Bericht%20neu.txt"),
+            ("url_konto", "ich"),
+            ("EntryId", "7"),
+            ("AccessedTime", "134209790846680107"),
+        ],
+    );
+    let mut cache = fund(
+        "browser",
+        "res://ieframe.dll/navcancl.htm",
+        webcache,
+        &[
+            ("art", "webcache_eintrag"),
+            ("container", "Content"),
+            ("benutzer", "ich"),
+            ("EntryId", "1"),
+            ("AccessedTime", "134209792728728653"),
+        ],
+    );
+    for (k, v) in ese {
+        verlauf = verlauf.with(k, v);
+        cache = cache.with(k, v);
+    }
+    let lnk = fund(
+        "useraktivitaet",
+        "F:\\Bericht neu.txt",
+        "Users\\ich\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\Bericht neu.lnk",
+        &[
+            ("art", "lnk"),
+            ("benutzer", "ich"),
+            ("zielpfad", "F:\\Bericht neu.txt"),
+            ("volume_offset", "122683392"),
+            ("mft_record", "5000"),
+        ],
+    );
+    let passwort = fund(
+        "browser",
+        "gespeichertes Passwort",
+        "Users\\ich\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Login Data",
+        &[
+            ("art", "passwort_klartext"),
+            ("browser", "chrome"),
+            ("url", "https://bank.tld/"),
+            ("benutzername", "ich"),
+            ("passwort", "geheim123"),
+        ],
+    );
+    let m = normalisieren(&[verlauf, cache, lnk, passwort], &kontext());
+
+    // Nur der Verlaufseintrag ist ein Besuch.
+    let besuche: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::BrowserVisit)
+        .collect();
+    assert_eq!(besuche.len(), 1);
+    assert_eq!(besuche[0].attributes["container"], "History");
+
+    // file:/// verweist auf dieselbe Datei wie die Verknüpfung.
+    let datei = entitaet(&m, EntityKind::File, "F:\\Bericht neu.txt");
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::References && r.target_entity_id == datei.id));
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::UsesFile && r.target_entity_id == datei.id));
+
+    // Das Klartextpasswort steht nirgends im Modell.
+    assert_eq!(m.statistik.ohne_mapper.get("browser"), Some(&1));
+    let json = serde_json::to_string(&m).unwrap();
+    assert!(!json.contains("geheim123"));
+    assert!(!json.contains("bank.tld"));
+}

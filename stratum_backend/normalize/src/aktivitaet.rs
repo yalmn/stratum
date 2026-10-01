@@ -122,7 +122,7 @@ fn dateiname(b: &mut Baukasten<'_>, name: &str) -> EntityId {
 }
 
 /// URL mit kleingeschriebenem Schema und Host; Pfad und Abfrage bleiben.
-fn url_schluessel(url: &str) -> String {
+pub(crate) fn url_schluessel(url: &str) -> String {
     let url = url.trim();
     match url.split_once("://") {
         Some((schema, rest)) => {
@@ -138,7 +138,7 @@ fn url_schluessel(url: &str) -> String {
     }
 }
 
-fn url(
+pub(crate) fn url(
     b: &mut Baukasten<'_>,
     url: &str,
     gesehen: Option<chrono::DateTime<chrono::Utc>>,
