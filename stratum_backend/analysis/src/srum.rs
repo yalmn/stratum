@@ -198,9 +198,15 @@ fn analyze(
                             }
                         }
                     }
-                    "TimeStamp" => match ole_iso(&v) {
-                        Some(iso) => f = f.with("zeitpunkt_utc", iso),
-                        None => f = f.with("TimeStamp_roh", render(&v)),
+                    "TimeStamp" => match (ole_iso(&v), &v) {
+                        // Rohwert (Tage als f64) zusätzlich, damit die Zeit
+                        // ohne Umweg über den Text nachgeprüft werden kann.
+                        (Some(iso), Value::DateTime(raw)) => {
+                            f = f
+                                .with("zeitpunkt_utc", iso)
+                                .with("zeitpunkt_ole", f64::from_bits(*raw).to_string())
+                        }
+                        _ => f = f.with("TimeStamp_roh", render(&v)),
                     },
                     n if FILETIME_SPALTEN.contains(&n) => f = esewerte::filetime(f, n, &v),
                     _ => f = esewerte::spalte(f, rec, c, &v),
@@ -419,6 +425,9 @@ mod tests {
         assert_eq!(a["konto"], "S-1-5-18");
         assert_eq!(a["anbieter"], "Windows Network Data Usage Monitor");
         assert_eq!(a["zeitpunkt_utc"], "2026-04-18T08:47:00.0000000Z");
+        // Rohwert in Tagen seit 1899-12-30 ergibt dieselbe Zeit.
+        let ole: f64 = a["zeitpunkt_ole"].parse().unwrap();
+        assert_eq!(((ole - 25_569.0) * 86_400.0).round() as i64, 1_776_502_020);
         assert_eq!(a["BytesSent"], "713");
         assert_eq!(a["BytesRecvd"], "2022");
         assert_eq!(a["mft_record"], "42");
