@@ -8,6 +8,7 @@
 use stratum_ntfs::NtfsVolume;
 
 use crate::pathrating::{rate_command, PathStatus};
+use crate::schatten::Abbildung;
 use crate::{AnalysisContext, Analyzer, Finding, FsIndex, Outcome};
 
 /// Analyzer für geplante Aufgaben und Autostart-Ordner.
@@ -25,7 +26,7 @@ impl Analyzer for FilePersistenceAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for v in &ctx.volumes {
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings
@@ -33,7 +34,7 @@ impl Analyzer for FilePersistenceAnalyzer {
                     continue;
                 }
             };
-            scheduled_tasks(&mut vol, v, &mut out);
+            scheduled_tasks(&mut vol, v, &abbildung, &mut out);
             startup_folders(&mut vol, v, &mut out);
         }
         out
@@ -45,6 +46,7 @@ impl Analyzer for FilePersistenceAnalyzer {
 fn scheduled_tasks<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
     v: &FsIndex,
+    abbildung: &Abbildung<'_>,
     out: &mut Outcome,
 ) {
     let prefix = "Windows\\System32\\Tasks";
@@ -86,8 +88,22 @@ fn scheduled_tasks<R: std::io::Read + std::io::Seek>(
                 "bewertung",
                 "Pfadheuristik, kein Nachweis einer schädlichen Aktion",
             )
-            .with("mft_record", e.mft_record.to_string())
-            .with("volume_offset", v.target.offset.to_string());
+            .mit_datei(v.target.offset, &f.meta, abbildung);
+        // Windows legt die Aufgabendatei beim Registrieren an und schreibt sie
+        // bei jeder Änderung der Aufgabe neu.
+        for (k, ft) in [
+            ("datei_erstellt", f.meta.created),
+            ("datei_geaendert", f.meta.modified),
+        ] {
+            if ft != 0 {
+                fd = fd.with(format!("{k}_filetime"), ft.to_string());
+            }
+        }
+        // Registrierungsdatum aus dem XML, unverändert: meist Ortszeit ohne
+        // Zonenangabe, daher hier nicht umgerechnet.
+        if let Some(d) = tag(&text, "Date") {
+            fd = fd.with("registrierung_xml", d);
+        }
         if actions.exec.len() > 1 {
             fd = fd.with("weitere_befehle", actions.exec[1..].join("\n"));
         }
@@ -134,8 +150,12 @@ fn startup_folders<R: std::io::Read + std::io::Seek>(
         if rest.eq_ignore_ascii_case("desktop.ini") {
             continue;
         }
-        out.findings
-            .push(Finding::new("persistence", rest, &e.path).with("ort", "Autostart-Ordner"));
+        out.findings.push(
+            Finding::new("persistence", rest, &e.path)
+                .with("ort", "Autostart-Ordner")
+                .with("mft_record", e.mft_record.to_string())
+                .with("volume_offset", v.target.offset.to_string()),
+        );
     }
 }
 

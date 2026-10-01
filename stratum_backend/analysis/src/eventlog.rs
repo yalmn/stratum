@@ -349,6 +349,10 @@ const FIELD_MAP: &[(&str, &[&str])] = &[
     ("arbeitsstation", &["WorkstationName"]),
     ("anmeldetyp", &["LogonType"]),
     ("dienst", &["ServiceName"]),
+    // 7045 (System) und 4697 (Security) nennen Programm und Konto des
+    // Dienstes unter verschiedenen Feldnamen.
+    ("dienst_pfad", &["ImagePath", "ServiceFileName"]),
+    ("dienst_konto", &["AccountName", "ServiceAccount"]),
     ("prozess", &["NewProcessName", "ProcessName"]),
 ];
 

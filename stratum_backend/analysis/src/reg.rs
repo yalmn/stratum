@@ -78,17 +78,41 @@ fn winlogon(hive: &Hive, out: &mut Outcome) {
         return;
     };
     for (name, normal) in [("Shell", "explorer.exe"), ("Userinit", "userinit.exe")] {
-        let Some(val) = key.value(name).ok().flatten().and_then(|v| v.as_string()) else {
+        let Some(v) = key.value(name).ok().flatten() else {
             continue;
         };
+        let Some(val) = v.as_string() else { continue };
         let auffaellig = !val.to_ascii_lowercase().contains(normal);
         out.findings.push(
-            Finding::new("persistence", name, format!("HKLM SOFTWARE\\{PATH}"))
-                .with("befehl", val)
-                .with("ort", "Winlogon")
-                .with("auffaellig", if auffaellig { "ja" } else { "nein" }),
+            mit_wert(
+                Finding::new("persistence", name, format!("HKLM SOFTWARE\\{PATH}")),
+                &key,
+                &v,
+            )
+            .with("befehl", val)
+            .with("ort", "Winlogon")
+            .with("auffaellig", if auffaellig { "ja" } else { "nein" }),
         );
     }
+}
+
+/// Fundstelle eines Registry-Werts: Wertname, Zellposition von Wert und
+/// Schlüssel und die letzte Änderung des Schlüssels als FILETIME. Bewusst
+/// ohne Unix-Zeit, damit sie nicht als eigener Zeitpunkt in die Timeline
+/// geht; sie sagt nur, wann irgendein Wert des Schlüssels zuletzt geschrieben
+/// wurde.
+fn mit_wert(f: Finding, key: &Key<'_, '_>, v: &Value<'_>) -> Finding {
+    let mut f = f
+        .with("wert", v.name())
+        .with("hive_offset", v.file_offset().to_string())
+        .with("key_hive_offset", key.file_offset().to_string());
+    if key.last_written() != 0 {
+        f = f.with(
+            "key_letzte_aenderung_filetime",
+            key.last_written().to_string(),
+        );
+    }
+    f
 }
 
 /// `AppInit_DLLs` wird in jeden Prozess geladen, der user32.dll nutzt. Ein
@@ -98,22 +122,21 @@ fn appinit_dlls(hive: &Hive, out: &mut Outcome) {
     let Ok(Some(key)) = hive.open_key(PATH) else {
         return;
     };
-    let Some(val) = key
-        .value("AppInit_DLLs")
-        .ok()
-        .flatten()
-        .and_then(|v| v.as_string())
-    else {
+    let Some(v) = key.value("AppInit_DLLs").ok().flatten() else {
         return;
     };
-    if val.trim().is_empty() {
+    let Some(val) = v.as_string().filter(|s| !s.trim().is_empty()) else {
         return;
-    }
+    };
     out.findings.push(
-        Finding::new(
-            "persistence",
-            "AppInit_DLLs",
-            format!("HKLM SOFTWARE\\{PATH}"),
+        mit_wert(
+            Finding::new(
+                "persistence",
+                "AppInit_DLLs",
+                format!("HKLM SOFTWARE\\{PATH}"),
+            ),
+            &key,
+            &v,
         )
         .with("befehl", val)
         .with("ort", "AppInit_DLLs")
@@ -130,22 +153,21 @@ fn ifeo_debugger(hive: &Hive, out: &mut Outcome) {
     };
     let Ok(progs) = root.subkeys() else { return };
     for prog in progs {
-        let Some(dbg) = prog
-            .value("Debugger")
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_string())
-        else {
+        let Some(v) = prog.value("Debugger").ok().flatten() else {
             continue;
         };
-        if dbg.trim().is_empty() {
+        let Some(dbg) = v.as_string().filter(|s| !s.trim().is_empty()) else {
             continue;
-        }
+        };
         out.findings.push(
-            Finding::new(
-                "persistence",
-                prog.name(),
-                format!("HKLM SOFTWARE\\{PATH}\\{}", prog.name()),
+            mit_wert(
+                Finding::new(
+                    "persistence",
+                    prog.name(),
+                    format!("HKLM SOFTWARE\\{PATH}\\{}", prog.name()),
+                ),
+                &prog,
+                &v,
             )
             .with("befehl", dbg)
             .with("ort", "IFEO-Debugger")
@@ -164,12 +186,10 @@ fn services(hive: &Hive, out: &mut Outcome) {
     };
     let Ok(dienste) = root.subkeys() else { return };
     for dienst in dienste {
-        let Some(image) = dienst
-            .value("ImagePath")
-            .ok()
-            .flatten()
-            .and_then(|v| v.as_string())
-        else {
+        let Some(wert) = dienst.value("ImagePath").ok().flatten() else {
+            continue;
+        };
+        let Some(image) = wert.as_string() else {
             continue;
         };
         // Ein Dienst startet normalerweise ein eigenes Programm, keine Shell.
@@ -187,10 +207,14 @@ fn services(hive: &Hive, out: &mut Outcome) {
             .ok()
             .flatten()
             .and_then(|v| v.as_u32());
-        let mut f = Finding::new(
-            "persistence",
-            dienst.name(),
-            format!("SYSTEM\\{base}\\{}", dienst.name()),
+        let mut f = mit_wert(
+            Finding::new(
+                "persistence",
+                dienst.name(),
+                format!("SYSTEM\\{base}\\{}", dienst.name()),
+            ),
+            &dienst,
+            &wert,
         )
         .with("befehl", image)
         .with("ort", "Dienst")
@@ -204,6 +228,19 @@ fn services(hive: &Hive, out: &mut Outcome) {
         }
         if let Some(s) = start {
             f = f.with("start_typ", s.to_string());
+        }
+        // Anzeigename (oft ein Ressourcenverweis wie `@%SystemRoot%\...`) und
+        // Konto, unter dem der Dienst läuft.
+        for (attr, wert) in [("anzeigename", "DisplayName"), ("konto", "ObjectName")] {
+            if let Some(x) = dienst
+                .value(wert)
+                .ok()
+                .flatten()
+                .and_then(|v| v.as_string())
+                .filter(|x| !x.is_empty())
+            {
+                f = f.with(attr, x);
+            }
         }
         out.findings.push(f);
     }
@@ -222,11 +259,17 @@ fn run_keys(hive: &Hive, prefix: &str, ort: &str, out: &mut Outcome) {
                 continue;
             }
             let cmd = v.as_string().unwrap_or_default();
-            out.findings.push(
-                Finding::new("persistence", name, format!("{ort}\\{suffix}"))
-                    .with("befehl", cmd)
-                    .with("ort", ort),
-            );
+            let mut f = mit_wert(
+                Finding::new("persistence", name, format!("{ort}\\{path}")),
+                &key,
+                &v,
+            )
+            .with("befehl", cmd)
+            .with("ort", ort);
+            if let Some(user) = ort.strip_prefix("HKCU ") {
+                f = f.with("benutzer", user);
+            }
+            out.findings.push(f);
         }
     }
 }
@@ -1042,6 +1085,25 @@ mod tests {
             f.attributes.get("befehl").map(String::as_str),
             Some("C:\\evil.exe")
         );
+        assert_eq!(
+            f.source,
+            "HKLM SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run"
+        );
+        assert_eq!(f.attributes["wert"], "Updater");
+        assert!(f.attributes.contains_key("hive_offset"));
+        assert!(f.attributes.contains_key("key_hive_offset"));
+        // Schlüsselzeit nur als FILETIME, nicht als Timeline-Zeitpunkt.
+        assert!(!f.attributes.contains_key("key_letzte_aenderung_unix"));
+
+        // HKCU: Quelle mit vollem Pfad unter Software, Benutzer im Fund.
+        let hive = Hive::parse(ctx.installs[0].hives.software.as_ref().unwrap()).unwrap();
+        let mut out = Outcome::default();
+        run_keys(&hive, "", "HKCU bob", &mut out);
+        assert_eq!(
+            out.findings[0].source,
+            "HKCU bob\\Microsoft\\Windows\\CurrentVersion\\Run"
+        );
+        assert_eq!(out.findings[0].attributes["benutzer"], "bob");
     }
 
     #[test]
