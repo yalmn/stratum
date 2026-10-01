@@ -17,6 +17,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use stratum_ntfs::NtfsVolume;
 
+use crate::schatten::Abbildung;
 use crate::{AnalysisContext, Analyzer, DpapiInput, FileEntry, Finding, FsIndex, Outcome};
 
 /// Obergrenze für Verlaufseinträge je Datenbank.
@@ -50,7 +51,7 @@ impl Analyzer for BrowserAnalyzer {
         let mut out = Outcome::default();
 
         for v in &ctx.volumes {
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings
@@ -66,6 +67,7 @@ impl Analyzer for BrowserAnalyzer {
                 }
                 process(
                     &mut vol,
+                    (v.target.offset, &abbildung),
                     e.mft_record,
                     &e.path,
                     browser_of(&e.path),
@@ -77,6 +79,7 @@ impl Analyzer for BrowserAnalyzer {
             for e in v.by_name("places.sqlite") {
                 process(
                     &mut vol,
+                    (v.target.offset, &abbildung),
                     e.mft_record,
                     &e.path,
                     "firefox",
@@ -114,7 +117,8 @@ impl Analyzer for BrowserAnalyzer {
                             } else {
                                 "verschluesselt (DPAPI/AES-GCM), Entschluesselung versucht"
                             },
-                        ),
+                        )
+                        .mit_datei(v.target.offset, &f.meta, &abbildung),
                 );
                 if keys.is_empty() {
                     continue;
@@ -468,14 +472,15 @@ enum Query {
 
 fn process<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
+    (volume_offset, abbildung): (u64, &Abbildung<'_>),
     record: u64,
     path: &str,
     browser: &str,
     query: Query,
     out: &mut Outcome,
 ) {
-    let data = match vol.read_file_by_record(record, path) {
-        Ok(Some(f)) => f.data,
+    let (data, meta) = match vol.read_file_by_record(record, path) {
+        Ok(Some(f)) => (f.data, f.meta),
         Ok(None) => {
             out.warnings
                 .push(format!("{path}: Verlauf-Datei ohne Dateninhalt"));
@@ -501,12 +506,22 @@ fn process<R: std::io::Read + std::io::Seek>(
         .map(|f| f.data);
     match read_history(&data, wal.as_deref(), shm.as_deref(), query) {
         Ok(rows) => {
-            out.findings
-                .push(summary_finding(path, browser, rows.len(), wal.is_some()));
+            out.findings.push(
+                summary_finding(path, browser, rows.len(), wal.is_some()).mit_datei(
+                    volume_offset,
+                    &meta,
+                    abbildung,
+                ),
+            );
+            // Zeilen aus einem WAL stehen nicht in der Hauptdatei; `wal` sagt,
+            // ob eines einbezogen wurde.
+            let wal = if wal.is_some() { "ja" } else { "nein" };
             for (url, title, unix) in rows {
                 let mut f = Finding::new("browser", url, path)
                     .with("art", "verlauf")
-                    .with("browser", browser);
+                    .with("browser", browser)
+                    .with("wal", wal)
+                    .mit_datei(volume_offset, &meta, abbildung);
                 if let Some(t) = title {
                     if !t.is_empty() {
                         f = f.with("titel", t);
