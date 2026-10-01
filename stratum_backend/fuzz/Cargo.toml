@@ -20,6 +20,7 @@ stratum-core = { path = "../core" }
 stratum-registry = { path = "../registry" }
 stratum-ese = { path = "../ese" }
 stratum-vss = { path = "../vss" }
+stratum-ewf = { path = "../ewf" }
 stratum-search = { path = "../search" }
 stratum-ntfs = { path = "../ntfs" }
 stratum-creds = { path = "../creds" }
@@ -147,6 +148,13 @@ bench = false
 [[bin]]
 name = "vss"
 path = "fuzz_targets/vss.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ewf"
+path = "fuzz_targets/ewf.rs"
 test = false
 doc = false
 bench = false

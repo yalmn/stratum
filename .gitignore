@@ -6,3 +6,7 @@
 **/fuzz/target
 **/fuzz/corpus
 **/fuzz/artifacts
+
+# Kleine, selbst erzeugte Test-Images
+!stratum_backend/ewf/tests/fixtures/*.E01
+.DS_Store

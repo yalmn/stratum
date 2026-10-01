@@ -8,6 +8,7 @@ members = [
     "stratum_backend/registry",
     "stratum_backend/ese",
     "stratum_backend/vss",
+    "stratum_backend/ewf",
     "stratum_backend/search",
     "stratum_backend/ntfs",
     "stratum_backend/creds",

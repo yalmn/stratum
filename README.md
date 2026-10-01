@@ -41,6 +41,7 @@ stratum_backend/
   registry/  Parser für Windows-Registry-Hives (regf) und ihre Transaktionslogs
   ese/       Parser für ESE-Datenbanken (SRUM, WebCache)
   vss/       Parser für Volume Shadow Copies
+  ewf/       Leser für Expert-Witness-Images (E01)
   ntfs/      NTFS-Zugriff, Datei per Pfad lesen
   search/    Keyword- und Muster-Suche
   creds/     lokale Windows-Konten aus SAM und SYSTEM
@@ -627,8 +628,10 @@ WinScope-Report), `STRATUM_EVTX_REFERENCE` (eine `.evtx`-Datei) und
 `STRATUM_SHELLITEM_REFERENCE` (LNK-Dateien, RegRipper-Ausgaben
 `shellbags` und `userassist` sowie eine `ActivitiesCache.db`) und
 `STRATUM_ESE_REFERENCE` (`SRUDB.dat`, `WebCacheV01.dat` und die
-dissect-Referenzen als JSON) und `STRATUM_VSS_REFERENCE` (`vss.raw` aus den
-dfvfs-Testdaten und die libvshadow-Referenz als JSON).
+dissect-Referenzen als JSON), `STRATUM_VSS_REFERENCE` (`vss.raw` aus den
+dfvfs-Testdaten und die libvshadow-Referenz als JSON) und
+`STRATUM_EWF_REFERENCE` (E01-Testimages aus den dfvfs-Testdaten und mit
+`ewfacquire` erzeugte Varianten).
 
 ## Lizenz
 
