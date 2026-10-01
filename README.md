@@ -553,12 +553,14 @@ Die Datenbank läuft per Docker nur auf 127.0.0.1 (`compose.yaml`). Das
 Passwort liegt in `.stratum_db_passwort` im Projektverzeichnis (nicht im
 Repository); dieselbe Datei nutzt Docker als Secret und stratum über
 `STRATUM_DB_PASSWORT_DATEI`. Die Verbindung steht ohne Passwort in
-`STRATUM_DB_URL`. Die Datei muss für alle lesbar sein (`chmod 644`), weil
-das Startskript des Containers sie als Benutzer `postgres` liest; die
-Datenbank selbst ist nur auf 127.0.0.1 erreichbar:
+`STRATUM_DB_URL`. Die Datei muss vor `docker compose up` existieren; fehlt
+sie, legt Docker an ihrer Stelle einen leeren Ordner an, das Passwort
+bleibt leer und der Container startet immer wieder neu. `chmod 644` ist
+vorsorglich, damit der Container sie als Benutzer `postgres` lesen kann;
+die Datenbank selbst ist nur auf 127.0.0.1 erreichbar:
 
 ```sh
-openssl rand -hex 24 -out .stratum_db_passwort
+openssl rand -hex -out .stratum_db_passwort 24
 chmod 644 .stratum_db_passwort
 docker compose up -d
 export STRATUM_DB_URL=postgres://stratum@127.0.0.1:5432/stratum
