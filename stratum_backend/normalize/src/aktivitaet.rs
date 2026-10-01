@@ -377,11 +377,23 @@ fn mru(f: &RawFinding, b: &mut Baukasten<'_>, art: &str) -> Abbildung {
     if let Some(u) = uid {
         t.push((u, ParticipantRole::User));
     }
+    // Derselbe Eintrag steht oft in mehreren Listen (RecentDocs und
+    // RecentDocs\Folder) mit derselben Schlüsselzeit. Ziel, Benutzer und Zeit
+    // bestimmen das Ereignis; jede weitere Liste stützt es nur.
+    let ereignis_schluessel = match ziel {
+        Some(z) => format!(
+            "{}:{}:{}",
+            z.0,
+            uid.map(|u| u.0.to_string()).unwrap_or_default(),
+            zeit.utc.timestamp_nanos_opt().unwrap_or_default()
+        ),
+        None => schluessel.clone(),
+    };
     ereignis(
         b,
         kind,
         name,
-        &schluessel,
+        &ereignis_schluessel,
         zeit,
         attribute,
         ableitung,

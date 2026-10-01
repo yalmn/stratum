@@ -22,15 +22,15 @@ mod prefetch;
 mod programm;
 mod usb;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use stratum_analysis::RawFinding;
 use stratum_model::{
-    Artifact, CaseId, DerivationKind, Entity, EntityId, EntityKind, Event, EventParticipant,
-    EvidenceId, ObjectRef, Observation, ParserIdentity, ProvenanceLink, ProvenanceRef,
-    ProvenanceRole, Relationship, RelationshipId, RelationshipKind,
+    Artifact, CaseId, DerivationKind, Entity, EntityId, EntityKind, Event, EventId,
+    EventParticipant, EvidenceId, ObjectRef, Observation, ParserIdentity, ProvenanceLink,
+    ProvenanceRef, ProvenanceRole, Relationship, RelationshipId, RelationshipKind,
 };
 
 /// Rahmen eines Normalisierungslaufs.
@@ -93,6 +93,7 @@ pub(crate) struct Baukasten<'k> {
     modell: Modell,
     entities: BTreeMap<EntityId, Entity>,
     relationships: BTreeMap<RelationshipId, Relationship>,
+    ereignisse: BTreeSet<EventId>,
 }
 
 impl<'k> Baukasten<'k> {
@@ -103,6 +104,7 @@ impl<'k> Baukasten<'k> {
             modell: Modell::default(),
             entities: BTreeMap::new(),
             relationships: BTreeMap::new(),
+            ereignisse: BTreeSet::new(),
         }
     }
 
@@ -158,14 +160,24 @@ impl<'k> Baukasten<'k> {
         id
     }
 
+    /// Ereignis aufnehmen. Belegt eine weitere Quelle dasselbe Ereignis
+    /// (gleiche abgeleitete ID), wird nur ihre Herkunft als stützend
+    /// angehängt.
     pub fn event(&mut self, e: Event, teilnehmer: Vec<EventParticipant>, herkunft: ProvenanceRef) {
+        let neu = self.ereignisse.insert(e.id);
         self.modell.provenance.push(ProvenanceLink {
             object: ObjectRef::Event(e.id),
             provenance: herkunft,
-            role: ProvenanceRole::Primary,
+            role: if neu {
+                ProvenanceRole::Primary
+            } else {
+                ProvenanceRole::Supporting
+            },
         });
-        self.modell.participants.extend(teilnehmer);
-        self.modell.events.push(e);
+        if neu {
+            self.modell.participants.extend(teilnehmer);
+            self.modell.events.push(e);
+        }
     }
 
     /// Beziehung aufnehmen; ein weiterer Beleg derselben Beziehung wird als

@@ -120,7 +120,7 @@ fn abbildung_und_statistik() {
         let n = m
             .provenance
             .iter()
-            .filter(|p| p.object == ObjectRef::Event(e.id))
+            .filter(|p| p.object == ObjectRef::Event(e.id) && p.role == ProvenanceRole::Primary)
             .count();
         assert_eq!(n, 1, "{:?}", e.kind);
     }
@@ -682,4 +682,47 @@ fn benutzeraktivitaet_zeiten_nur_wo_belegt() {
     assert!(
         matches!(&sb.source_locator, SourceLocator::Registry { hive, .. } if hive == "UsrClass.dat ich")
     );
+}
+
+#[test]
+fn gleicher_eintrag_in_zwei_listen_ein_ereignis() {
+    let basis = "HKCU ich\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\RecentDocs";
+    let eintrag = |quelle: &str, wert: &str, zelle: &str| {
+        fund(
+            "useraktivitaet",
+            "USB-Laufwerk (F:)",
+            quelle,
+            &[
+                ("art", "recent_doc"),
+                ("benutzer", "ich"),
+                ("wert", wert),
+                ("hive_offset", zelle),
+                ("mru_position", "0"),
+                ("key_letzte_aenderung_filetime", "134209790846827854"),
+            ],
+        )
+    };
+    let funde = vec![
+        eintrag(basis, "4", "100"),
+        eintrag(&format!("{basis}\\Folder"), "0", "200"),
+    ];
+    let m = normalisieren(&funde, &kontext());
+    assert_eq!(m.artifacts.len(), 2, "zwei Fundstellen");
+    assert_eq!(m.events.len(), 1, "ein Vorgang");
+    let rollen: Vec<_> = m
+        .provenance
+        .iter()
+        .filter(|p| p.object == ObjectRef::Event(m.events[0].id))
+        .map(|p| p.role)
+        .collect();
+    assert_eq!(
+        rollen,
+        [ProvenanceRole::Primary, ProvenanceRole::Supporting]
+    );
+    let teilnehmer = m
+        .participants
+        .iter()
+        .filter(|p| p.event_id == m.events[0].id)
+        .count();
+    assert_eq!(teilnehmer, 3, "Datei, Benutzer, Rechner je einmal");
 }
