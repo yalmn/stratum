@@ -183,11 +183,12 @@ fn parse_log(data: &[u8], quelle: &LogSource<'_>, out: &mut Outcome) {
             f = f.with("anbieter", anbieter);
         }
         for (attr, keys) in FIELD_MAP {
-            if let Some(val) = event_data(&record.data, keys) {
-                if !val.is_empty() {
-                    f = f.with(*attr, val);
-                }
+            if let Some(val) = event_data(&record.data, keys).filter(|v| gueltig(v)) {
+                f = f.with(*attr, val);
             }
+        }
+        for (attr, val) in personen(&record.data, id) {
+            f = f.with(attr, val);
         }
         out.findings.push(f);
     }
@@ -341,15 +342,63 @@ fn event_of_interest(v: &Value) -> Option<(u64, &'static str)> {
         .map(|(_, _, b)| (id, *b))
 }
 
-/// Zuordnung von Report-Attribut zu möglichen EventData-Feldnamen.
+/// Zuordnung von Report-Attribut zu möglichen EventData-Feldnamen (ohne
+/// Personen, siehe [`personen`]).
 const FIELD_MAP: &[(&str, &[&str])] = &[
-    ("benutzer", &["TargetUserName", "SubjectUserName"]),
     ("quell_ip", &["IpAddress"]),
     ("arbeitsstation", &["WorkstationName"]),
     ("anmeldetyp", &["LogonType"]),
     ("dienst", &["ServiceName"]),
     ("prozess", &["NewProcessName", "ProcessName"]),
 ];
+
+/// Platzhalter wie „-“ oder die Null-SID gelten nicht als Wert.
+fn gueltig(s: &str) -> bool {
+    !s.is_empty() && s != "-" && s != "S-1-0-0"
+}
+
+fn feld(v: &Value, key: &str) -> Option<String> {
+    event_data(v, &[key]).filter(|s| gueltig(s))
+}
+
+/// Beteiligte Personen und Gruppen. Name, SID und Domäne stammen immer aus
+/// demselben Satz von Feldern, damit sie dieselbe Identität bezeichnen.
+/// - Gruppenereignisse (4728, 4732, 4756): `gruppe` ist `TargetUserName`,
+///   `benutzer` das hinzugefügte Mitglied (`MemberName`, `MemberSid`).
+/// - Sonst ist `benutzer` der Zielbenutzer (`TargetUserName`), falls
+///   gesetzt, sonst der Ausführende (`SubjectUserName`).
+/// - `ausfuehrender` ist der Ausführende, wenn er nicht schon `benutzer` ist.
+fn personen(v: &Value, id: u64) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    let mut nimm = |attr: &'static str, key: &str| {
+        if let Some(x) = feld(v, key) {
+            out.push((attr, x));
+        }
+    };
+    let ziel = if matches!(id, 4728 | 4732 | 4756) {
+        nimm("gruppe", "TargetUserName");
+        nimm("gruppe_sid", "TargetSid");
+        nimm("benutzer", "MemberName");
+        nimm("benutzer_sid", "MemberSid");
+        true
+    } else if feld(v, "TargetUserName").is_some() {
+        nimm("benutzer", "TargetUserName");
+        nimm("benutzer_sid", "TargetUserSid");
+        nimm("benutzer_domaene", "TargetDomainName");
+        true
+    } else {
+        nimm("benutzer", "SubjectUserName");
+        nimm("benutzer_sid", "SubjectUserSid");
+        nimm("benutzer_domaene", "SubjectDomainName");
+        false
+    };
+    if ziel {
+        nimm("ausfuehrender", "SubjectUserName");
+        nimm("ausfuehrender_sid", "SubjectUserSid");
+        nimm("ausfuehrender_domaene", "SubjectDomainName");
+    }
+    out
+}
 
 /// Liest die Ereignis-ID aus `Event.System.EventID` (Zahl oder Objekt mit
 /// `#text`).
@@ -513,6 +562,52 @@ mod tests {
         }
         assert!(geprueft > 0);
         eprintln!("{geprueft} Datensätze mit bestätigtem Offset");
+    }
+
+    #[test]
+    fn personen_je_ereignisart() {
+        let anmeldung = json!({"Event": {"EventData": {
+            "SubjectUserName": "DESKTOP$", "SubjectUserSid": "S-1-5-18",
+            "TargetUserName": "ich", "TargetUserSid": "S-1-5-21-1-2-3-1001",
+            "TargetDomainName": "DESKTOP"
+        }}});
+        assert_eq!(
+            personen(&anmeldung, 4624),
+            vec![
+                ("benutzer", "ich".into()),
+                ("benutzer_sid", "S-1-5-21-1-2-3-1001".into()),
+                ("benutzer_domaene", "DESKTOP".into()),
+                ("ausfuehrender", "DESKTOP$".into()),
+                ("ausfuehrender_sid", "S-1-5-18".into()),
+            ]
+        );
+        // 4688: Zielbenutzer „-“, maßgeblich ist der Ersteller.
+        let prozess = json!({"Event": {"EventData": {
+            "SubjectUserName": "ich", "SubjectUserSid": "S-1-5-21-1-2-3-1001",
+            "TargetUserName": "-", "TargetUserSid": "S-1-0-0"
+        }}});
+        assert_eq!(
+            personen(&prozess, 4688),
+            vec![
+                ("benutzer", "ich".into()),
+                ("benutzer_sid", "S-1-5-21-1-2-3-1001".into()),
+            ]
+        );
+        // 4732: Gruppe und Mitglied getrennt.
+        let gruppe = json!({"Event": {"EventData": {
+            "TargetUserName": "Administratoren", "TargetSid": "S-1-5-32-544",
+            "MemberName": "-", "MemberSid": "S-1-5-21-1-2-3-1001",
+            "SubjectUserName": "ich"
+        }}});
+        assert_eq!(
+            personen(&gruppe, 4732),
+            vec![
+                ("gruppe", "Administratoren".into()),
+                ("gruppe_sid", "S-1-5-32-544".into()),
+                ("benutzer_sid", "S-1-5-21-1-2-3-1001".into()),
+                ("ausfuehrender", "ich".into()),
+            ]
+        );
     }
 
     #[test]

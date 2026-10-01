@@ -238,7 +238,12 @@ Ereignisse (Anmeldungen, Konten, Dienste, Protokolllöschung, RDP). Gedeutet
 wird nach Anbieter und Ereignisnummer, denn Nummern sind nur innerhalb eines
 Anbieters eindeutig: 4625 von `Microsoft-Windows-Security-Auditing` ist eine
 fehlgeschlagene Anmeldung, 4625 von `Microsoft-Windows-EventSystem` im
-Application-Log nicht. Der Anbieter steht als `anbieter` im Fund. Jeder Fund
+Application-Log nicht. Der Anbieter steht als `anbieter` im Fund. Beteiligte
+Personen stehen mit Name, SID und Domäne aus demselben Feldsatz im Fund:
+`benutzer` ist der Zielbenutzer, sonst der Ausführende; `ausfuehrender`
+zusätzlich, wenn es einen Zielbenutzer gibt; bei Gruppenereignissen
+(4728, 4732, 4756) `gruppe` und als `benutzer` das hinzugefügte Mitglied.
+Platzhalter wie „-“ und die Null-SID werden nicht übernommen. Jeder Fund
 trägt `event_record_id`, die Zeit als `zeit_utc` mit 100-ns-Auflösung und als
 FILETIME sowie den Anker der Protokolldatei (Volume-Offset, MFT-Nummer, Offset
 des MFT-Datensatzes). `datei_offset` nennt den Beginn des Datensatzes in der
