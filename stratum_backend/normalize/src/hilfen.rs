@@ -217,8 +217,14 @@ impl Dienste {
                 .entry(f.name.to_lowercase())
                 .or_default()
                 .insert(schluessel.clone());
-            // Ressourcenverweise (`@%SystemRoot%\...`) sind kein Name.
-            if let Some(a) = text(f, "anzeigename").filter(|a| !a.starts_with('@')) {
+            // Ressourcenverweise (`@%SystemRoot%\...,-100`) sind kein Name.
+            // Verweise aus INF-Dateien tragen den Namen nach `;` im Klartext
+            // (`@wpdfs.inf,%WPDFS_SvcName%;WPD-Dateisystemtreiber`).
+            let anzeige = text(f, "anzeigename").and_then(|a| match a.strip_prefix('@') {
+                Some(verweis) => verweis.rsplit_once(';').map(|(_, n)| n.trim()),
+                None => Some(a),
+            });
+            if let Some(a) = anzeige.filter(|a| !a.is_empty()) {
                 namen
                     .entry(a.to_lowercase())
                     .or_default()

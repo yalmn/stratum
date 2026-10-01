@@ -781,6 +781,36 @@ fn persistenzfunde() -> Vec<RawFinding> {
             "Intel(R) PRO/1000 NDIS 6-Adaptertreiber",
             "\\SystemRoot\\System32\\drivers\\e1i63x64.sys",
         ),
+        // Verweis mit Klartextnamen nach `;`, ImagePath mehrdeutig.
+        fund(
+            "persistence",
+            "WUDFWpdFs",
+            "SYSTEM\\ControlSet001\\Services\\WUDFWpdFs",
+            &[
+                ("ort", "Dienst"),
+                ("befehl", "\\SystemRoot\\system32\\DRIVERS\\WUDFRd.sys"),
+                ("anzeigename", "@wpdfs.inf,%WPDFS_SvcName%;WPD-Dateisystemtreiber"),
+                ("wert", "ImagePath"),
+                ("hive_offset", "7000"),
+            ],
+        ),
+        fund(
+            "persistence",
+            "WUDFRd",
+            "SYSTEM\\ControlSet001\\Services\\WUDFRd",
+            &[
+                ("ort", "Dienst"),
+                ("befehl", "\\SystemRoot\\System32\\drivers\\WUDFRd.sys"),
+                ("anzeigename", "@%SystemRoot%\\system32\\drivers\\WudfRd.sys,-1000"),
+                ("wert", "ImagePath"),
+                ("hive_offset", "7100"),
+            ],
+        ),
+        sieben(
+            "89",
+            "WPD-Dateisystemtreiber",
+            "\\SystemRoot\\system32\\DRIVERS\\WUDFRd.sys",
+        ),
         // Unbekannt: bleibt eigener Dienst.
         sieben("88", "Fremder Dienst", "C:\\x.exe"),
         fund(
@@ -825,7 +855,7 @@ fn dienste_aus_registry_und_ereignis_zusammen() {
         .collect();
     assert_eq!(
         dienste.len(),
-        3,
+        5,
         "{:?}",
         dienste.iter().map(|e| &e.canonical_key).collect::<Vec<_>>()
     );
@@ -838,6 +868,9 @@ fn dienste_aus_registry_und_ereignis_zusammen() {
     let intel = entitaet(&m, EntityKind::Service, "e1iexpress");
     assert_eq!(intel.attributes["zuordnung_ueber"], "imagepath");
     entitaet(&m, EntityKind::Service, "Fremder Dienst");
+    // Mehrdeutiger ImagePath, aber eindeutiger Klartextname.
+    let wpd = entitaet(&m, EntityKind::Service, "WUDFWpdFs");
+    assert_eq!(wpd.attributes["zuordnung_ueber"], "name");
     // Dienst führt die Datei aus, wenn der Pfad absolut ist.
     let datei = entitaet(
         &m,
@@ -855,7 +888,7 @@ fn dienste_aus_registry_und_ereignis_zusammen() {
 #[test]
 fn aufgaben_und_run_schluessel() {
     let m = normalisieren(&persistenzfunde(), &kontext());
-    assert_eq!(m.statistik.abgebildet.get("persistence"), Some(&4));
+    assert_eq!(m.statistik.abgebildet.get("persistence"), Some(&6));
     assert!(!m
         .statistik
         .fundstelle_unvollstaendig
