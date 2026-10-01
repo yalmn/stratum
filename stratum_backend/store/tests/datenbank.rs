@@ -62,9 +62,19 @@ async fn modell_schreiben_und_wiederholen() {
         eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
         return;
     };
+    // cargo test läuft im Ordner des Crates; ein relativer Pfad ist wie bei
+    // stratum selbst vom Projektverzeichnis aus gemeint.
     let passwort = std::env::var_os("STRATUM_DB_PASSWORT_DATEI").map(|p| {
-        std::fs::read_to_string(p)
-            .expect("Passwortdatei")
+        let p = std::path::PathBuf::from(p);
+        let p = if p.is_relative() {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(p)
+        } else {
+            p
+        };
+        std::fs::read_to_string(&p)
+            .unwrap_or_else(|e| panic!("Passwortdatei {} nicht lesbar: {e}", p.display()))
             .trim()
             .to_string()
     });
