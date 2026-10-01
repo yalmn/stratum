@@ -2,15 +2,17 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Ein einzelner Fund. Alle Domänen liefern denselben Typ, damit Report und
-/// HTML-Ansicht eine gemeinsame Tabelle bilden können.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Ein einzelner Fund (Rohfund). Alle Domänen liefern denselben Typ, damit
+/// Report und HTML-Ansicht eine gemeinsame Tabelle bilden können. Im
+/// Datenmodell ist er noch keine fachliche Bewertung, sondern Eingabe des
+/// Normalizers (siehe [`RawFinding`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Finding {
     /// Stabile, aus dem Inhalt abgeleitete Kennung (siehe [`assign_ids`]).
-    #[serde(skip_serializing_if = "String::is_empty")]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     /// Domäne, aus der der Fund stammt (z. B. `"darknet"`, `"zugangsdaten"`).
     pub domain: String,
@@ -20,10 +22,10 @@ pub struct Finding {
     /// rohen Bereich.
     pub source: String,
     /// Absoluter Byte-Offset im Image, falls zutreffend.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub offset: Option<u64>,
     /// Weitere Felder je nach Domäne (Kodierung, Kontext, RID, ...).
-    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub attributes: BTreeMap<String, String>,
 }
 
@@ -56,6 +58,10 @@ impl Finding {
         self
     }
 }
+
+/// Name des Funds im Sinn des Datenmodells: ein Rohfund, den der Normalizer
+/// auf Artefakte, Observationen, Entitäten, Ereignisse und Beziehungen abbildet.
+pub type RawFinding = Finding;
 
 /// Vergibt jedem Fund eine aus seinem Inhalt abgeleitete Kennung: die ersten
 /// 16 Hexzeichen von SHA-256 über Domäne, Name, Quelle, Offset und Attribute.

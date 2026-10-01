@@ -39,6 +39,9 @@ pub struct Report {
     /// Verweis auf den Dateikatalog, falls einer geschrieben wurde.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog: Option<CatalogInfo>,
+    /// Verweis auf das normalisierte Datenmodell, falls geschrieben.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modell: Option<ModellInfo>,
     /// Verweis auf die vollständige MFT-Zeitachse, falls geschrieben.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mft_timeline: Option<MftTimelineInfo>,
@@ -47,6 +50,38 @@ pub struct Report {
     pub usn_journal: Option<UsnJournalInfo>,
     /// Übergreifende Hinweise.
     pub warnings: Vec<String>,
+}
+
+/// Verweis auf das normalisierte Datenmodell mit Hashes und Zählern.
+#[derive(Debug, Serialize)]
+pub struct ModellInfo {
+    /// Pfad der Modelldatei.
+    pub pfad: String,
+    /// Dateiformat.
+    pub format: &'static str,
+    /// SHA-256 und BLAKE3 über die geschriebene Datei.
+    pub hashes: ImageHashes,
+    /// Fall-ID der abgeleiteten IDs.
+    pub fall_id: String,
+    /// Evidence-ID.
+    pub evidence_id: String,
+    /// Anzahl Artefakte.
+    pub artefakte: usize,
+    /// Anzahl Observationen.
+    pub observationen: usize,
+    /// Anzahl Entitäten.
+    pub entitaeten: usize,
+    /// Anzahl Ereignisse.
+    pub ereignisse: usize,
+    /// Anzahl Beziehungen.
+    pub beziehungen: usize,
+    /// Anzahl Herkunftsangaben.
+    pub herkunftsangaben: usize,
+    /// Abgebildet, ohne Mapper, Fundstelle unvollständig, je Domäne.
+    pub statistik: stratum_normalize::Statistik,
+    /// Hinweise.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hinweise: Vec<String>,
 }
 
 /// Verweis auf die MFT-Zeitachse mit Hashes und Zählern.

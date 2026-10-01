@@ -67,7 +67,7 @@ pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
 pub use dpapi::DpapiAnalyzer;
 pub use eventlog::EventLogAnalyzer;
 pub use filepersist::FilePersistenceAnalyzer;
-pub use finding::{assign_ids, Finding};
+pub use finding::{assign_ids, Finding, RawFinding};
 pub use fsindex::{FileEntry, FsIndex, Herkunft};
 pub use jumplist::JumpListAnalyzer;
 pub use keyword::KeywordAnalyzer;

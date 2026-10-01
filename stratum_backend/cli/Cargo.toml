@@ -17,6 +17,10 @@ stratum-search = { path = "../search" }
 stratum-creds = { path = "../creds" }
 stratum-analysis = { path = "../analysis" }
 stratum-ewf.workspace = true
+stratum-normalize = { path = "../normalize" }
+stratum-model = { path = "../../stratum_model" }
+uuid = "1.26.1"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { workspace = true }

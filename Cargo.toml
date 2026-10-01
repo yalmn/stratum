@@ -13,6 +13,7 @@ members = [
     "stratum_backend/ntfs",
     "stratum_backend/creds",
     "stratum_backend/analysis",
+    "stratum_backend/normalize",
     "stratum_backend/cli",
     "stratum_model",
 ]

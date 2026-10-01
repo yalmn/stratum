@@ -108,6 +108,19 @@ struct Cli {
     #[arg(long, num_args = 3, value_names = ["VOLUME_OFFSET", "MFT", "ZIEL"])]
     dump_record: Option<Vec<String>>,
 
+    /// Funde zusätzlich auf das Datenmodell abbilden (Artefakte, Observationen,
+    /// Entitäten, Ereignisse, Beziehungen, Herkunft) und als JSON in diese
+    /// Datei schreiben. Der Report verweist mit Hashes und Zählern darauf.
+    /// Eine vorhandene Datei wird nicht überschrieben.
+    #[arg(long, value_name = "DATEI")]
+    modell: Option<PathBuf>,
+
+    /// Fall-ID (UUID) für das Datenmodell. Ohne Angabe wird sie aus dem
+    /// Image-Hash abgeleitet, sodass Läufe über dasselbe Image dieselben IDs
+    /// ergeben.
+    #[arg(long, value_name = "UUID", requires = "modell")]
+    fall_id: Option<String>,
+
     /// Dateikatalog aller Dateien und Verzeichnisse mit Metadaten als JSON Lines
     /// in diese Datei schreiben. Der Report verweist mit Hashes darauf. Eine
     /// vorhandene Datei wird nicht überschrieben.
@@ -250,6 +263,28 @@ fn main() -> Result<()> {
                     )
                 })?,
         )),
+        None => None,
+    };
+    let modell_file = match &cli.modell {
+        Some(p) => Some((
+            p.clone(),
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(p)
+                .with_context(|| {
+                    format!(
+                        "Modelldatei nicht anlegbar (existiert bereits?): {}",
+                        p.display()
+                    )
+                })?,
+        )),
+        None => None,
+    };
+    let fall_id = match &cli.fall_id {
+        Some(s) => {
+            Some(uuid::Uuid::parse_str(s).with_context(|| format!("--fall-id: keine UUID: {s}"))?)
+        }
         None => None,
     };
     let mft_timeline_file = match &cli.mft_timeline {
@@ -561,6 +596,22 @@ fn main() -> Result<()> {
 
     stratum_analysis::assign_ids(&mut analysis.findings);
     let timeline = stratum_analysis::build_timeline(&analysis.findings);
+    let modell = match modell_file {
+        Some((path, file)) => {
+            let info = modell_schreiben(
+                &path,
+                file,
+                &img,
+                hashes.as_ref(),
+                fall_id,
+                &ctx,
+                &analysis.findings,
+            )?;
+            warnings.extend(info.hinweise.iter().map(|h| format!("Modell: {h}")));
+            Some(info)
+        }
+        None => None,
+    };
     eprintln!("[+] Zeitstrahl mit {} Ereignissen", timeline.len());
 
     let generated_unix = SystemTime::now()
@@ -588,6 +639,7 @@ fn main() -> Result<()> {
         timeline,
         keywords,
         catalog,
+        modell,
         mft_timeline,
         usn_journal,
         warnings,
@@ -774,6 +826,82 @@ fn ewf_report(
             .map(|(g, b)| hex(&g) == b),
         warnungen: e.warnings().to_vec(),
     }
+}
+
+/// Bildet die Funde auf das Datenmodell ab und schreibt es als JSON.
+fn modell_schreiben(
+    path: &std::path::Path,
+    file: std::fs::File,
+    img: &ImageReader,
+    hashes: Option<&stratum_core::ImageHashes>,
+    fall_id: Option<uuid::Uuid>,
+    ctx: &AnalysisContext<'_>,
+    funde: &[stratum_analysis::RawFinding],
+) -> Result<report::ModellInfo> {
+    use stratum_model::{ids::derived_uuid, CaseId, EvidenceId};
+    let mut hinweise = Vec::new();
+    let evidence_key = match hashes {
+        Some(h) => h.sha256.clone(),
+        None => {
+            hinweise.push(
+                "ohne Image-Hash: Ersatzschlüssel aus Pfad und Größe, IDs nur in diesem Lauf belastbar"
+                    .to_string(),
+            );
+            format!("ohne-hash:{}:{}", img.path().display(), img.len())
+        }
+    };
+    let case_id =
+        CaseId(fall_id.unwrap_or_else(|| derived_uuid("cli-fall", &[evidence_key.as_bytes()])));
+    let evidence_id = EvidenceId(derived_uuid(
+        "cli-evidence",
+        &[case_id.0.as_bytes(), evidence_key.as_bytes()],
+    ));
+    let tool = Tool::default();
+    let k = stratum_normalize::Kontext {
+        case_id,
+        evidence_id,
+        evidence_sha256: evidence_key,
+        host: ctx
+            .installs
+            .iter()
+            .find(|i| i.origin == "live")
+            .and_then(|i| i.computer_name.clone()),
+        stratum_version: format!("{} ({})", tool.version, tool.revision),
+        zeitpunkt: chrono::Utc::now(),
+    };
+    eprintln!("[*] Bilde Funde auf das Datenmodell ab ...");
+    let mut m = stratum_normalize::normalisieren(funde, &k);
+    let mut w = std::io::BufWriter::new(stratum_core::HashingWriter::new(file));
+    serde_json::to_writer(&mut w, &m)
+        .with_context(|| format!("Modell nicht schreibbar: {}", path.display()))?;
+    let (_, datei_hashes) = w
+        .into_inner()
+        .map_err(|e| e.into_error())
+        .and_then(|h| h.finish())
+        .with_context(|| format!("Modell nicht abschließbar: {}", path.display()))?;
+    hinweise.append(&mut m.hinweise);
+    eprintln!(
+        "[+] Modell: {} Ereignisse, {} Entitäten, {} Beziehungen in {}",
+        m.events.len(),
+        m.entities.len(),
+        m.relationships.len(),
+        path.display()
+    );
+    Ok(report::ModellInfo {
+        pfad: path.display().to_string(),
+        format: "json",
+        hashes: datei_hashes,
+        fall_id: case_id.to_string(),
+        evidence_id: evidence_id.to_string(),
+        artefakte: m.artifacts.len(),
+        observationen: m.observations.len(),
+        entitaeten: m.entities.len(),
+        ereignisse: m.events.len(),
+        beziehungen: m.relationships.len(),
+        herkunftsangaben: m.provenance.len(),
+        statistik: std::mem::take(&mut m.statistik),
+        hinweise,
+    })
 }
 
 #[cfg(test)]

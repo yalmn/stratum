@@ -1,0 +1,17 @@
+[package]
+name = "stratum-normalize"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bildet die Rohfunde der stratum-Engine auf das gemeinsame Datenmodell ab"
+
+[dependencies]
+stratum-analysis = { path = "../analysis" }
+stratum-model = { path = "../../stratum_model" }
+serde.workspace = true
+serde_json = "1.0.151"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "now", "serde"] }
+uuid = "1.26.1"
+
+[dev-dependencies]
+uuid = "1.26.1"

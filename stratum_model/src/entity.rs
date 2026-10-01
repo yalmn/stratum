@@ -26,6 +26,10 @@ pub enum EntityKind {
     FileStream,
     /// Verzeichnis.
     Directory,
+    /// Volume oder Laufwerksbuchstabe (Ergänzung zur Zielarchitektur).
+    Volume,
+    /// Netzwerkfreigabe (Ergänzung zur Zielarchitektur).
+    NetworkShare,
     /// Prozess.
     Process,
     /// Dienst.

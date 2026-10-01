@@ -1696,6 +1696,7 @@ name = "stratum-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "indicatif",
  "serde",
@@ -1704,10 +1705,13 @@ dependencies = [
  "stratum-core",
  "stratum-creds",
  "stratum-ewf",
+ "stratum-model",
+ "stratum-normalize",
  "stratum-ntfs",
  "stratum-registry",
  "stratum-search",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -1780,6 +1784,18 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "uuid",
+]
+
+[[package]]
+name = "stratum-normalize"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "stratum-analysis",
+ "stratum-model",
  "uuid",
 ]
 

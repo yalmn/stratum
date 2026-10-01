@@ -464,9 +464,31 @@ Zeitangaben tragen UTC-Zeitpunkt, Originalwert, Genauigkeit und Bedeutung
 (Artefaktzeit, Ereigniszeit, Akquisezeit, Analysezeit, Analystenaktion);
 Ortszeiten ohne bekannte Zone werden nicht umgerechnet.
 
-Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das. Die Funde
-der Engine werden in einem nächsten Schritt über einen Normalizer auf das
-Modell abgebildet.
+Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
+
+**Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
+auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes
+und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch
+und USB:
+
+- Ereignisprotokolle: je Datensatz ein Artefakt und ein Ereignis
+  (Anmeldung, Abmeldung, Anmeldeversuch, Prozessstart, Dienst installiert,
+  Kontoänderungen, Gruppenmitgliedschaft, Protokolllöschung, RDP) mit
+  Benutzer, ausführendem Konto, Rechner, Quell-IP, Programm oder Dienst.
+  Systemstart und Herunterfahren sind aus dem Start und Stopp des
+  Ereignisprotokolldienstes geschlossen und als abgeleitet markiert.
+- Prefetch: letzte Ausführung als Prozessstart des Programms.
+- USB: Gerät mit seinen Zeitpunkten, Volume und Laufwerksbuchstabe liegen
+  auf dem Gerät (`MountedDevices`), Benutzer nutzt Volume oder Freigabe
+  (`MountPoints2`).
+
+Benutzer werden über die SID zusammengeführt. Nennt eine Quelle nur den
+Namen, wird die SID ergänzt, wenn der Name in den Ereignisprotokollen
+eindeutig einer SID zugeordnet ist; das steht dann an der Entität. Ohne
+`--fall-id` wird die Fall-ID aus dem Image-Hash abgeleitet, sodass Läufe
+über dasselbe Image dieselben IDs ergeben. Die Statistik nennt je Domäne,
+was abgebildet wurde, was noch keinen Mapper hat und wo die Fundstelle
+unvollständig ist.
 
 ## E01-Images
 
