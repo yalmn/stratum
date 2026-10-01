@@ -12,8 +12,9 @@
 #![warn(missing_docs)]
 
 use serde_json::Value;
-use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::types::Json;
+use sqlx::Connection as _;
 use stratum_model::AnalysisRunId;
 use stratum_normalize::{Kontext, Modell};
 
@@ -70,8 +71,13 @@ impl Datenbank {
         if let Some(p) = passwort {
             optionen = optionen.password(p);
         }
+        // Erst eine einzelne Verbindung: so kommt die eigentliche Ursache
+        // (Passwort falsch, Verbindung verweigert) an, nicht nur ein
+        // Zeitablauf des Pools.
+        sqlx::Connection::close(PgConnection::connect_with(&optionen).await?).await?;
         let pool = PgPoolOptions::new()
             .max_connections(2)
+            .acquire_timeout(std::time::Duration::from_secs(10))
             .connect_with(optionen)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
