@@ -292,11 +292,26 @@ fn main() -> Result<()> {
     } else {
         let pb = bytes_bar(img.len(), "Hashing");
         let cb: stratum_core::Progress = &|done| pb.set_position(done);
-        let h = hash_image_with_progress(&img, Some(cb));
+        // Bei E01 scheitert der Hash an einem unlesbaren Chunk; ohne
+        // vollständigen Hash keine Analyse (sonst mit --no-hash).
+        let h = hash_image_with_progress(&img, Some(cb))
+            .context("Integritäts-Hash nicht berechenbar (Image beschädigt?)")?;
         pb.finish_and_clear();
         eprintln!("[+] Integritäts-Hashes berechnet ({} Bytes)", img.len());
         Some(h)
     };
+
+    let ewf_info = img.ewf().map(|e| ewf_report(e, hashes.as_ref()));
+    if let Some(info) = &ewf_info {
+        for (art, stimmt) in [("MD5", info.md5_stimmt), ("SHA-1", info.sha1_stimmt)] {
+            if stimmt == Some(false) {
+                warnings.push(format!(
+                    "Akquise-{art} des E01 stimmt nicht mit den gelesenen Mediendaten überein"
+                ));
+            }
+        }
+        warnings.extend(info.warnungen.iter().map(|w| format!("E01: {w}")));
+    }
 
     let partitions = scan_partitions(&img);
     eprintln!(
@@ -558,7 +573,12 @@ fn main() -> Result<()> {
         generated_unix,
         image: ImageInfo {
             path: img.path().display().to_string(),
+            format: match img.format() {
+                stratum_core::ImageFormat::Raw => "raw",
+                stratum_core::ImageFormat::Ewf => "e01",
+            },
             size: img.len(),
+            ewf: ewf_info,
             hashes,
         },
         partitions,
@@ -708,6 +728,52 @@ fn with_extension(path: &std::path::Path, ext: &str) -> PathBuf {
     s.push(".");
     s.push(ext);
     PathBuf::from(s)
+}
+
+/// Angaben aus einem E01-Image für den Report, mit Abgleich der bei der
+/// Akquise gespeicherten Hashes gegen die gelesenen Mediendaten.
+fn ewf_report(
+    e: &stratum_ewf::EwfImage,
+    hashes: Option<&stratum_core::ImageHashes>,
+) -> report::EwfInfo {
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let gespeichert = e.stored_hashes();
+    let info = e.info();
+    report::EwfInfo {
+        segmente: e
+            .segment_paths()
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        chunk_groesse: e.chunk_size(),
+        sektor_groesse: e.bytes_per_sector(),
+        satz_id: e.set_id().map(|g| hex(&g)),
+        akquise_quelle: info.source,
+        akquise: info
+            .values
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .map(|(k, v)| {
+                let name = stratum_ewf::AcquisitionInfo::label(k).unwrap_or(k);
+                (name.to_string(), v.clone())
+            })
+            .collect(),
+        akquisezeit_utc: info
+            .acquired_unix()
+            .and_then(|u| u64::try_from(u + 11_644_473_600).ok())
+            .and_then(|s| stratum_core::time::filetime_to_iso(s * 10_000_000)),
+        gespeichert_md5: gespeichert.md5.map(|m| hex(&m)),
+        gespeichert_sha1: gespeichert.sha1.map(|m| hex(&m)),
+        md5_stimmt: gespeichert
+            .md5
+            .zip(hashes.and_then(|h| h.md5.as_deref()))
+            .map(|(g, b)| hex(&g) == b),
+        sha1_stimmt: gespeichert
+            .sha1
+            .zip(hashes.and_then(|h| h.sha1.as_deref()))
+            .map(|(g, b)| hex(&g) == b),
+        warnungen: e.warnings().to_vec(),
+    }
 }
 
 #[cfg(test)]

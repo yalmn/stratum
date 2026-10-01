@@ -12,7 +12,7 @@
 
 use stratum_core::time::filetime_to_iso;
 use stratum_ntfs::RecordInfo;
-use stratum_vss::{guid, Location, Volume};
+use stratum_vss::{guid, Location};
 
 use crate::schatten::Abweichung;
 use crate::{AnalysisContext, Analyzer, Finding, Outcome};
@@ -30,25 +30,11 @@ impl Analyzer for VssAnalyzer {
 
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
-        let data = ctx.img.as_slice();
-
-        for target in &ctx.ntfs_targets {
-            let start = target.offset as usize;
-            let end = match start.checked_add(target.size as usize) {
-                Some(e) if e <= data.len() => e,
-                _ => continue,
-            };
-            let vss = match Volume::open(&data[start..end]) {
-                Ok(Some(v)) => v,
-                Ok(None) => continue,
-                Err(e) => {
-                    out.warnings.push(format!(
-                        "Offset {}: Schattenkopien nicht lesbar: {e}",
-                        target.offset
-                    ));
-                    continue;
-                }
-            };
+        // Die Schattenkopien liest der Kontext einmal ein; Lesefehler stehen
+        // dort in den Warnungen.
+        for schatten in ctx.schatten.iter() {
+            let target = &schatten.target;
+            let vss = &schatten.vss;
             for w in vss.warnings() {
                 out.warnings.push(format!("Offset {}: {w}", target.offset));
             }

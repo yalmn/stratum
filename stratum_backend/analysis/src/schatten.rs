@@ -13,10 +13,10 @@
 //! Verglichen wird der unbenannte Datenstrom; benannte Ströme nicht.
 
 use std::collections::HashMap;
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 
 use rayon::prelude::*;
-use stratum_core::ImageReader;
+use stratum_core::{ImageCursor, ImageReader};
 use stratum_ntfs::{DataStreamLayout, NtfsVolume, NtfsVolumeError, RecordInfo};
 use stratum_vss::{Location, StoreReader, Volume};
 
@@ -27,21 +27,56 @@ use crate::NtfsTarget;
 /// Datenläufe verschieden sind oder der Strom komprimiert ist.
 const MAX_VERGLEICH: u64 = 256 * 1024 * 1024;
 
+/// Ausschnitt eines Images (Roh oder E01) als Datenquelle für die
+/// Schattenkopien eines NTFS-Bereichs.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageBereich<'a> {
+    img: &'a ImageReader,
+    offset: u64,
+    size: u64,
+}
+
+impl<'a> ImageBereich<'a> {
+    /// Ausschnitt eines NTFS-Bereichs, `None`, wenn er über das Image hinausgeht.
+    pub fn new(img: &'a ImageReader, t: NtfsTarget) -> Option<Self> {
+        t.offset
+            .checked_add(t.size)
+            .filter(|&e| e <= img.len())
+            .map(|_| Self {
+                img,
+                offset: t.offset,
+                size: t.size,
+            })
+    }
+}
+
+impl stratum_vss::Source for ImageBereich<'_> {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> bool {
+        offset
+            .checked_add(buf.len() as u64)
+            .is_some_and(|e| e <= self.size)
+            && self.img.read_into(self.offset + offset, buf).is_ok()
+    }
+}
+
 /// Schattenkopien eines NTFS-Bereichs.
 #[derive(Debug)]
 pub struct Schatten<'a> {
     /// NTFS-Bereich, auf dem die Schattenkopien liegen.
     pub target: NtfsTarget,
     /// Eingelesene Schattenkopien.
-    pub vss: Volume<'a>,
+    pub vss: Volume<ImageBereich<'a>>,
 }
 
 /// Lesequelle eines NTFS-Volumes: Live-Bereich im Image oder Snapshot.
 pub enum VolumeReader<'c> {
     /// Bereich des Images.
-    Live(Cursor<&'c [u8]>),
+    Live(ImageCursor<'c>),
     /// Rekonstruierter Snapshot.
-    Snapshot(StoreReader<'c, 'c>),
+    Snapshot(StoreReader<'c, ImageBereich<'c>>),
 }
 
 impl Read for VolumeReader<'_> {
@@ -68,7 +103,7 @@ impl Seek for VolumeReader<'_> {
 /// zugeordnet (oder keiner, wenn der Block laut Bitmap nicht belegt war).
 #[derive(Clone, Copy)]
 pub struct Abbildung<'c> {
-    snapshot: Option<(&'c Volume<'c>, usize, u64)>,
+    snapshot: Option<(&'c Volume<ImageBereich<'c>>, usize, u64)>,
 }
 
 impl Abbildung<'_> {
@@ -103,9 +138,16 @@ pub(crate) fn open<'c>(
     let t = v.target;
     match v.herkunft {
         Herkunft::Live => {
-            let slice = image_slice(img, t)?;
-            let vol =
-                NtfsVolume::from_reader(VolumeReader::Live(Cursor::new(slice)), t.offset, t.size)?;
+            ImageBereich::new(img, t).ok_or(NtfsVolumeError::OutOfImage {
+                offset: t.offset,
+                size: t.size,
+                image_size: img.len(),
+            })?;
+            let vol = NtfsVolume::from_reader(
+                VolumeReader::Live(img.cursor(t.offset, t.size)),
+                t.offset,
+                t.size,
+            )?;
             Ok((vol, Abbildung::live()))
         }
         Herkunft::Snapshot { store, .. } => {
@@ -130,20 +172,6 @@ pub(crate) fn open<'c>(
             ))
         }
     }
-}
-
-fn image_slice(img: &ImageReader, t: NtfsTarget) -> Result<&[u8], NtfsVolumeError> {
-    let fehler = || NtfsVolumeError::OutOfImage {
-        offset: t.offset,
-        size: t.size,
-        image_size: img.len(),
-    };
-    let start = usize::try_from(t.offset).map_err(|_| fehler())?;
-    let end = start
-        .checked_add(usize::try_from(t.size).map_err(|_| fehler())?)
-        .filter(|&e| e <= img.as_slice().len())
-        .ok_or_else(fehler)?;
-    Ok(&img.as_slice()[start..end])
 }
 
 /// Stand einer Snapshot-Datei gegenüber dem Live-Volume.
@@ -252,8 +280,12 @@ fn snapshot_vergleichen(
     let size = reader.size();
     let mut snap = NtfsVolume::from_reader(reader, 0, size)?;
     let index = FsIndex::from_volume(&mut snap, t, Herkunft::Live)?;
-    let slice = image_slice(img, t)?;
-    let mut lv = NtfsVolume::from_reader(Cursor::new(slice), t.offset, t.size)?;
+    let live = ImageBereich::new(img, t).ok_or(NtfsVolumeError::OutOfImage {
+        offset: t.offset,
+        size: t.size,
+        image_size: img.len(),
+    })?;
+    let mut lv = NtfsVolume::open(img, t.offset, t.size)?;
     let mut abweichungen = Vec::new();
     let mut behalten = Vec::new();
     let warnungen: Vec<String> = index
@@ -266,7 +298,7 @@ fn snapshot_vergleichen(
         let (status, hinweis) = match live_eintrag {
             None => (Status::NurImSnapshot, None),
             Some(l) => {
-                match inhalt_gleich(&schatten.vss, store, t, slice, &mut snap, e, &mut lv, l) {
+                match inhalt_gleich(&schatten.vss, store, t, &live, &mut snap, e, &mut lv, l) {
                     Ok(true) => continue,
                     Ok(false) => (Status::InhaltAbweichend, None),
                     Err(h) => (Status::NichtPruefbar, Some(h)),
@@ -299,10 +331,10 @@ fn snapshot_vergleichen(
 /// `Ok(true)`, wenn der unbenannte Datenstrom nachweislich gleich ist.
 #[allow(clippy::too_many_arguments)]
 fn inhalt_gleich<R: Read + Seek, L: Read + Seek>(
-    vss: &Volume<'_>,
+    vss: &Volume<ImageBereich<'_>>,
     store: usize,
     t: NtfsTarget,
-    live_slice: &[u8],
+    live: &ImageBereich<'_>,
     snap: &mut NtfsVolume<R>,
     e: &FileEntry,
     lv: &mut NtfsVolume<L>,
@@ -319,7 +351,7 @@ fn inhalt_gleich<R: Read + Seek, L: Read + Seek>(
                 return Ok(a == b);
             }
             if gleiche_laeufe(&s, &v, t.offset) {
-                return laeufe_unveraendert(vss, store, live_slice, &s);
+                return laeufe_unveraendert(vss, store, live, &s);
             }
             voll_vergleichen(snap, e, lv, l, s.logical_size)
         }
@@ -354,12 +386,14 @@ fn gleiche_laeufe(s: &DataStreamLayout, v: &DataStreamLayout, bereich: u64) -> b
 /// Volume an derselben Stelle, sind sie gleich. Sonst werden die Bytes
 /// verglichen.
 fn laeufe_unveraendert(
-    vss: &Volume<'_>,
+    vss: &Volume<ImageBereich<'_>>,
     store: usize,
-    live: &[u8],
+    live: &ImageBereich<'_>,
     s: &DataStreamLayout,
 ) -> Result<bool, String> {
+    use stratum_vss::Source;
     let mut puffer = Vec::new();
+    let mut live_teil = Vec::new();
     for run in &s.runs {
         let Some(start) = run.image_offset else {
             continue;
@@ -372,10 +406,10 @@ fn laeufe_unveraendert(
             let gleich_ohne_lesen =
                 matches!(loc, Location::Volume { offset, from_store: false } if offset == pos);
             if !gleich_ohne_lesen {
-                let a = usize::try_from(pos).map_err(|e| e.to_string())?;
-                let live_teil = live
-                    .get(a..a + n as usize)
-                    .ok_or("Lauf außerhalb des Volumes")?;
+                live_teil.resize(n as usize, 0);
+                if !live.read_at(pos, &mut live_teil) {
+                    return Err("Lauf außerhalb des Volumes".into());
+                }
                 puffer.resize(n as usize, 0);
                 vss.read_at(store, pos, &mut puffer)
                     .map_err(|e| e.to_string())?;

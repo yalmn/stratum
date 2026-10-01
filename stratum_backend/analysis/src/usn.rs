@@ -138,7 +138,7 @@ pub fn write_usn_journal<W: Write>(
                         Error::new(ErrorKind::InvalidData, "USN-Image-Offset überläuft")
                     })?;
                     let data = img.read_at(source, take_usize).map_err(Error::other)?;
-                    scanner.feed(run.logical_offset + done, Some(source), data)?;
+                    scanner.feed(run.logical_offset + done, Some(source), &data)?;
                     done += take;
                 }
             }

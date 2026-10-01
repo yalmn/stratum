@@ -223,39 +223,86 @@ impl SearchEngine {
         base_offset: u64,
         progress: Option<&(dyn Fn(u64) + Sync)>,
     ) -> SearchResult {
+        self.run_blocks(
+            data.len() as u64,
+            base_offset,
+            &|s, e| Ok(std::borrow::Cow::Borrowed(&data[s as usize..e as usize])),
+            progress,
+        )
+    }
+
+    /// Wie [`SearchEngine::run_parallel_with_progress`], liest die Blöcke
+    /// aber über `fetch` (Start, Ende relativ zu `base_offset`), etwa aus
+    /// einem E01-Image, das nicht als Slice vorliegt. Ein nicht lesbarer
+    /// Block erscheint als Warnung.
+    pub fn run_parallel_fetch(
+        &self,
+        total: u64,
+        base_offset: u64,
+        fetch: &(dyn Fn(u64, u64) -> Result<Vec<u8>, String> + Sync),
+        progress: Option<&(dyn Fn(u64) + Sync)>,
+    ) -> SearchResult {
+        self.run_blocks(
+            total,
+            base_offset,
+            &|s, e| fetch(s, e).map(std::borrow::Cow::Owned),
+            progress,
+        )
+    }
+
+    fn run_blocks<'d>(
+        &self,
+        total: u64,
+        base_offset: u64,
+        get: &(dyn Fn(u64, u64) -> Result<std::borrow::Cow<'d, [u8]>, String> + Sync),
+        progress: Option<&(dyn Fn(u64) + Sync)>,
+    ) -> SearchResult {
         use rayon::prelude::*;
         use std::sync::atomic::{AtomicU64, Ordering};
 
         // Grobe Blockgröße: genug, damit sich die Parallelität lohnt, aber viele
         // Blöcke für gute Lastverteilung.
-        const BLOCK: usize = 64 * 1024 * 1024;
-        let overlap = self.max_pattern_len().max(1) - 1;
+        const BLOCK: u64 = 64 * 1024 * 1024;
+        let overlap = (self.max_pattern_len().max(1) - 1) as u64;
 
-        if self.ac.is_none() || data.len() <= BLOCK {
-            let r = self.run(data, base_offset);
+        let lesen = |s: u64, e: u64| -> SearchResult {
+            match get(s, e) {
+                Ok(d) => self.run(&d, base_offset + s),
+                Err(err) => SearchResult {
+                    findings: Vec::new(),
+                    warnings: vec![format!(
+                        "Bereich {} bis {} nicht lesbar: {err}",
+                        base_offset + s,
+                        base_offset + e
+                    )],
+                },
+            }
+        };
+        if self.ac.is_none() || total <= BLOCK {
+            let r = lesen(0, total);
             if let Some(p) = progress {
-                p(data.len() as u64);
+                p(total);
             }
             return r;
         }
 
         let done = AtomicU64::new(0);
         // Startpositionen der Blöcke.
-        let starts: Vec<usize> = (0..data.len()).step_by(BLOCK).collect();
+        let starts: Vec<u64> = (0..total).step_by(BLOCK as usize).collect();
         let mut parts: Vec<SearchResult> = starts
             .par_iter()
             .map(|&s| {
-                let end = (s + BLOCK + overlap).min(data.len());
-                let mut r = self.run(&data[s..end], base_offset + s as u64);
+                let end = (s + BLOCK + overlap).min(total);
+                let mut r = lesen(s, end);
                 // Treffer, die vollständig im Überlappungsbereich liegen, werden
                 // vom nächsten Block erneut gefunden; hier verwerfen (ausser im
                 // letzten Block).
-                if end < data.len() {
-                    let grenze = base_offset + (s + BLOCK) as u64;
+                if end < total {
+                    let grenze = base_offset + s + BLOCK;
                     r.findings.retain(|f| f.offset < grenze);
                 }
                 if let Some(p) = progress {
-                    let block_len = (end - s).min(BLOCK) as u64;
+                    let block_len = (end - s).min(BLOCK);
                     let total = done.fetch_add(block_len, Ordering::Relaxed) + block_len;
                     p(total);
                 }

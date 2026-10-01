@@ -1,13 +1,18 @@
 //! Integritäts-Hashes (SHA-256 und BLAKE3) über das gesamte Image.
 //!
-//! Beide Hashes laufen parallel in je einem Thread über das Mapping. Es wird
-//! nichts in den Heap kopiert; der Kernel lädt die Seiten bei Bedarf und kann
-//! sie danach wieder verwerfen. Die Gesamtdauer entspricht damit ungefähr der
-//! des langsameren Hashes (in der Regel SHA-256).
+//! Beim Rohimage laufen beide Hashes parallel in je einem Thread über das
+//! Mapping, ohne Kopie in den Heap. Bei E01 werden die Mediendaten blockweise
+//! entpackt (die Chunks eines Blocks parallel) und dann gehasht; trägt das
+//! Image bei der Akquise gespeicherte MD5- oder SHA-1-Werte, werden diese im
+//! selben Durchlauf mitgebildet, damit sie sich vergleichen lassen.
 
+use md5::Md5;
+use rayon::prelude::*;
 use serde::Serialize;
+use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
+use crate::error::ImageError;
 use crate::image::ImageReader;
 
 /// Blockgröße, in der die Hasher gefüttert werden.
@@ -22,6 +27,12 @@ pub struct ImageHashes {
     pub sha256: String,
     /// BLAKE3, 64 Hex-Zeichen.
     pub blake3: String,
+    /// MD5, nur bei E01 mit gespeichertem Akquise-MD5 (zum Vergleich).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub md5: Option<String>,
+    /// SHA-1, nur bei E01 mit gespeichertem Akquise-SHA-1 (zum Vergleich).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha1: Option<String>,
 }
 
 /// Rückmeldung über den Hash-Fortschritt: erhält die Gesamtzahl der bisher
@@ -29,17 +40,77 @@ pub struct ImageHashes {
 /// wird.
 pub type Progress<'a> = &'a (dyn Fn(u64) + Sync);
 
-/// Berechnet SHA-256 und BLAKE3 über das komplette Image.
-pub fn hash_image(img: &ImageReader) -> ImageHashes {
+/// Berechnet SHA-256 und BLAKE3 über das komplette Image. Fehler gibt es nur
+/// bei E01, wenn ein Chunk nicht lesbar ist.
+pub fn hash_image(img: &ImageReader) -> Result<ImageHashes, ImageError> {
     hash_image_with_progress(img, None)
 }
 
 /// Wie [`hash_image`], meldet aber den Fortschritt über `progress`.
-pub fn hash_image_with_progress(img: &ImageReader, progress: Option<Progress<'_>>) -> ImageHashes {
-    img.advise_sequential();
-    let hashes = hash_bytes_with_progress(img.as_slice(), progress);
-    img.advise_random();
-    hashes
+pub fn hash_image_with_progress(
+    img: &ImageReader,
+    progress: Option<Progress<'_>>,
+) -> Result<ImageHashes, ImageError> {
+    if let Some(data) = img.raw_slice() {
+        img.advise_sequential();
+        let hashes = hash_bytes_with_progress(data, progress);
+        img.advise_random();
+        return Ok(hashes);
+    }
+    hash_stream(img, progress)
+}
+
+/// Blockgröße beim gestreamten Hashen (E01).
+const BLOCK: usize = 16 * 1024 * 1024;
+/// Teilstücke eines Blocks, die parallel gelesen (entpackt) werden.
+const TEIL: usize = 1024 * 1024;
+
+/// Hasht ein Image, das nicht als Slice vorliegt.
+fn hash_stream(
+    img: &ImageReader,
+    progress: Option<Progress<'_>>,
+) -> Result<ImageHashes, ImageError> {
+    let gespeichert = img
+        .ewf()
+        .map(|e| e.stored_hashes().clone())
+        .unwrap_or_default();
+    let mut sha = Sha256::new();
+    let mut b3 = blake3::Hasher::new();
+    let mut md5 = gespeichert.md5.map(|_| Md5::new());
+    let mut sha1 = gespeichert.sha1.map(|_| Sha1::new());
+    let len = img.len();
+    let mut buf = vec![0u8; BLOCK.min(len as usize)];
+    let mut pos = 0u64;
+    while pos < len {
+        let n = (len - pos).min(BLOCK as u64) as usize;
+        let block = &mut buf[..n];
+        block
+            .par_chunks_mut(TEIL)
+            .enumerate()
+            .try_for_each(|(i, teil)| img.read_into(pos + (i * TEIL) as u64, teil))?;
+        let block = &buf[..n];
+        std::thread::scope(|s| {
+            s.spawn(|| sha.update(block));
+            if let Some(h) = md5.as_mut() {
+                s.spawn(move || h.update(block));
+            }
+            if let Some(h) = sha1.as_mut() {
+                s.spawn(move || h.update(block));
+            }
+            b3.update(block);
+        });
+        pos += n as u64;
+        if let Some(p) = progress {
+            p(pos);
+        }
+    }
+    Ok(ImageHashes {
+        bytes: len,
+        sha256: to_hex(&sha.finalize()),
+        blake3: b3.finalize().to_hex().to_string(),
+        md5: md5.map(|h| to_hex(&h.finalize())),
+        sha1: sha1.map(|h| to_hex(&h.finalize())),
+    })
 }
 
 /// Berechnet SHA-256 und BLAKE3 über `data`, blockweise und parallel.
@@ -79,6 +150,8 @@ pub fn hash_bytes_with_progress(data: &[u8], progress: Option<Progress<'_>>) -> 
         bytes: data.len() as u64,
         sha256: sha,
         blake3: b3,
+        md5: None,
+        sha1: None,
     }
 }
 
@@ -109,6 +182,8 @@ impl<W: std::io::Write> HashingWriter<W> {
             bytes: self.bytes,
             sha256: to_hex(&self.sha.finalize()),
             blake3: self.b3.finalize().to_hex().to_string(),
+            md5: None,
+            sha1: None,
         };
         Ok((self.inner, hashes))
     }

@@ -17,7 +17,8 @@ Das Werkzeug schliesst an [ForensiCUnlock](https://github.com/yalmn/ForensiCUnlo
 
 | Bereich | Beschreibung |
 |---|---|
-| Integrität | SHA-256 und BLAKE3 über das ganze Image, parallel und streamend |
+| Image-Formate | Rohimage (dd) und Expert Witness (E01, auch mehrteilig), erkannt an der Signatur |
+| Integrität | SHA-256 und BLAKE3 über das ganze Image, parallel und streamend; bei E01 zusätzlich Abgleich mit dem Akquise-MD5/SHA-1 |
 | Partitionen | MBR und GPT (512- und 4096-Byte-Sektoren), Volume ohne Tabelle, Dateisystem-Hinweis (NTFS, FAT, exFAT, ReFS, BitLocker) |
 | NTFS | gezielter Zugriff auf einzelne Dateien per Pfad, ohne Einhängen |
 | Registry | eigener regf-Parser, Zugriff per Pfad, Zeitzone und Rechnername |
@@ -427,6 +428,32 @@ wie bei SRUM; die Übersicht zählt nicht ausgewertete Werte
 
 Geprüft gegen dissect.esedb an einer Windows-11-WebCacheV01.dat: 35
 Datensätze, alle Ganzzahlwerte identisch.
+
+## E01-Images
+
+stratum liest Expert-Witness-Images (EWF-E01, von EnCase 1 bis 7, FTK Imager,
+linen und libewf) mit einem eigenen Leser (Crate `ewf`), ohne sie vorher zu
+entpacken oder einzuhängen. Weitere Segmente (`.E02` ... `.E99`, `.EAA` ...)
+werden neben der ersten Datei gefunden. Alle Analysen laufen auf E01 genauso
+wie auf Rohimages; Offsets im Report bezeichnen die Mediendaten.
+
+Jeder Chunk wird beim Lesen geprüft (zlib bzw. Adler-32). Ein beschädigter
+Chunk führt zu einem Fehler an genau dieser Stelle, nie zu stillschweigend
+eingesetzten Nullen; das Hashing bricht dann ab. Im Report stehen unter
+`image.ewf` die Segmentdateien, Chunk- und Sektorgröße, die Akquisedaten
+(Fallnummer, Bearbeiter, Beschreibung, Notizen, Programm, Akquisezeit) und
+die bei der Akquise gespeicherten Hashes. MD5 und SHA-1 werden im selben
+Durchlauf wie SHA-256 und BLAKE3 über die gelesenen Mediendaten gebildet und
+verglichen (`md5_stimmt`, `sha1_stimmt`); eine Abweichung erscheint als
+Warnung. Die Akquisezeit wird nur umgerechnet, wenn sie als POSIX-Zeit
+vorliegt; die ältere EnCase-Form ohne Zeitzone bleibt unverändert.
+
+Geprüft gegen libewf 20230212 (`ewfexport`, `ewfinfo`) an den E01-Dateien
+aus den dfvfs-Testdaten und an mit `ewfacquire` erzeugten Varianten (EnCase 1,
+5, 6, 7, FTK Imager, linen 6, mehrteilig, unkomprimiert, 128 Sektoren je
+Chunk): gleiche Mediendaten, gleicher Akquise-MD5, und die vollständige
+Analyse liefert dieselben Funde wie auf dem Rohimage. Nicht unterstützt und
+als solches gemeldet: EWF2 (`.Ex01`) und logische Images (`.L01`).
 
 ## Schattenkopien (VSS)
 

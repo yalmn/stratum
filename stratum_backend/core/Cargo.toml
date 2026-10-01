@@ -7,11 +7,15 @@ description = "Image-IO, Hashing, Partitionen und Analyzer-Trait für stratum"
 
 [dependencies]
 stratum-mmap.workspace = true
+stratum-ewf.workspace = true
 sha2.workspace = true
 blake3.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 crc32fast.workspace = true
+rayon = "1.12.0"
+md-5 = "0.11.0"
+sha1 = "0.11.0"
 
 [dev-dependencies]
 tempfile.workspace = true

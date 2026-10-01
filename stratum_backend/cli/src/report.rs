@@ -135,13 +135,57 @@ impl Default for Tool {
 /// Angaben zum Image.
 #[derive(Debug, Serialize)]
 pub struct ImageInfo {
-    /// Pfad, unter dem das Image geöffnet wurde.
+    /// Pfad, unter dem das Image geöffnet wurde (bei E01 die erste
+    /// Segmentdatei).
     pub path: String,
-    /// Größe in Bytes.
+    /// `raw` oder `e01`.
+    pub format: &'static str,
+    /// Größe in Bytes (bei E01 die Mediengröße).
     pub size: u64,
     /// Integritäts-Hashes, falls berechnet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hashes: Option<ImageHashes>,
+    /// Angaben aus einem E01-Image.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ewf: Option<EwfInfo>,
+}
+
+/// Angaben aus einem E01-Image (Akquise).
+#[derive(Debug, Serialize, Default)]
+pub struct EwfInfo {
+    /// Segmentdateien in Reihenfolge.
+    pub segmente: Vec<String>,
+    /// Chunkgröße in Byte.
+    pub chunk_groesse: u32,
+    /// Byte je Sektor.
+    pub sektor_groesse: u32,
+    /// Kennung des Segmentsatzes, falls gesetzt.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub satz_id: Option<String>,
+    /// Sektion, aus der die Akquisedaten stammen (`header2` oder `header`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub akquise_quelle: Option<&'static str>,
+    /// Akquisedaten (Fallnummer, Bearbeiter, Notizen ...), Schlüssel lesbar
+    /// benannt, unbekannte Kennungen unverändert.
+    pub akquise: std::collections::BTreeMap<String, String>,
+    /// Akquisezeit in UTC, wenn als POSIX-Zeit gespeichert.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub akquisezeit_utc: Option<String>,
+    /// Bei der Akquise gespeicherter MD5.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gespeichert_md5: Option<String>,
+    /// Bei der Akquise gespeicherter SHA-1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gespeichert_sha1: Option<String>,
+    /// MD5 über die gelesenen Mediendaten stimmt mit dem gespeicherten überein.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub md5_stimmt: Option<bool>,
+    /// SHA-1 über die gelesenen Mediendaten stimmt mit dem gespeicherten überein.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha1_stimmt: Option<bool>,
+    /// Hinweise beim Öffnen.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub warnungen: Vec<String>,
 }
 
 /// Ergebnisse einer Windows-Installation (einer NTFS-Partition).

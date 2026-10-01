@@ -160,17 +160,14 @@ pub fn extract_installs(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<Window
 /// Copies (frühere Zustände). Registry-basierte Analyzer laufen dadurch
 /// automatisch auch auf diese Snapshots.
 pub fn extract_snapshots(img: &ImageReader, targets: &[NtfsTarget]) -> Vec<WindowsInstall> {
-    let data = img.as_slice();
     let mut out = Vec::new();
 
     for &target in targets {
-        let start = target.offset as usize;
-        let end = match start.checked_add(target.size as usize) {
-            Some(e) if e <= data.len() => e,
-            _ => continue,
+        let Some(bereich) = crate::schatten::ImageBereich::new(img, target) else {
+            continue;
         };
-        // Fehler meldet der VSS-Analyzer; hier nur überspringen.
-        let Ok(Some(vss)) = stratum_vss::Volume::open(&data[start..end]) else {
+        // Fehler meldet der Kontextaufbau; hier nur überspringen.
+        let Ok(Some(vss)) = stratum_vss::Volume::open(bereich) else {
             continue;
         };
         for info in vss.stores() {

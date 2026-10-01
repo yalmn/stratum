@@ -14,7 +14,7 @@ fn abgleich_wie_vollvergleich() {
     let dir = std::path::PathBuf::from(std::env::var_os("STRATUM_VSS_REFERENCE").unwrap());
     let pfad = dir.join("vss.raw");
     let img = ImageReader::open(&pfad).unwrap();
-    let data = img.as_slice();
+    let data = img.raw_slice().unwrap();
     let ctx = AnalysisContext::build(
         &img,
         vec![NtfsTarget {

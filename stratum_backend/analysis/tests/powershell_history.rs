@@ -15,7 +15,7 @@ fn verlauf_aus_mini_image_behaelt_dateipositionen() {
     fixture.flush().unwrap();
     let image = ImageReader::open(fixture.path()).unwrap();
     let result = parse_powershell_history(
-        image.read_at(512, history.len()).unwrap(),
+        &image.read_at(512, history.len()).unwrap(),
         "Users\\alice\\ConsoleHost_history.txt",
     );
     assert!(result.warnings.is_empty());

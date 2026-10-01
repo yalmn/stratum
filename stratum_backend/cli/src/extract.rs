@@ -175,7 +175,7 @@ pub fn run(img: &ImageReader, targets: &[NtfsTarget], sel: Selector, out: &Path)
     Ok(())
 }
 
-type Found<'a> = (u64, NtfsVolume<std::io::Cursor<&'a [u8]>>, u64, &'a str);
+type Found<'a> = (u64, NtfsVolume<stratum_core::ImageCursor<'a>>, u64, &'a str);
 
 fn find<'a>(img: &'a ImageReader, targets: &[NtfsTarget], sel: &Selector<'a>) -> Result<Found<'a>> {
     match *sel {

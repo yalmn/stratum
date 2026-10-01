@@ -86,8 +86,8 @@ fn vier_zeitpunkte_mit_quellen_und_timeline() {
     ]);
     let file = mini_image(&hive);
     let img = ImageReader::open(file.path()).unwrap();
-    let hashes = hash_image(&img);
-    let out = analyze(&img, &img.as_slice()[512..], "VSS#1");
+    let hashes = hash_image(&img).unwrap();
+    let out = analyze(&img, &img.raw_slice().unwrap()[512..], "VSS#1");
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     assert_eq!(out.findings.len(), 1);
     let f = &out.findings[0];
@@ -136,7 +136,7 @@ fn vier_zeitpunkte_mit_quellen_und_timeline() {
         assert_eq!(entry.finding_index, 0);
         assert_eq!(entry.volume.as_deref(), Some("VSS#1"));
     }
-    assert_eq!(hash_image(&img), hashes);
+    assert_eq!(hash_image(&img).unwrap(), hashes);
 }
 
 #[test]
@@ -148,8 +148,8 @@ fn fehlende_null_und_defekte_werte_ohne_ersatzzeit() {
     ]);
     let file = mini_image(&hive);
     let img = ImageReader::open(file.path()).unwrap();
-    hash_image(&img);
-    let out = analyze(&img, &img.as_slice()[512..], "live");
+    hash_image(&img).unwrap();
+    let out = analyze(&img, &img.raw_slice().unwrap()[512..], "live");
     assert_eq!(out.findings.len(), 1);
     let attrs = &out.findings[0].attributes;
     assert_eq!(attrs["installation_status"], "nicht_gesetzt");
@@ -173,8 +173,8 @@ fn beschädigter_wert_lässt_weitere_zeitpunkte_erhalten() {
     hive[offsets[0] as usize + 4] = b'x';
     let file = mini_image(&hive);
     let img = ImageReader::open(file.path()).unwrap();
-    hash_image(&img);
-    let out = analyze(&img, &img.as_slice()[512..], "live");
+    hash_image(&img).unwrap();
+    let out = analyze(&img, &img.raw_slice().unwrap()[512..], "live");
     assert_eq!(out.findings.len(), 1);
     assert_eq!(out.warnings.len(), 1);
     let attrs = &out.findings[0].attributes;
@@ -190,13 +190,13 @@ fn winscope_referenz() {
         std::env::var_os("STRATUM_USB_REFERENCE_DIR").expect("Referenzordner setzen"),
     );
     let img = ImageReader::open(dir.join("SYSTEM.hive")).unwrap();
-    let hashes = hash_image(&img);
+    let hashes = hash_image(&img).unwrap();
     let html = std::fs::read_to_string(dir.join("winscope_report.html")).unwrap();
     assert!(
         html.contains(&hashes.sha256),
         "Hive-Hash stimmt nicht mit WinScope überein"
     );
-    let out = analyze(&img, img.as_slice(), "live");
+    let out = analyze(&img, img.raw_slice().unwrap(), "live");
     assert!(out.warnings.is_empty(), "{:?}", out.warnings);
     let devices: Vec<_> = out
         .findings
@@ -224,7 +224,7 @@ fn winscope_referenz() {
         let offset: usize = f.attributes[&format!("{field}_hive_offset")]
             .parse()
             .unwrap();
-        let bytes = img.as_slice();
+        let bytes = img.raw_slice().unwrap();
         assert_eq!(&bytes[offset + 4..offset + 6], b"vk");
         let cell = u32::from_le_bytes(bytes[offset + 12..offset + 16].try_into().unwrap()) as usize;
         let ft = u64::from_le_bytes(bytes[4100 + cell..4108 + cell].try_into().unwrap());

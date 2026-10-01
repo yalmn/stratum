@@ -26,4 +26,8 @@ pub enum ImageError {
         /// Tatsächliche Imagegröße in Bytes.
         size: u64,
     },
+
+    /// Expert-Witness-Image (E01) nicht lesbar oder beschädigt.
+    #[error("E01: {0}")]
+    Ewf(#[from] stratum_ewf::EwfError),
 }

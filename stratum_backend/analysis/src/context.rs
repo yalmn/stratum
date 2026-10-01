@@ -128,10 +128,10 @@ impl<'a> AnalysisContext<'a> {
         let mut abweichungen = Vec::new();
         let mut snapshot_dateien = Vec::new();
         for &target in &ntfs_targets {
-            let Ok(slice) = slice(img, target) else {
+            let Some(bereich) = schatten::ImageBereich::new(img, target) else {
                 continue;
             };
-            let vss = match stratum_vss::Volume::open(slice) {
+            let vss = match stratum_vss::Volume::open(bereich) {
                 Ok(Some(v)) if v.store_count() > 0 => v,
                 Ok(_) => continue,
                 Err(e) => {
@@ -211,13 +211,4 @@ impl<'a> AnalysisContext<'a> {
             })
             .collect()
     }
-}
-
-fn slice(img: &ImageReader, t: NtfsTarget) -> Result<&[u8], ()> {
-    let start = usize::try_from(t.offset).map_err(|_| ())?;
-    let end = start
-        .checked_add(usize::try_from(t.size).map_err(|_| ())?)
-        .filter(|&e| e <= img.as_slice().len())
-        .ok_or(())?;
-    Ok(&img.as_slice()[start..end])
 }

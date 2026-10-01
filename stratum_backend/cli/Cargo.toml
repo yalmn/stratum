@@ -16,6 +16,7 @@ stratum-ntfs = { path = "../ntfs" }
 stratum-search = { path = "../search" }
 stratum-creds = { path = "../creds" }
 stratum-analysis = { path = "../analysis" }
+stratum-ewf.workspace = true
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
 serde = { workspace = true }

@@ -9,6 +9,8 @@ use std::fmt;
 
 use serde::{Serialize, Serializer};
 
+use std::borrow::Cow;
+
 use crate::image::{slice_at, ImageReader};
 
 /// Sektorgröße für MBR-Adressierung.
@@ -191,19 +193,51 @@ pub struct PartitionTable {
     pub warnings: Vec<String>,
 }
 
+/// Lesezugriff der Partitionserkennung: ein Byte-Slice oder ein Image. Es
+/// werden nur die nötigen Sektoren gelesen.
+pub trait PartitionSource {
+    /// Gesamtlänge in Byte.
+    fn total_len(&self) -> u64;
+    /// `len` Byte ab `offset`, `None` außerhalb (oder bei E01 nicht lesbar).
+    fn bytes(&self, offset: u64, len: usize) -> Option<Cow<'_, [u8]>>;
+}
+
+impl PartitionSource for [u8] {
+    fn total_len(&self) -> u64 {
+        self.len() as u64
+    }
+    fn bytes(&self, offset: u64, len: usize) -> Option<Cow<'_, [u8]>> {
+        slice_at(self, offset, len).map(Cow::Borrowed)
+    }
+}
+
+impl PartitionSource for ImageReader {
+    fn total_len(&self) -> u64 {
+        self.len()
+    }
+    fn bytes(&self, offset: u64, len: usize) -> Option<Cow<'_, [u8]>> {
+        self.read_at(offset, len).ok()
+    }
+}
+
 /// Erkennt die Partitionierung eines Images.
 pub fn scan_partitions(img: &ImageReader) -> PartitionTable {
-    scan_bytes(img.as_slice())
+    scan_source(img)
 }
 
 /// Erkennt die Partitionierung eines Images, das als Byte-Slice vorliegt.
 ///
 /// Arbeitet nur auf `&[u8]` und ist damit direkt als Fuzz-Target nutzbar.
 pub fn scan_bytes(data: &[u8]) -> PartitionTable {
-    let mut warnings = Vec::new();
-    let image_len = data.len() as u64;
+    scan_source(data)
+}
 
-    let Some(lba0) = slice_at(data, 0, MBR_SECTOR as usize) else {
+/// Erkennt die Partitionierung über eine beliebige [`PartitionSource`].
+pub fn scan_source<S: PartitionSource + ?Sized>(data: &S) -> PartitionTable {
+    let mut warnings = Vec::new();
+    let image_len = data.total_len();
+
+    let Some(lba0) = data.bytes(0, MBR_SECTOR as usize) else {
         warnings.push(format!("Image kleiner als ein Sektor ({image_len} Bytes)"));
         return PartitionTable {
             scheme: PartitionScheme::None,
@@ -213,7 +247,7 @@ pub fn scan_bytes(data: &[u8]) -> PartitionTable {
     };
 
     // Ein Volume-Bootsektor trägt ebenfalls 0x55AA, deshalb vor dem MBR prüfen.
-    let fs = detect_fs(lba0);
+    let fs = detect_fs(&lba0);
     if fs != FsHint::Unknown {
         return PartitionTable {
             scheme: PartitionScheme::Volume,
@@ -243,7 +277,7 @@ pub fn scan_bytes(data: &[u8]) -> PartitionTable {
         };
     }
 
-    let mbr = parse_mbr(data, lba0, &mut warnings);
+    let mbr = parse_mbr(data, &lba0, &mut warnings);
 
     if mbr.iter().any(|p| p.typ == PartitionType::Mbr(0xEE)) {
         match parse_gpt(data, &mut warnings) {
@@ -268,7 +302,11 @@ pub fn scan_bytes(data: &[u8]) -> PartitionTable {
     }
 }
 
-fn parse_mbr(data: &[u8], lba0: &[u8], warnings: &mut Vec<String>) -> Vec<Partition> {
+fn parse_mbr<S: PartitionSource + ?Sized>(
+    data: &S,
+    lba0: &[u8],
+    warnings: &mut Vec<String>,
+) -> Vec<Partition> {
     let mut out = Vec::with_capacity(4);
     for i in 0..4u32 {
         let off = 446 + 16 * i as usize;
@@ -305,19 +343,23 @@ fn parse_mbr(data: &[u8], lba0: &[u8], warnings: &mut Vec<String>) -> Vec<Partit
     out
 }
 
-fn parse_gpt(data: &[u8], warnings: &mut Vec<String>) -> Option<Vec<Partition>> {
+fn parse_gpt<S: PartitionSource + ?Sized>(
+    data: &S,
+    warnings: &mut Vec<String>,
+) -> Option<Vec<Partition>> {
     let (ss, hdr_off) = GPT_SECTOR_SIZES.iter().find_map(|&ss| {
         let off = u64::from(ss);
-        (slice_at(data, off, 8)? == b"EFI PART").then_some((ss, off))
+        (data.bytes(off, 8)?.as_ref() == b"EFI PART").then_some((ss, off))
     })?;
 
-    let hdr = slice_at(data, hdr_off, GPT_HEADER_MIN)?;
+    let hdr = data.bytes(hdr_off, GPT_HEADER_MIN)?;
+    let hdr = hdr.as_ref();
     let header_size = le_u32(hdr, 12) as usize;
     if header_size < GPT_HEADER_MIN || header_size > ss as usize {
         warnings.push(format!("GPT: ungültige Headergröße {header_size}"));
         return None;
     }
-    let full_hdr = slice_at(data, hdr_off, header_size)?;
+    let full_hdr = data.bytes(hdr_off, header_size)?;
     let stored_crc = le_u32(hdr, 16);
     let mut crc = crc32fast::Hasher::new();
     crc.update(&full_hdr[..16]);
@@ -350,13 +392,13 @@ fn parse_gpt(data: &[u8], warnings: &mut Vec<String>) -> Option<Vec<Partition>> 
         return None;
     };
     // array_len <= GPT_MAX_ARRAY, passt also sicher in usize.
-    let Some(array) = slice_at(data, array_off, array_len as usize) else {
+    let Some(array) = data.bytes(array_off, array_len as usize) else {
         warnings.push(format!(
             "GPT: Eintragsarray (Offset {array_off}, {array_len} Bytes) liegt außerhalb des Images"
         ));
         return None;
     };
-    if crc32fast::hash(array) != entries_crc {
+    if crc32fast::hash(&array) != entries_crc {
         warnings.push("GPT: CRC32 des Eintragsarrays stimmt nicht".into());
     }
 
@@ -399,8 +441,8 @@ fn parse_gpt(data: &[u8], warnings: &mut Vec<String>) -> Option<Vec<Partition>> 
 }
 
 #[allow(clippy::too_many_arguments)]
-fn build_partition(
-    data: &[u8],
+fn build_partition<S: PartitionSource + ?Sized>(
+    data: &S,
     index: u32,
     typ: PartitionType,
     start_lba: u64,
@@ -420,9 +462,9 @@ fn build_partition(
         return None;
     };
 
-    let image_len = data.len() as u64;
-    let fs_hint = match slice_at(data, start_offset, sector_size as usize) {
-        Some(boot) => detect_fs(boot),
+    let image_len = data.total_len();
+    let fs_hint = match data.bytes(start_offset, sector_size as usize) {
+        Some(boot) => detect_fs(&boot),
         None => FsHint::OutOfImage,
     };
     if start_offset

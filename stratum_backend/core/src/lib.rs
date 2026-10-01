@@ -17,7 +17,8 @@ pub use hash::{
     hash_bytes, hash_bytes_with_progress, hash_image, hash_image_with_progress, HashingWriter,
     ImageHashes, Progress,
 };
-pub use image::ImageReader;
+pub use image::{ImageCursor, ImageFormat, ImageReader};
 pub use partition::{
-    scan_partitions, FsHint, Guid, Partition, PartitionScheme, PartitionTable, PartitionType,
+    scan_partitions, scan_source, FsHint, Guid, Partition, PartitionScheme, PartitionSource,
+    PartitionTable, PartitionType,
 };

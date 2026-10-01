@@ -17,7 +17,7 @@ fn wie_libvshadow() {
     let data = std::fs::read(dir.join("vss.raw")).unwrap();
     let referenz: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("vss_referenz.json")).unwrap()).unwrap();
-    let vol = Volume::open(&data).unwrap().expect("VSS erwartet");
+    let vol = Volume::open(&data[..]).unwrap().expect("VSS erwartet");
     assert!(vol.warnings().is_empty(), "{:?}", vol.warnings());
     let stores = referenz["stores"].as_array().unwrap();
     assert_eq!(vol.store_count(), stores.len());

@@ -27,6 +27,7 @@ stratum-mmap = { path = "stratum_backend/mmap" }
 stratum-registry = { path = "stratum_backend/registry" }
 stratum-ese = { path = "stratum_backend/ese" }
 stratum-vss = { path = "stratum_backend/vss" }
+stratum-ewf = { path = "stratum_backend/ewf" }
 stratum-core = { path = "stratum_backend/core" }
 memmap2 = "0.9.11"
 sha2 = "0.11.0"

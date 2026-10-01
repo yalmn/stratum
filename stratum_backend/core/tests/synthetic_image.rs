@@ -35,7 +35,7 @@ fn durchstich() {
     let img = ImageReader::open(f.path()).unwrap();
     assert_eq!(img.len(), data.len() as u64);
 
-    let h = hash_image(&img);
+    let h = hash_image(&img).unwrap();
     assert_eq!(h.bytes, data.len() as u64);
     assert_eq!(h.sha256.len(), 64);
     assert_eq!(h.blake3, blake3::hash(&data).to_hex().to_string());

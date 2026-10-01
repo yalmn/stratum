@@ -28,7 +28,7 @@ use ntfs::structured_values::{
 };
 use ntfs::{Ntfs, NtfsAttributeFlags, NtfsAttributeType, NtfsFile, NtfsFileFlags};
 
-use stratum_core::ImageReader;
+use stratum_core::{ImageCursor, ImageReader};
 
 pub use error::NtfsVolumeError;
 
@@ -249,16 +249,16 @@ pub const MAX_WALK_ENTRIES: usize = 5_000_000;
 /// Obergrenze für die Verzeichnistiefe.
 const MAX_WALK_DEPTH: usize = 128;
 
-impl<'a> NtfsVolume<Cursor<&'a [u8]>> {
+impl<'a> NtfsVolume<ImageCursor<'a>> {
     /// Öffnet ein NTFS-Volume, das bei `part_offset` beginnt und `part_size`
-    /// Bytes umfasst.
+    /// Bytes umfasst (Rohimage oder E01).
     pub fn open(
         img: &'a ImageReader,
         part_offset: u64,
         part_size: u64,
     ) -> Result<Self, NtfsVolumeError> {
         let image_size = img.len();
-        let end = part_offset
+        part_offset
             .checked_add(part_size)
             .filter(|&e| e <= image_size)
             .ok_or(NtfsVolumeError::OutOfImage {
@@ -266,15 +266,11 @@ impl<'a> NtfsVolume<Cursor<&'a [u8]>> {
                 size: part_size,
                 image_size,
             })?;
-        let start = usize::try_from(part_offset).map_err(|_| NtfsVolumeError::OutOfImage {
-            offset: part_offset,
-            size: part_size,
-            image_size,
-        })?;
-        let slice = &img.as_slice()[start..end as usize];
-        Self::from_reader(Cursor::new(slice), part_offset, part_size)
+        Self::from_reader(img.cursor(part_offset, part_size), part_offset, part_size)
     }
+}
 
+impl<'a> NtfsVolume<Cursor<&'a [u8]>> {
     /// Öffnet ein NTFS-Volume, das bereits als blanker Byte-Slice vorliegt
     /// (das Volume beginnt bei Byte 0). Nützlich für Tests und Fuzzing.
     pub fn from_bytes(data: &'a [u8]) -> Result<Self, NtfsVolumeError> {

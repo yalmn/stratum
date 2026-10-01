@@ -164,16 +164,28 @@ impl KeywordAnalyzer {
         let total = ctx.img.len();
         let cb = |done: u64| self.report(done, total);
         let cb_ref: &(dyn Fn(u64) + Sync) = &cb;
-        let result = self
-            .engine
-            .run_parallel_with_progress(ctx.img.as_slice(), 0, Some(cb_ref));
+        let result = match ctx.img.raw_slice() {
+            Some(data) => self
+                .engine
+                .run_parallel_with_progress(data, 0, Some(cb_ref)),
+            // E01: Blöcke einzeln entpacken.
+            None => self.engine.run_parallel_fetch(
+                total,
+                0,
+                &|s, e| {
+                    ctx.img
+                        .read_at(s, (e - s) as usize)
+                        .map(|c| c.into_owned())
+                        .map_err(|err| err.to_string())
+                },
+                Some(cb_ref),
+            ),
+        };
 
+        let warnings = result.warnings.clone();
         let mut findings = Vec::new();
         map_findings(result, "Image (roh)", None, &mut findings);
-        Outcome {
-            findings,
-            warnings: Vec::new(),
-        }
+        Outcome { findings, warnings }
     }
 }
 

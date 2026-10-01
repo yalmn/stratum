@@ -2,19 +2,19 @@
 
 use std::io::{self, Read, Seek, SeekFrom};
 
-use crate::Volume;
+use crate::{Source, Volume};
 
 /// Lesbare, suchbare Sicht auf einen Snapshot.
 #[derive(Debug, Clone)]
-pub struct StoreReader<'v, 'a> {
-    volume: &'v Volume<'a>,
+pub struct StoreReader<'v, S: Source> {
+    volume: &'v Volume<S>,
     store: usize,
     size: u64,
     position: u64,
 }
 
-impl<'v, 'a> StoreReader<'v, 'a> {
-    pub(crate) fn new(volume: &'v Volume<'a>, store: usize, size: u64) -> Self {
+impl<'v, S: Source> StoreReader<'v, S> {
+    pub(crate) fn new(volume: &'v Volume<S>, store: usize, size: u64) -> Self {
         Self {
             volume,
             store,
@@ -29,7 +29,7 @@ impl<'v, 'a> StoreReader<'v, 'a> {
     }
 }
 
-impl Read for StoreReader<'_, '_> {
+impl<S: Source> Read for StoreReader<'_, S> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.position >= self.size || buf.is_empty() {
             return Ok(0);
@@ -43,7 +43,7 @@ impl Read for StoreReader<'_, '_> {
     }
 }
 
-impl Seek for StoreReader<'_, '_> {
+impl<S: Source> Seek for StoreReader<'_, S> {
     fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
         let neu = match pos {
             SeekFrom::Start(o) => Some(o),
