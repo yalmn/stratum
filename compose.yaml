@@ -2,7 +2,10 @@
 #
 # Nur auf 127.0.0.1 erreichbar. Das Passwort steht in .stratum_db_passwort
 # (nicht im Repository); dieselbe Datei liest stratum über
-# STRATUM_DB_PASSWORT_DATEI. Das Schema legt stratum selbst an (Migrationen
+# STRATUM_DB_PASSWORT_DATEI. Sie muss lesbar sein (chmod 644), weil der
+# Container sie als Benutzer postgres liest; sonst bleibt das Passwort leer
+# und der Container startet immer wieder neu. Das Schema legt stratum
+# selbst an (Migrationen
 # im Crate stratum-store), nicht dieser Container.
 services:
   datenbank:
