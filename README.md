@@ -469,7 +469,7 @@ Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
 **Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
 auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes
 und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch,
-USB, Programmausführung, Benutzeraktivität, Persistenz und Browser:
+USB, Programmausführung, Benutzeraktivität, Persistenz, Browser und SRUM:
 
 - Ereignisprotokolle: je Datensatz ein Artefakt und ein Ereignis
   (Anmeldung, Abmeldung, Anmeldeversuch, Prozessstart, Dienst installiert,
@@ -508,6 +508,12 @@ USB, Programmausführung, Benutzeraktivität, Persistenz und Browser:
   Pfad. Von gespeicherten Zugangsdaten geht nur die Bestandsaufnahme
   (Anzahl) ins Modell; entschlüsselte Passwörter bleiben im Report und
   werden nicht abgebildet.
+- SRUM: jede Zeile als Nutzung mit Programm, Konto und Rechner. Das
+  Programm richtet sich nach dem Kennungstyp: Dienst (dieselbe Entität wie
+  aus der Registry), App-Paket, Datei oder Programmname; Kennungen der
+  App-Timeline (`!!svchost.exe!…`) werden auf den Programmnamen
+  zurückgeführt. `TimeStamp` ist als Artefaktzeit gekennzeichnet, weil
+  nicht belegt ist, welchen Zeitpunkt er genau festhält.
 
 Dateien ohne MFT-Nummer werden über den Pfad zusammengeführt, getrennt nach
 Laufwerksbuchstabe (`c:`) und Gerätepfad (`\Device\HarddiskVolume3`). Steht

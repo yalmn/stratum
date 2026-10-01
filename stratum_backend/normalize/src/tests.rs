@@ -1045,3 +1045,87 @@ fn browser_verlauf_datei_und_keine_passwoerter() {
     assert!(!json.contains("geheim123"));
     assert!(!json.contains("bank.tld"));
 }
+
+#[test]
+fn srum_programme_nach_kennungstyp() {
+    let zeile = |programm: &str, typ: &str, auto: &str| {
+        fund(
+            "srum",
+            programm,
+            "Windows\\System32\\sru\\SRUDB.dat",
+            &[
+                ("art", "srum"),
+                ("programm", programm),
+                ("programm_id_typ", typ),
+                ("konto", "S-1-5-18"),
+                ("anbieter", "Windows Network Data Usage Monitor"),
+                ("tabelle", "{973F5D5C-1D90-4944-BE8E-24B94231A174}"),
+                ("AutoIncId", auto),
+                ("zeitpunkt_ole", "46130.37291666667"),
+                ("volume_offset", "122683392"),
+                ("mft_record", "109565"),
+                ("datei_offset", auto),
+            ],
+        )
+    };
+    let funde = vec![
+        fund(
+            "persistence",
+            "Dnscache",
+            "SYSTEM\\ControlSet001\\Services\\Dnscache",
+            &[
+                ("ort", "Dienst"),
+                ("befehl", "svchost.exe"),
+                ("hive_offset", "1"),
+            ],
+        ),
+        zeile("Dnscache", "1", "1"),
+        zeile(
+            "!!svchost.exe!2104/11/12:20:36:41!19466![netsvcs]",
+            "0",
+            "2",
+        ),
+        zeile(
+            "\\Device\\HarddiskVolume3\\Windows\\System32\\svchost.exe [LocalService] [nsi]",
+            "0",
+            "3",
+        ),
+        zeile(
+            "Microsoft.Windows.StartMenuExperienceHost_10.0.26100.1301_neutral",
+            "2",
+            "4",
+        ),
+    ];
+    let m = normalisieren(&funde, &kontext());
+    assert_eq!(m.statistik.abgebildet.get("srum"), Some(&4));
+    assert!(m.statistik.fundstelle_unvollstaendig.is_empty());
+    // Dienst aus SRUM ist derselbe wie aus der Registry.
+    assert_eq!(
+        m.entities
+            .iter()
+            .filter(|e| e.kind == EntityKind::Service)
+            .count(),
+        1
+    );
+    entitaet(&m, EntityKind::Application, "svchost.exe");
+    let datei = entitaet(
+        &m,
+        EntityKind::File,
+        "\\Device\\HarddiskVolume3\\Windows\\System32\\svchost.exe",
+    );
+    assert_eq!(datei.attributes["volume"], "harddiskvolume3");
+    entitaet(
+        &m,
+        EntityKind::Application,
+        "Microsoft.Windows.StartMenuExperienceHost_10.0.26100.1301_neutral",
+    );
+    let ereignisse: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| e.attributes["quelle"] == "srum")
+        .collect();
+    assert_eq!(ereignisse.len(), 4);
+    let zeit = ereignisse[0].occurred_at.as_ref().unwrap();
+    assert_eq!(zeit.semantics, TimeSemantics::ArtifactTime);
+    assert_eq!(zeit.utc.to_rfc3339(), "2026-04-18T08:57:00+00:00");
+}

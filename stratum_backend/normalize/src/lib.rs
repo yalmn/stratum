@@ -22,6 +22,7 @@ mod hilfen;
 mod persistenz;
 mod prefetch;
 mod programm;
+mod srum;
 mod usb;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -317,6 +318,7 @@ pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
                 None
             }
             "browser" => Some(browser::abbilden(f, &mut b)),
+            "srum" => Some(srum::abbilden(f, &mut b)),
             _ => None,
         };
         let zaehler = match ergebnis {
