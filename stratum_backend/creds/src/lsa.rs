@@ -36,6 +36,9 @@ pub struct Secret {
     pub name: String,
     /// Entschlüsselter Inhalt.
     pub value: Vec<u8>,
+    /// Position der Wertzelle unter `Policy\Secrets\<Name>\CurrVal` in der
+    /// Hive-Datei.
+    pub cell_offset: u64,
 }
 
 /// Leitet den LSA-Schlüssel aus Bootkey und `Policy\PolEKList` ab.
@@ -92,7 +95,11 @@ pub fn secrets(security: &Hive, lsa_key: &[u8; 32]) -> Vec<Secret> {
             // Der eigentliche Wert steht in der LSA_SECRET_BLOB ab Offset 16,
             // seine Laenge im Length-Feld.
             if let Some(value) = blob_secret(&plain) {
-                out.push(Secret { name, value });
+                out.push(Secret {
+                    name,
+                    value,
+                    cell_offset: val.file_offset(),
+                });
             }
         }
     }
@@ -106,6 +113,10 @@ pub struct CachedLogon {
     pub username: String,
     /// DCC2-Hash (MSCACHEV2), hex, mit hashcat-Modus 2100 angreifbar.
     pub dcc2_hex: String,
+    /// Name des Werts unter `Cache` (`NL$1` …).
+    pub value_name: String,
+    /// Position der Wertzelle in der Hive-Datei.
+    pub cell_offset: u64,
 }
 
 /// Entschlüsselt die gecachten Domain-Logins unter `Cache\NL$n` mit dem
@@ -161,6 +172,8 @@ pub fn cached_logons(security: &Hive, nklm: &[u8]) -> Vec<CachedLogon> {
         out.push(CachedLogon {
             username,
             dcc2_hex: hash.iter().map(|b| format!("{b:02x}")).collect(),
+            value_name: name.to_string(),
+            cell_offset: v.file_offset(),
         });
     }
     out

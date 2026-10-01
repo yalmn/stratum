@@ -47,10 +47,16 @@ impl Analyzer for LsaAnalyzer {
                             continue;
                         }
                         let (wert, art) = interpret(&s.value);
-                        let mut f = Finding::new("lsa", &s.name, "SECURITY\\Policy\\Secrets")
-                            .with("wert", wert)
-                            .with("darstellung", art)
-                            .with("laenge", s.value.len().to_string());
+                        let mut f = Finding::new(
+                            "lsa",
+                            &s.name,
+                            format!("SECURITY\\Policy\\Secrets\\{}\\CurrVal", s.name),
+                        )
+                        .with("art", "lsa_secret")
+                        .with("hive_offset", s.cell_offset.to_string())
+                        .with("wert", wert)
+                        .with("darstellung", art)
+                        .with("laenge", s.value.len().to_string());
                         // DPAPI_SYSTEM: Version (4), Maschinen- und Benutzerschlüssel
                         // (je 20 Byte). Getrennt ausgeben, wie secretsdump es tut.
                         if s.name == "DPAPI_SYSTEM" && s.value.len() >= 44 {
@@ -71,6 +77,8 @@ impl Analyzer for LsaAnalyzer {
                         out.findings.push(
                             Finding::new("lsa", l.username, "SECURITY\\Cache")
                                 .with("art", "dcc2")
+                                .with("wertname", l.value_name)
+                                .with("hive_offset", l.cell_offset.to_string())
                                 .with("dcc2_hash", l.dcc2_hex)
                                 .with("hinweis", "DCC2, mit hashcat-Modus 2100 angreifbar"),
                         );

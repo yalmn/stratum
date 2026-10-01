@@ -71,7 +71,7 @@ impl Analyzer for DpapiAnalyzer {
             else {
                 continue;
             };
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings.push(format!(
@@ -100,7 +100,8 @@ impl Analyzer for DpapiAnalyzer {
                 let mut fd = Finding::new("dpapi", "System-Masterkey", &e.path)
                     .with("art", "system_masterkey")
                     .with("guid", guid)
-                    .with("entschluesselt", if mk.is_some() { "ja" } else { "nein" });
+                    .with("entschluesselt", if mk.is_some() { "ja" } else { "nein" })
+                    .mit_datei(v.target.offset, &f.meta, &abbildung);
                 if let Some(mk) = mk {
                     fd = fd.with("schluessel", welcher);
                     if debug {
