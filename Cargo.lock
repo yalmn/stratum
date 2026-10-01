@@ -1701,6 +1701,7 @@ dependencies = [
  "indicatif",
  "serde",
  "serde_json",
+ "sha2",
  "stratum-analysis",
  "stratum-core",
  "stratum-creds",
