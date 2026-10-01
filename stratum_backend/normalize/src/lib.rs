@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+mod aktivitaet;
 mod evtx;
 mod hilfen;
 mod prefetch;
@@ -270,6 +271,7 @@ pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
             "prefetch" => Some(prefetch::abbilden(f, &mut b)),
             "usb" => Some(usb::abbilden(f, &mut b)),
             "programmausfuehrung" => Some(programm::abbilden(f, &mut b)),
+            "useraktivitaet" => Some(aktivitaet::abbilden(f, &mut b)),
             _ => None,
         };
         let zaehler = match ergebnis {

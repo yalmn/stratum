@@ -469,7 +469,7 @@ Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
 **Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
 auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes
 und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch,
-USB und Programmausführung:
+USB, Programmausführung und Benutzeraktivität:
 
 - Ereignisprotokolle: je Datensatz ein Artefakt und ein Ereignis
   (Anmeldung, Abmeldung, Anmeldeversuch, Prozessstart, Dienst installiert,
@@ -485,6 +485,15 @@ USB und Programmausführung:
   letzten Änderung des Eintrags, Shimcache als Änderungszeit der Datei
   (beides belegt keine Ausführung), BAM/DAM als letzte Ausführung durch
   den Benutzer mit der SID des Schlüssels.
+- Benutzeraktivität: UserAssist als Prozessstart, MRU-Listen der
+  NTUSER.DAT (TypedURLs, TypedPaths, RunMRU, WordWheelQuery, RecentDocs,
+  ComDlg32), LNK-Dateien, Sprunglisten, ShellBags und ActivitiesCache als
+  Nutzung durch den Benutzer. Ein Ereignis gibt es nur, wenn die Zeit
+  sicher zum Eintrag gehört: bei MRU-Listen und ShellBags nur für den
+  zuletzt verwendeten Eintrag (Änderungszeit des Schlüssels, als abgeleitet
+  markiert), bei LNK-Dateien die eigenen Zeiten der Verknüpfung (erstes und
+  letztes Öffnen), sonst die Zeiten, die die Quelle selbst nennt. Ziele von
+  Verknüpfungen werden mit der Seriennummer ihres Volumes verbunden.
 
 Dateien ohne MFT-Nummer werden über den Pfad zusammengeführt, getrennt nach
 Laufwerksbuchstabe (`c:`) und Gerätepfad (`\Device\HarddiskVolume3`). Steht

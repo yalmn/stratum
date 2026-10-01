@@ -269,11 +269,31 @@ pub fn datei(
     pfad: &str,
     gesehen: Option<chrono::DateTime<chrono::Utc>>,
 ) -> EntityId {
+    pfad_entitaet(b, EntityKind::File, pfad, gesehen)
+}
+
+/// Datei oder Verzeichnis über den Pfad, Schlüssel wie bei [`datei`]. Ein
+/// Verzeichnis erhält den Präfix `verzeichnis:` statt `pfad:`.
+pub fn pfad_entitaet(
+    b: &mut Baukasten<'_>,
+    kind: EntityKind,
+    pfad: &str,
+    gesehen: Option<chrono::DateTime<chrono::Utc>>,
+) -> EntityId {
     let (volume, rest) = pfad_teile(pfad);
+    let rest = if kind == EntityKind::Directory && rest.len() > 1 {
+        rest.trim_end_matches('\\').to_string()
+    } else {
+        rest
+    };
+    let mut schluessel = datei_schluessel(&volume, &rest);
+    if kind == EntityKind::Directory {
+        schluessel = schluessel.replacen("pfad:", "verzeichnis:", 1);
+    }
     let mut e = Entity::new(
         b.k.case_id,
-        EntityKind::File,
-        datei_schluessel(&volume, &rest),
+        kind,
+        schluessel,
         pfad.to_string(),
         b.k.zeitpunkt,
     );

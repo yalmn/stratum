@@ -480,3 +480,206 @@ fn gleicher_pfad_auf_buchstabe_und_geraet_korreliert() {
         .iter()
         .all(|r| r.kind != RelationshipKind::PossiblySameAs));
 }
+
+fn aktivitaetsfunde() -> Vec<RawFinding> {
+    let ntuser = "HKCU ich\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer";
+    vec![
+        fund(
+            "useraktivitaet",
+            "{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\cmd.exe",
+            &format!("{ntuser}\\UserAssist\\{{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}}\\Count"),
+            &[
+                ("art", "userassist"),
+                ("benutzer", "ich"),
+                ("wertname_roh", "{1NP14R77}\\pzq.rkr"),
+                ("hive_offset", "549600"),
+                ("ausfuehrungen", "3"),
+                ("letzte_ausfuehrung_filetime", "134209792309810000"),
+                ("pfad_aufgeloest", "C:\\WINDOWS\\system32\\cmd.exe"),
+            ],
+        ),
+        fund(
+            "useraktivitaet",
+            "UEME_CTLSESSION",
+            &format!("{ntuser}\\UserAssist\\{{CEBFF5CD-ACE2-4F4F-9178-9926F41749EA}}\\Count"),
+            &[
+                ("art", "userassist"),
+                ("benutzer", "ich"),
+                ("hive_offset", "444680"),
+            ],
+        ),
+        fund(
+            "useraktivitaet",
+            "neu.txt",
+            &format!("{ntuser}\\RecentDocs\\.txt"),
+            &[
+                ("art", "recent_doc"),
+                ("benutzer", "ich"),
+                ("wert", "1"),
+                ("hive_offset", "100"),
+                ("mru_position", "0"),
+                ("key_letzte_aenderung_filetime", "134209790846680107"),
+            ],
+        ),
+        fund(
+            "useraktivitaet",
+            "alt.txt",
+            &format!("{ntuser}\\RecentDocs\\.txt"),
+            &[
+                ("art", "recent_doc"),
+                ("benutzer", "ich"),
+                ("wert", "0"),
+                ("hive_offset", "200"),
+                ("mru_position", "1"),
+                ("key_letzte_aenderung_filetime", "134209790846680107"),
+            ],
+        ),
+        fund(
+            "useraktivitaet",
+            "F:\\Bericht.txt",
+            "Users\\ich\\AppData\\Roaming\\Microsoft\\Windows\\Recent\\Bericht.lnk",
+            &[
+                ("art", "lnk"),
+                ("benutzer", "ich"),
+                ("zielpfad", "F:\\Bericht.txt"),
+                ("laufwerk_seriennummer", "deb00001"),
+                ("volume_offset", "122683392"),
+                ("mft_record", "5000"),
+                ("mft_record_offset", "3000000000"),
+                ("lnk_erstellt_filetime", "134209790000000000"),
+                ("lnk_geaendert_filetime", "134209790846680107"),
+            ],
+        ),
+        fund(
+            "useraktivitaet",
+            "[unbekannt 0x1f]",
+            "HKCU ich UsrClass.dat\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\BagMRU",
+            &[
+                ("art", "shellbag"),
+                ("benutzer", "ich"),
+                ("bagmru", "1"),
+                ("wert", "1"),
+                ("hive_offset", "1297288"),
+            ],
+        ),
+        fund(
+            "useraktivitaet",
+            "[unbekannt 0x1f]",
+            "HKCU ich UsrClass.dat\\Local Settings\\Software\\Microsoft\\Windows\\Shell\\BagMRU",
+            &[
+                ("art", "shellbag"),
+                ("benutzer", "ich"),
+                ("bagmru", "3"),
+                ("wert", "3"),
+                ("hive_offset", "1297400"),
+                ("zuletzt_verwendet_unix", "1776505481"),
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn benutzeraktivitaet_zeiten_nur_wo_belegt() {
+    let m = normalisieren(&aktivitaetsfunde(), &kontext());
+    assert_eq!(m.statistik.abgebildet.get("useraktivitaet"), Some(&7));
+    assert!(m.statistik.fundstelle_unvollstaendig.is_empty());
+    let quelle = |e: &&Event| e.attributes["quelle"].as_str().map(str::to_string);
+
+    // UserAssist: Prozessstart mit Benutzer; UEME_CTL ohne Ereignis.
+    let ua: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| quelle(e).as_deref() == Some("userassist"))
+        .collect();
+    assert_eq!(ua.len(), 1);
+    assert_eq!(ua[0].kind, EventKind::ProcessStart);
+
+    // RecentDocs: nur Position 0 bekommt die Schlüsselzeit, abgeleitet.
+    let rd: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| quelle(e).as_deref() == Some("recent_doc"))
+        .collect();
+    assert_eq!(rd.len(), 1);
+    assert_eq!(rd[0].derivation, DerivationKind::Derived);
+    let teil: Vec<_> = m
+        .participants
+        .iter()
+        .filter(|p| p.event_id == rd[0].id && p.role == ParticipantRole::File)
+        .collect();
+    let datei = m
+        .entities
+        .iter()
+        .find(|e| e.id == teil[0].entity_id)
+        .unwrap();
+    assert_eq!(datei.display_name, "neu.txt");
+    assert!(
+        m.relationships
+            .iter()
+            .filter(|r| r.kind == RelationshipKind::UsesFile)
+            .count()
+            >= 3
+    );
+
+    // LNK: erstes und letztes Öffnen, Ziel liegt auf dem Volume mit der
+    // Seriennummer.
+    let lnk: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| quelle(e).as_deref() == Some("lnk"))
+        .collect();
+    assert_eq!(lnk.len(), 2);
+    let vol = entitaet(&m, EntityKind::Volume, "Volume-Seriennummer deb00001");
+    let ziel = entitaet(&m, EntityKind::File, "F:\\Bericht.txt");
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::LocatedOn
+            && r.source_entity_id == ziel.id
+            && r.target_entity_id == vol.id));
+
+    // ShellBags: unbekannte Elemente fallen nicht zusammen, Zeit nur beim
+    // Eintrag mit zuletzt_verwendet.
+    let unbekannt = m
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Directory && e.display_name == "[unbekannt 0x1f]")
+        .count();
+    assert_eq!(unbekannt, 2);
+    assert_eq!(
+        m.events
+            .iter()
+            .filter(|e| quelle(e).as_deref() == Some("shellbag"))
+            .count(),
+        1
+    );
+
+    // Fundstelle: Hive des Benutzers und echter Schlüsselpfad.
+    let a = m
+        .artifacts
+        .iter()
+        .find(|a| a.raw_metadata["name"] == "neu.txt")
+        .unwrap();
+    match &a.source_locator {
+        SourceLocator::Registry {
+            hive,
+            key_path,
+            value_name,
+            cell_offset,
+        } => {
+            assert_eq!(hive, "NTUSER.DAT ich");
+            assert!(key_path.starts_with("Software\\"), "{key_path}");
+            assert_eq!(value_name.as_deref(), Some("1"));
+            assert_eq!(*cell_offset, Some(100));
+        }
+        l => panic!("{l:?}"),
+    }
+    let sb = m
+        .artifacts
+        .iter()
+        .find(|a| a.kind == ArtifactKind::ShellItem)
+        .unwrap();
+    assert!(
+        matches!(&sb.source_locator, SourceLocator::Registry { hive, .. } if hive == "UsrClass.dat ich")
+    );
+}
