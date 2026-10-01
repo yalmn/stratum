@@ -9,7 +9,8 @@ use stratum_model::{
 };
 
 use crate::hilfen::{
-    artefakt, benutzer, datei, herkunft, herkunft_zusatz, host, ntfs, text, zahl, zeit_filetime,
+    artefakt, benutzer, datei, dienst, herkunft, herkunft_zusatz, host, ntfs, text, zahl,
+    zeit_filetime,
 };
 use crate::{Abbildung, Baukasten, GELESEN};
 
@@ -148,18 +149,8 @@ pub fn abbilden(f: &RawFinding, b: &mut Baukasten<'_>) -> Abbildung {
         dazu(datei(b, p, gesehen), ParticipantRole::Executable);
     }
     if let Some(d) = text(f, "dienst") {
-        let e = Entity::new(
-            b.k.case_id,
-            EntityKind::Service,
-            format!(
-                "dienst:{}:{}",
-                b.k.host.as_deref().unwrap_or("?").to_lowercase(),
-                d.to_lowercase()
-            ),
-            d.to_string(),
-            b.k.zeitpunkt,
-        );
-        dazu(b.entity(e, gesehen), ParticipantRole::Object);
+        let pfad = text(f, "dienst_pfad");
+        dazu(dienst(b, d, pfad, gesehen), ParticipantRole::Object);
     }
 
     let mut attribute = json!({"event_id": id, "event_record_id": record});

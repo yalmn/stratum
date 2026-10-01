@@ -18,6 +18,7 @@
 mod aktivitaet;
 mod evtx;
 mod hilfen;
+mod persistenz;
 mod prefetch;
 mod programm;
 mod usb;
@@ -90,6 +91,7 @@ pub struct Modell {
 pub(crate) struct Baukasten<'k> {
     pub k: &'k Kontext,
     pub personen: hilfen::Personen,
+    pub dienste: hilfen::Dienste,
     modell: Modell,
     entities: BTreeMap<EntityId, Entity>,
     relationships: BTreeMap<RelationshipId, Relationship>,
@@ -97,10 +99,11 @@ pub(crate) struct Baukasten<'k> {
 }
 
 impl<'k> Baukasten<'k> {
-    fn new(k: &'k Kontext, personen: hilfen::Personen) -> Self {
+    fn new(k: &'k Kontext, personen: hilfen::Personen, dienste: hilfen::Dienste) -> Self {
         Self {
             k,
             personen,
+            dienste,
             modell: Modell::default(),
             entities: BTreeMap::new(),
             relationships: BTreeMap::new(),
@@ -158,6 +161,22 @@ impl<'k> Baukasten<'k> {
             eintrag.last_seen = Some(eintrag.last_seen.map_or(t, |l| l.max(t)));
         }
         id
+    }
+
+    /// Attribute einer vorhandenen Entität ergänzen; vorhandene Werte
+    /// bleiben.
+    pub fn entity_attribute(&mut self, id: EntityId, neu: serde_json::Value) {
+        let (Some(e), serde_json::Value::Object(neu)) = (self.entities.get_mut(&id), neu) else {
+            return;
+        };
+        if !e.attributes.is_object() {
+            e.attributes = serde_json::json!({});
+        }
+        if let Some(alt) = e.attributes.as_object_mut() {
+            for (k, v) in neu {
+                alt.entry(k).or_insert(v);
+            }
+        }
     }
 
     /// Ereignis aufnehmen. Belegt eine weitere Quelle dasselbe Ereignis
@@ -276,7 +295,11 @@ pub(crate) enum Abbildung {
 
 /// Bildet alle Rohfunde ab.
 pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
-    let mut b = Baukasten::new(k, hilfen::Personen::aus_funden(funde));
+    let mut b = Baukasten::new(
+        k,
+        hilfen::Personen::aus_funden(funde),
+        hilfen::Dienste::aus_funden(funde),
+    );
     for f in funde {
         let ergebnis = match f.domain.as_str() {
             "eventlog" => Some(evtx::abbilden(f, &mut b)),
@@ -284,6 +307,7 @@ pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
             "usb" => Some(usb::abbilden(f, &mut b)),
             "programmausfuehrung" => Some(programm::abbilden(f, &mut b)),
             "useraktivitaet" => Some(aktivitaet::abbilden(f, &mut b)),
+            "persistence" => Some(persistenz::abbilden(f, &mut b)),
             _ => None,
         };
         let zaehler = match ergebnis {

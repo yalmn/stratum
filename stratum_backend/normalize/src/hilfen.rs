@@ -191,6 +191,101 @@ impl Personen {
     }
 }
 
+/// Zuordnung von Dienstnamen aus Ereignissen zum Schlüsselnamen in
+/// `Services`. Ereignis 7045 nennt den Anzeigenamen, die Registry den
+/// Schlüssel; verbunden wird über Anzeigename, Schlüsselname oder ImagePath,
+/// jeweils nur, wenn genau ein Dienst passt.
+pub struct Dienste {
+    namen: BTreeMap<String, BTreeSet<String>>,
+    pfade: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn pfad_vergleich(p: &str) -> String {
+    p.trim().trim_matches('"').to_lowercase()
+}
+
+impl Dienste {
+    pub fn aus_funden(funde: &[RawFinding]) -> Self {
+        let mut namen: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let mut pfade: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for f in funde
+            .iter()
+            .filter(|f| f.domain == "persistence" && text(f, "ort") == Some("Dienst"))
+        {
+            let schluessel = f.name.clone();
+            namen
+                .entry(f.name.to_lowercase())
+                .or_default()
+                .insert(schluessel.clone());
+            // Ressourcenverweise (`@%SystemRoot%\...`) sind kein Name.
+            if let Some(a) = text(f, "anzeigename").filter(|a| !a.starts_with('@')) {
+                namen
+                    .entry(a.to_lowercase())
+                    .or_default()
+                    .insert(schluessel.clone());
+            }
+            if let Some(p) = text(f, "befehl") {
+                pfade
+                    .entry(pfad_vergleich(p))
+                    .or_default()
+                    .insert(schluessel);
+            }
+        }
+        Self { namen, pfade }
+    }
+
+    /// Schlüsselname und Grundlage der Zuordnung.
+    pub fn schluessel(&self, name: &str, pfad: Option<&str>) -> Option<(&str, &'static str)> {
+        fn eindeutig(s: &BTreeSet<String>) -> Option<&str> {
+            (s.len() == 1).then(|| s.iter().next().map(String::as_str))?
+        }
+        if let Some(k) = self.namen.get(&name.to_lowercase()).and_then(eindeutig) {
+            return Some((k, "name"));
+        }
+        let k = self.pfade.get(&pfad_vergleich(pfad?)).and_then(eindeutig)?;
+        Some((k, "imagepath"))
+    }
+}
+
+/// Dienst als Entität über seinen Schlüsselnamen in `Services`. Ein Name aus
+/// einem Ereignis wird über [`Dienste`] aufgelöst; ohne eindeutige Zuordnung
+/// bleibt er als eigener Dienst stehen.
+pub fn dienst(
+    b: &mut Baukasten<'_>,
+    name: &str,
+    pfad: Option<&str>,
+    gesehen: Option<chrono::DateTime<chrono::Utc>>,
+) -> EntityId {
+    let zuordnung = b
+        .dienste
+        .schluessel(name, pfad)
+        .map(|(k, g)| (k.to_string(), g));
+    let schluessel = zuordnung
+        .as_ref()
+        .map_or(name, |(k, _)| k.as_str())
+        .to_string();
+    let mut e = Entity::new(
+        b.k.case_id,
+        EntityKind::Service,
+        format!(
+            "dienst:{}:{}",
+            b.k.host.as_deref().unwrap_or("?").to_lowercase(),
+            schluessel.to_lowercase()
+        ),
+        schluessel.clone(),
+        b.k.zeitpunkt,
+    );
+    let mut attr = json!({});
+    if !name.eq_ignore_ascii_case(&schluessel) {
+        attr["anzeigename"] = json!(name);
+    }
+    if let Some((_, g)) = zuordnung.filter(|(k, _)| !k.eq_ignore_ascii_case(name)) {
+        attr["zuordnung_ueber"] = json!(g);
+    }
+    e.attributes = attr;
+    b.entity(e, gesehen)
+}
+
 /// Windows-Benutzer als Entität: SID vor Domäne\Name vor Name. Fehlt die SID,
 /// wird sie über den Namen ergänzt, wenn er in diesem Fall eindeutig einer
 /// SID zugeordnet ist; das steht dann in den Attributen.

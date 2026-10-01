@@ -469,7 +469,7 @@ Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
 **Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
 auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes
 und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch,
-USB, Programmausführung und Benutzeraktivität:
+USB, Programmausführung, Benutzeraktivität und Persistenz:
 
 - Ereignisprotokolle: je Datensatz ein Artefakt und ein Ereignis
   (Anmeldung, Abmeldung, Anmeldeversuch, Prozessstart, Dienst installiert,
@@ -494,6 +494,14 @@ USB, Programmausführung und Benutzeraktivität:
   markiert), bei LNK-Dateien die eigenen Zeiten der Verknüpfung (erstes und
   letztes Öffnen), sonst die Zeiten, die die Quelle selbst nennt. Ziele von
   Verknüpfungen werden mit der Seriennummer ihres Volumes verbunden.
+- Persistenz: Dienste, geplante Aufgaben, Run-Schlüssel, Winlogon,
+  AppInit_DLLs, IFEO-Debugger und Autostart-Ordner als Entitäten mit Befehl
+  und Bewertung. Nennt der Befehl einen absoluten Pfad, führt der Eintrag
+  die Datei aus; Pfade mit Umgebungsvariablen werden nicht aufgelöst. Die
+  Erstellzeit der Aufgabendatei gilt als Zeitpunkt, zu dem die Aufgabe
+  angelegt wurde (abgeleitet). Dienste aus Ereignis 7045 werden über
+  Anzeigenamen oder ImagePath dem Registry-Schlüssel zugeordnet, nur wenn
+  genau ein Dienst passt.
 
 Dateien ohne MFT-Nummer werden über den Pfad zusammengeführt, getrennt nach
 Laufwerksbuchstabe (`c:`) und Gerätepfad (`\Device\HarddiskVolume3`). Steht

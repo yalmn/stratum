@@ -726,3 +726,197 @@ fn gleicher_eintrag_in_zwei_listen_ein_ereignis() {
         .count();
     assert_eq!(teilnehmer, 3, "Datei, Benutzer, Rechner je einmal");
 }
+
+fn persistenzfunde() -> Vec<RawFinding> {
+    let sieben = |record: &str, name: &str, pfad: &str| {
+        fund(
+            "eventlog",
+            "Dienst installiert",
+            "Windows\\System32\\winevt\\Logs\\System.evtx",
+            &[
+                ("event_id", "7045"),
+                ("event_record_id", record),
+                ("anbieter", "Service Control Manager"),
+                ("filetime", "134209755703752708"),
+                ("dienst", name),
+                ("dienst_pfad", pfad),
+                ("volume_offset", "122683392"),
+                ("mft_record", "39938"),
+                ("mft_record_offset", "3384805376"),
+                ("datei_offset", "69632"),
+            ],
+        )
+    };
+    vec![
+        fund(
+            "persistence",
+            "VBoxService",
+            "SYSTEM\\ControlSet001\\Services\\VBoxService",
+            &[
+                ("ort", "Dienst"),
+                ("befehl", "C:\\Windows\\System32\\VBoxService.exe"),
+                ("anzeigename", "VirtualBox Guest Additions Service"),
+                ("wert", "ImagePath"),
+                ("hive_offset", "4000"),
+                ("start_typ", "2"),
+            ],
+        ),
+        fund(
+            "persistence",
+            "e1iexpress",
+            "SYSTEM\\ControlSet001\\Services\\e1iexpress",
+            &[
+                ("ort", "Dienst"),
+                ("befehl", "\\SystemRoot\\System32\\drivers\\e1i63x64.sys"),
+                ("anzeigename", "@net1ix64.inf,%e1iExpress.Service.DispName%"),
+                ("wert", "ImagePath"),
+                ("hive_offset", "5000"),
+            ],
+        ),
+        // Über den Anzeigenamen.
+        sieben("86", "VirtualBox Guest Additions Service", "C:\\Windows\\System32\\VBoxService.exe"),
+        // Anzeigename ist ein Ressourcenverweis: über den ImagePath.
+        sieben(
+            "87",
+            "Intel(R) PRO/1000 NDIS 6-Adaptertreiber",
+            "\\SystemRoot\\System32\\drivers\\e1i63x64.sys",
+        ),
+        // Unbekannt: bleibt eigener Dienst.
+        sieben("88", "Fremder Dienst", "C:\\x.exe"),
+        fund(
+            "persistence",
+            "Microsoft\\Windows\\Wartung",
+            "Windows\\System32\\Tasks\\Microsoft\\Windows\\Wartung",
+            &[
+                ("ort", "Aufgabe"),
+                ("befehl", "%windir%\\system32\\wartung.exe"),
+                ("benutzer", "S-1-5-18"),
+                ("volume_offset", "122683392"),
+                ("mft_record", "109659"),
+                ("mft_record_offset", "3400000000"),
+                ("datei_erstellt_filetime", "133564301534449631"),
+            ],
+        ),
+        fund(
+            "persistence",
+            "OneDrive",
+            "HKCU ich\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+            &[
+                ("ort", "HKCU ich"),
+                ("benutzer", "ich"),
+                (
+                    "befehl",
+                    "\"C:\\Users\\ich\\AppData\\Local\\Microsoft\\OneDrive\\OneDrive.exe\" /background",
+                ),
+                ("wert", "OneDrive"),
+                ("hive_offset", "6000"),
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn dienste_aus_registry_und_ereignis_zusammen() {
+    let m = normalisieren(&persistenzfunde(), &kontext());
+    let dienste: Vec<_> = m
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::Service)
+        .collect();
+    assert_eq!(
+        dienste.len(),
+        3,
+        "{:?}",
+        dienste.iter().map(|e| &e.canonical_key).collect::<Vec<_>>()
+    );
+    let vbox = entitaet(&m, EntityKind::Service, "VBoxService");
+    assert_eq!(vbox.attributes["zuordnung_ueber"], "name");
+    assert_eq!(
+        vbox.attributes["befehl"],
+        "C:\\Windows\\System32\\VBoxService.exe"
+    );
+    let intel = entitaet(&m, EntityKind::Service, "e1iexpress");
+    assert_eq!(intel.attributes["zuordnung_ueber"], "imagepath");
+    entitaet(&m, EntityKind::Service, "Fremder Dienst");
+    // Dienst führt die Datei aus, wenn der Pfad absolut ist.
+    let datei = entitaet(
+        &m,
+        EntityKind::File,
+        "C:\\Windows\\System32\\VBoxService.exe",
+    );
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::Executes
+            && r.source_entity_id == vbox.id
+            && r.target_entity_id == datei.id));
+}
+
+#[test]
+fn aufgaben_und_run_schluessel() {
+    let m = normalisieren(&persistenzfunde(), &kontext());
+    assert_eq!(m.statistik.abgebildet.get("persistence"), Some(&4));
+    assert!(!m
+        .statistik
+        .fundstelle_unvollstaendig
+        .contains_key("persistence"));
+
+    let aufgabe = entitaet(&m, EntityKind::ScheduledTask, "Microsoft\\Windows\\Wartung");
+    let angelegt: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::ScheduledTaskCreated)
+        .collect();
+    assert_eq!(angelegt.len(), 1);
+    assert_eq!(angelegt[0].derivation, DerivationKind::Derived);
+    let system = m
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::UserAccount && e.attributes["sid"] == "S-1-5-18")
+        .unwrap();
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::BelongsTo
+            && r.source_entity_id == aufgabe.id
+            && r.target_entity_id == system.id));
+    // %windir% wird nicht aufgelöst: keine Datei zur Aufgabe.
+    assert!(!m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::Executes && r.source_entity_id == aufgabe.id));
+
+    // HKCU-Run: gehört zum Benutzer, Fundstelle im NTUSER-Hive.
+    let run = m
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::RegistryValue)
+        .unwrap();
+    assert!(
+        run.display_name.ends_with("Run\\OneDrive"),
+        "{}",
+        run.display_name
+    );
+    let a = m
+        .artifacts
+        .iter()
+        .find(|a| a.raw_metadata["name"] == "OneDrive")
+        .unwrap();
+    match &a.source_locator {
+        SourceLocator::Registry {
+            hive,
+            key_path,
+            value_name,
+            cell_offset,
+        } => {
+            assert_eq!(hive, "NTUSER.DAT ich");
+            assert_eq!(
+                key_path,
+                "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+            );
+            assert_eq!(value_name.as_deref(), Some("OneDrive"));
+            assert_eq!(*cell_offset, Some(6000));
+        }
+        l => panic!("{l:?}"),
+    }
+}
