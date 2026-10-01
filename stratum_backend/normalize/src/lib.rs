@@ -18,6 +18,7 @@
 mod evtx;
 mod hilfen;
 mod prefetch;
+mod programm;
 mod usb;
 
 use std::collections::BTreeMap;
@@ -26,9 +27,9 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use stratum_analysis::RawFinding;
 use stratum_model::{
-    Artifact, CaseId, DerivationKind, Entity, EntityId, Event, EventParticipant, EvidenceId,
-    ObjectRef, Observation, ParserIdentity, ProvenanceLink, ProvenanceRef, ProvenanceRole,
-    Relationship, RelationshipId,
+    Artifact, CaseId, DerivationKind, Entity, EntityId, EntityKind, Event, EventParticipant,
+    EvidenceId, ObjectRef, Observation, ParserIdentity, ProvenanceLink, ProvenanceRef,
+    ProvenanceRole, Relationship, RelationshipId, RelationshipKind,
 };
 
 /// Rahmen eines Normalisierungslaufs.
@@ -186,6 +187,65 @@ impl<'k> Baukasten<'k> {
         self.modell.hinweise.push(h);
     }
 
+    /// Dateien mit gleichem Pfad, einmal unter einem Laufwerksbuchstaben und
+    /// einmal unter einem Gerätepfad (`\\Device\\HarddiskVolumeN`), sind
+    /// möglicherweise dieselbe Datei. Sicher ist das nicht, weil die
+    /// Zuordnung von Buchstabe zu Gerät hier nicht geprüft wird; die
+    /// Beziehung ist deshalb korreliert.
+    fn gleiche_pfade_verbinden(&mut self) {
+        let mut gruppen: BTreeMap<&str, (Vec<EntityId>, Vec<EntityId>)> = BTreeMap::new();
+        for e in self.entities.values() {
+            if e.kind != EntityKind::File {
+                continue;
+            }
+            let (Some(volume), Some(rest)) = (
+                e.attributes.get("volume").and_then(|v| v.as_str()),
+                e.attributes
+                    .get("pfad_ohne_volume")
+                    .and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            let g = gruppen.entry(rest).or_default();
+            if volume.len() == 2 && volume.ends_with(':') {
+                g.0.push(e.id);
+            } else if volume.starts_with("harddiskvolume") {
+                g.1.push(e.id);
+            }
+        }
+        let mut neu = Vec::new();
+        for (rest, (buchstaben, geraete)) in gruppen {
+            for &l in &buchstaben {
+                for &d in &geraete {
+                    let mut r = Relationship::new(
+                        self.k.case_id,
+                        RelationshipKind::PossiblySameAs,
+                        l,
+                        d,
+                        DerivationKind::Correlated,
+                    );
+                    r.attributes = serde_json::json!({
+                        "grundlage": "gleicher_pfad_ohne_volume",
+                        "pfad_ohne_volume": rest,
+                    });
+                    neu.push(r);
+                }
+            }
+        }
+        let parser = self.parser("korrelation");
+        for r in neu {
+            let herkunft = ProvenanceRef {
+                evidence_id: self.k.evidence_id,
+                artifact_id: None,
+                observation_id: None,
+                source_locator: None,
+                parser: Some(parser.clone()),
+                analysis_run_id: None,
+            };
+            self.relationship(r, herkunft);
+        }
+    }
+
     fn fertig(mut self) -> Modell {
         self.modell.entities = self.entities.into_values().collect();
         self.modell.relationships = self.relationships.into_values().collect();
@@ -209,6 +269,7 @@ pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
             "eventlog" => Some(evtx::abbilden(f, &mut b)),
             "prefetch" => Some(prefetch::abbilden(f, &mut b)),
             "usb" => Some(usb::abbilden(f, &mut b)),
+            "programmausfuehrung" => Some(programm::abbilden(f, &mut b)),
             _ => None,
         };
         let zaehler = match ergebnis {
@@ -225,6 +286,7 @@ pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
         };
         *zaehler.entry(f.domain.clone()).or_default() += 1;
     }
+    b.gleiche_pfade_verbinden();
     b.fertig()
 }
 

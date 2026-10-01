@@ -313,3 +313,170 @@ fn spaeterer_name_ergaenzt_sid_entitaet() {
     assert_eq!(konten[0].display_name, "SYSTEM");
     assert_eq!(konten[0].attributes["domaene"], "NT-AUTORITÄT");
 }
+
+fn programmfunde() -> Vec<RawFinding> {
+    vec![
+        fund(
+            "programmausfuehrung",
+            "c:\\tools\\x.exe",
+            "Amcache.hve\\Root\\InventoryApplicationFile\\x.exe|1a2b",
+            &[
+                ("quelle", "amcache"),
+                ("pfad", "c:\\tools\\x.exe"),
+                ("hive_offset", "4096"),
+                ("registriert_filetime", "134209790846680107"),
+                ("sha1", "0033ab10bb6747e1e2671ea044e0f3fac684e398"),
+            ],
+        ),
+        fund(
+            "programmausfuehrung",
+            "C:\\Tools\\x.exe",
+            "SYSTEM\\ControlSet001\\Control\\Session Manager\\AppCompatCache\\AppCompatCache",
+            &[
+                ("quelle", "shimcache"),
+                ("pfad", "C:\\Tools\\x.exe"),
+                ("hive_offset", "8192"),
+                ("eintrag", "3"),
+                ("eintrag_offset", "512"),
+                ("letzte_aenderung_filetime", "134209790846680107"),
+            ],
+        ),
+        fund(
+            "programmausfuehrung",
+            "\\Device\\HarddiskVolume3\\Tools\\x.exe",
+            "SYSTEM\\ControlSet001\\Services\\bam\\State\\UserSettings\\S-1-5-21-1-2-3-1001",
+            &[
+                ("art", "bam"),
+                ("sid", "S-1-5-21-1-2-3-1001"),
+                ("hive_offset", "12288"),
+                ("letzte_ausfuehrung_filetime", "134209790846680107"),
+            ],
+        ),
+    ]
+}
+
+#[test]
+fn programmausfuehrung_drei_quellen() {
+    let m = normalisieren(&programmfunde(), &kontext());
+    assert_eq!(m.statistik.abgebildet.get("programmausfuehrung"), Some(&3));
+    assert!(m.statistik.fundstelle_unvollstaendig.is_empty());
+
+    // Amcache und Shimcache nennen dieselbe Datei (Groß/klein egal).
+    let dateien: Vec<_> = m
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::File)
+        .collect();
+    assert_eq!(dateien.len(), 2, "c:\\tools\\x.exe und harddiskvolume3");
+    let c = dateien
+        .iter()
+        .find(|e| e.canonical_key == "pfad:c:\\tools\\x.exe")
+        .expect("Laufwerksschlüssel");
+    let hash = m
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::Hash)
+        .expect("SHA-1");
+    assert_eq!(
+        hash.canonical_key,
+        "sha1:0033ab10bb6747e1e2671ea044e0f3fac684e398"
+    );
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::HasHash
+            && r.source_entity_id == c.id
+            && r.target_entity_id == hash.id));
+
+    // Nur BAM belegt eine Ausführung, mit Benutzer.
+    let starts: Vec<_> = m
+        .events
+        .iter()
+        .filter(|e| e.kind == EventKind::ProcessStart)
+        .collect();
+    assert_eq!(starts.len(), 1);
+    let rollen: Vec<_> = m
+        .participants
+        .iter()
+        .filter(|p| p.event_id == starts[0].id)
+        .map(|p| p.role)
+        .collect();
+    assert!(rollen.contains(&ParticipantRole::User));
+    assert!(rollen.contains(&ParticipantRole::Executable));
+    let shim = m
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::FileModified)
+        .expect("Shimcache-Zeit");
+    assert_eq!(shim.derivation, DerivationKind::Derived);
+    let amc = m
+        .events
+        .iter()
+        .find(|e| e.kind == EventKind::Custom)
+        .expect("Amcache-Zeit");
+    assert_eq!(
+        amc.occurred_at.as_ref().map(|t| t.semantics),
+        Some(TimeSemantics::ArtifactTime)
+    );
+
+    // Fundstelle der Shimcache: Schlüssel, Wert und Zelle.
+    let a = m
+        .artifacts
+        .iter()
+        .find(|a| {
+            a.kind == ArtifactKind::RegistryValue
+                && a.raw_metadata["attributes"]["quelle"] == "shimcache"
+        })
+        .expect("Shimcache-Artefakt");
+    match &a.source_locator {
+        SourceLocator::Registry {
+            hive,
+            key_path,
+            value_name,
+            cell_offset,
+        } => {
+            assert_eq!(hive, "SYSTEM");
+            assert_eq!(
+                key_path,
+                "ControlSet001\\Control\\Session Manager\\AppCompatCache"
+            );
+            assert_eq!(value_name.as_deref(), Some("AppCompatCache"));
+            assert_eq!(*cell_offset, Some(8192));
+        }
+        l => panic!("{l:?}"),
+    }
+}
+
+#[test]
+fn gleicher_pfad_auf_buchstabe_und_geraet_korreliert() {
+    let m = normalisieren(&programmfunde(), &kontext());
+    let r: Vec<_> = m
+        .relationships
+        .iter()
+        .filter(|r| r.kind == RelationshipKind::PossiblySameAs)
+        .collect();
+    assert_eq!(r.len(), 1);
+    assert_eq!(r[0].derivation, DerivationKind::Correlated);
+    let p: Vec<_> = m
+        .provenance
+        .iter()
+        .filter(|p| p.object == ObjectRef::Relationship(r[0].id))
+        .collect();
+    assert_eq!(p.len(), 1);
+    assert!(p[0].provenance.artifact_id.is_none());
+
+    // Zwei Laufwerksbuchstaben sind kein Hinweis auf dieselbe Datei.
+    let mut zwei = programmfunde();
+    zwei.truncate(1);
+    zwei.push(fund(
+        "programmausfuehrung",
+        "d:\\tools\\x.exe",
+        "Amcache.hve\\Root\\InventoryApplicationFile\\x.exe|9",
+        &[("quelle", "amcache"), ("pfad", "d:\\tools\\x.exe")],
+    ));
+    let m = normalisieren(&zwei, &kontext());
+    assert!(m
+        .relationships
+        .iter()
+        .all(|r| r.kind != RelationshipKind::PossiblySameAs));
+}

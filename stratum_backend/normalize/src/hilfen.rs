@@ -136,6 +136,16 @@ pub fn zeit_unix(f: &RawFinding, key: &str) -> Option<ForensicTime> {
     ForensicTime::from_unix(s, TimeSemantics::EventTime)
 }
 
+/// Zeit aus `{stamm}_filetime`, bei älteren Reports ohne dieses Feld aus
+/// `{stamm}_unix` (nur Sekunden).
+pub fn zeit(f: &RawFinding, stamm: &str, semantik: TimeSemantics) -> Option<ForensicTime> {
+    if let Some(ft) = zahl(f, &format!("{stamm}_filetime")) {
+        return ForensicTime::from_filetime(ft, semantik);
+    }
+    let s: i64 = f.attributes.get(&format!("{stamm}_unix"))?.parse().ok()?;
+    ForensicTime::from_unix(s, semantik)
+}
+
 /// Rechner des untersuchten Systems als Entität.
 pub fn host(b: &mut Baukasten<'_>) -> Option<EntityId> {
     let name = b.k.host.clone()?;
@@ -220,4 +230,53 @@ pub fn benutzer(
     }
     e.attributes = attr;
     Some(b.entity(e, gesehen))
+}
+
+/// Volume-Kennung und Rest eines Pfads: `C:\x` ergibt `c:` und `\x`,
+/// `\Device\HarddiskVolume3\x` ergibt `harddiskvolume3` und `\x`. Welcher
+/// Laufwerksbuchstabe zu welchem Gerätepfad gehört, steht nicht sicher im
+/// Image; beide bleiben deshalb getrennt.
+pub fn pfad_teile(pfad: &str) -> (String, String) {
+    let p = pfad.trim().replace('/', "\\");
+    let klein = p.to_lowercase();
+    if let Some(rest) = klein.strip_prefix("\\device\\") {
+        if let Some(i) = rest.find('\\') {
+            return (rest[..i].to_string(), rest[i..].to_string());
+        }
+    }
+    let b = klein.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        return (klein[..2].to_string(), klein[2..].to_string());
+    }
+    (String::new(), klein)
+}
+
+/// Schlüssel einer Datei ohne MFT-Identität: `pfad:c:\x` bei
+/// Laufwerksbuchstaben, `pfad:harddiskvolume3:\x` bei Gerätepfaden.
+fn datei_schluessel(volume: &str, rest: &str) -> String {
+    if volume.is_empty() || volume.ends_with(':') {
+        format!("pfad:{volume}{rest}")
+    } else {
+        format!("pfad:{volume}:{rest}")
+    }
+}
+
+/// Datei als Entität über ihren Pfad (ohne MFT-Identität). Der Schlüssel
+/// enthält Volume-Kennung und Rest getrennt; gleiche Reste auf verschiedenen
+/// Volume-Kennungen verbindet [`crate::normalisieren`] als `POSSIBLY_SAME_AS`.
+pub fn datei(
+    b: &mut Baukasten<'_>,
+    pfad: &str,
+    gesehen: Option<chrono::DateTime<chrono::Utc>>,
+) -> EntityId {
+    let (volume, rest) = pfad_teile(pfad);
+    let mut e = Entity::new(
+        b.k.case_id,
+        EntityKind::File,
+        datei_schluessel(&volume, &rest),
+        pfad.to_string(),
+        b.k.zeitpunkt,
+    );
+    e.attributes = json!({"volume": volume, "pfad_ohne_volume": rest});
+    b.entity(e, gesehen)
 }

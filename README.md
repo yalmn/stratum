@@ -468,8 +468,8 @@ Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
 
 **Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
 auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes
-und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch
-und USB:
+und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch,
+USB und Programmausführung:
 
 - Ereignisprotokolle: je Datensatz ein Artefakt und ein Ereignis
   (Anmeldung, Abmeldung, Anmeldeversuch, Prozessstart, Dienst installiert,
@@ -481,6 +481,16 @@ und USB:
 - USB: Gerät mit seinen Zeitpunkten, Volume und Laufwerksbuchstabe liegen
   auf dem Gerät (`MountedDevices`), Benutzer nutzt Volume oder Freigabe
   (`MountPoints2`).
+- Programmausführung: Amcache als Datei mit SHA-1 und dem Zeitpunkt der
+  letzten Änderung des Eintrags, Shimcache als Änderungszeit der Datei
+  (beides belegt keine Ausführung), BAM/DAM als letzte Ausführung durch
+  den Benutzer mit der SID des Schlüssels.
+
+Dateien ohne MFT-Nummer werden über den Pfad zusammengeführt, getrennt nach
+Laufwerksbuchstabe (`c:`) und Gerätepfad (`\Device\HarddiskVolume3`). Steht
+derselbe Pfad unter beiden, verbindet stratum die Dateien als „möglicherweise
+dieselbe“ und kennzeichnet das als Korrelation, weil die Zuordnung von
+Buchstabe zu Gerät nicht geprüft ist.
 
 Benutzer werden über die SID zusammengeführt. Nennt eine Quelle nur den
 Namen, wird die SID ergänzt, wenn der Name in den Ereignisprotokollen

@@ -9,7 +9,7 @@ use stratum_model::{
 };
 
 use crate::hilfen::{
-    artefakt, benutzer, herkunft, herkunft_zusatz, host, ntfs, text, zahl, zeit_filetime,
+    artefakt, benutzer, datei, herkunft, herkunft_zusatz, host, ntfs, text, zahl, zeit_filetime,
 };
 use crate::{Abbildung, Baukasten, GELESEN};
 
@@ -145,16 +145,7 @@ pub fn abbilden(f: &RawFinding, b: &mut Baukasten<'_>) -> Abbildung {
         dazu(b.entity(e, gesehen), ParticipantRole::SourceIp);
     }
     if let Some(p) = text(f, "prozess") {
-        // Nur der Pfad aus dem Ereignis, keine MFT-Identität: die Datei wird
-        // über den kleingeschriebenen Pfad zusammengeführt.
-        let e = Entity::new(
-            b.k.case_id,
-            EntityKind::File,
-            format!("pfad:{}", p.to_lowercase()),
-            p.to_string(),
-            b.k.zeitpunkt,
-        );
-        dazu(b.entity(e, gesehen), ParticipantRole::Executable);
+        dazu(datei(b, p, gesehen), ParticipantRole::Executable);
     }
     if let Some(d) = text(f, "dienst") {
         let e = Entity::new(
