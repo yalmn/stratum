@@ -383,7 +383,12 @@ fn personen(v: &Value, id: u64) -> Vec<(&'static str, String)> {
         true
     } else if feld(v, "TargetUserName").is_some() {
         nimm("benutzer", "TargetUserName");
-        nimm("benutzer_sid", "TargetUserSid");
+        // Kontoereignisse (4720 bis 4726) nennen die SID als `TargetSid`.
+        if feld(v, "TargetUserSid").is_some() {
+            nimm("benutzer_sid", "TargetUserSid");
+        } else {
+            nimm("benutzer_sid", "TargetSid");
+        }
         nimm("benutzer_domaene", "TargetDomainName");
         true
     } else {
@@ -591,6 +596,17 @@ mod tests {
             vec![
                 ("benutzer", "ich".into()),
                 ("benutzer_sid", "S-1-5-21-1-2-3-1001".into()),
+            ]
+        );
+        // 4720: SID des Kontos als TargetSid.
+        let konto = json!({"Event": {"EventData": {
+            "TargetUserName": "Administrator", "TargetSid": "S-1-5-21-1-2-3-500"
+        }}});
+        assert_eq!(
+            personen(&konto, 4720),
+            vec![
+                ("benutzer", "Administrator".into()),
+                ("benutzer_sid", "S-1-5-21-1-2-3-500".into()),
             ]
         );
         // 4732: Gruppe und Mitglied getrennt.

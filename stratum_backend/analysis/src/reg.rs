@@ -314,6 +314,7 @@ fn mounted_devices(hive: &Hive, out: &mut Outcome) {
         out.findings.push(
             Finding::new("usb", v.name(), "SYSTEM\\MountedDevices")
                 .with("art", "mounted_device")
+                .with("hive_offset", v.file_offset().to_string())
                 .with(
                     "geraet",
                     text.trim_matches(|c: char| c.is_control()).to_string(),
@@ -339,7 +340,8 @@ fn mount_points2(hive: &Hive, user: &str, out: &mut Outcome) {
         }
         let mut f = Finding::new("usb", name, format!("HKCU {user}\\MountPoints2"))
             .with("art", "mount_point")
-            .with("benutzer", user);
+            .with("benutzer", user)
+            .with("hive_offset", s.file_offset().to_string());
         if let Some(z) = ft_unix(s.last_written()) {
             f = f.with("letzter_zugriff_unix", z.to_string());
         }

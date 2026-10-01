@@ -123,10 +123,32 @@ impl<'k> Baukasten<'k> {
     }
 
     /// Entität aufnehmen oder mit einer vorhandenen zusammenführen; liefert
-    /// ihre ID. `gesehen` erweitert erstmals und zuletzt gesehen.
+    /// ihre ID. Spätere Belege ergänzen fehlende Attribute, und ein Name
+    /// ersetzt einen Anzeigenamen, der nur die SID war. `gesehen` erweitert
+    /// erstmals und zuletzt gesehen.
     pub fn entity(&mut self, e: Entity, gesehen: Option<DateTime<Utc>>) -> EntityId {
         let id = e.id;
-        let eintrag = self.entities.entry(id).or_insert(e);
+        let eintrag = match self.entities.entry(id) {
+            std::collections::btree_map::Entry::Vacant(v) => v.insert(e),
+            std::collections::btree_map::Entry::Occupied(o) => {
+                let eintrag = o.into_mut();
+                let nur_sid = |n: &str| n.starts_with("S-1-");
+                if nur_sid(&eintrag.display_name)
+                    && !nur_sid(&e.display_name)
+                    && !e.display_name.is_empty()
+                {
+                    eintrag.display_name = e.display_name;
+                }
+                if let (Some(alt), serde_json::Value::Object(neu)) =
+                    (eintrag.attributes.as_object_mut(), e.attributes)
+                {
+                    for (k, v) in neu {
+                        alt.entry(k).or_insert(v);
+                    }
+                }
+                eintrag
+            }
+        };
         if let Some(t) = gesehen {
             eintrag.first_seen = Some(eintrag.first_seen.map_or(t, |f| f.min(t)));
             eintrag.last_seen = Some(eintrag.last_seen.map_or(t, |l| l.max(t)));

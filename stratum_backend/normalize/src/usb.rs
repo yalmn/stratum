@@ -43,6 +43,14 @@ fn guid(name: &str) -> Option<String> {
     Some(name[a..=e].to_lowercase())
 }
 
+fn vollstaendig(f: &RawFinding) -> Abbildung {
+    if zahl(f, "hive_offset").is_some() {
+        Abbildung::Vollstaendig
+    } else {
+        Abbildung::FundstelleUnvollstaendig
+    }
+}
+
 fn volume(b: &mut Baukasten<'_>, key: String, anzeige: String) -> EntityId {
     let e = Entity::new(b.k.case_id, EntityKind::Volume, key, anzeige, b.k.zeitpunkt);
     b.entity(e, None)
@@ -201,7 +209,7 @@ fn zugeordnet(f: &RawFinding, b: &mut Baukasten<'_>) -> Abbildung {
             prov,
         );
     }
-    Abbildung::FundstelleUnvollstaendig
+    vollstaendig(f)
 }
 
 /// MountPoints2: der Benutzer hat das Volume oder die Freigabe genutzt. Die
@@ -253,7 +261,7 @@ fn genutzt(f: &RawFinding, b: &mut Baukasten<'_>) -> Abbildung {
         let prov = herkunft(b, f, aid, oid, locator);
         b.relationship(r, prov);
     }
-    Abbildung::FundstelleUnvollstaendig
+    vollstaendig(f)
 }
 
 #[cfg(test)]

@@ -86,7 +86,7 @@ fn funde() -> Vec<RawFinding> {
             ("letzte_verbindung_quelle", "SYSTEM\\...\\0066\\(Standard)"),
         ]),
         fund("usb", "\\??\\Volume{fff43352-3b0a-11f1-b1a1-806e6f6e6963}", "SYSTEM\\MountedDevices", &[
-            ("art", "mounted_device"),
+            ("art", "mounted_device"), ("hive_offset", "4096"),
             ("geraet", "_??_USBSTOR#Disk&Ven_General&Prod_UDisk&Rev_5.00#6&1526ad36&0&_&0#{53f56307-b6bf-11d0-94f2-00a0c91efb8b}"),
         ]),
         // Ohne SID: wird über den Namen „ich“ dem Konto mit SID zugeordnet.
@@ -110,8 +110,8 @@ fn abbildung_und_statistik() {
     assert_eq!(m.statistik.abgebildet.get("eventlog"), Some(&2));
     assert_eq!(m.statistik.abgebildet.get("usb"), Some(&3));
     assert_eq!(m.statistik.ohne_mapper.get("tor"), Some(&1));
-    // MountedDevices und MountPoints2 nennen keine Zellposition.
-    assert_eq!(m.statistik.fundstelle_unvollstaendig.get("usb"), Some(&2));
+    // MountPoints2 ohne Zellposition (ältere Reports), MountedDevices mit.
+    assert_eq!(m.statistik.fundstelle_unvollstaendig.get("usb"), Some(&1));
     assert_eq!(m.statistik.fundstelle_unvollstaendig.get("eventlog"), None);
     assert_eq!(m.artifacts.len(), 6);
     assert_eq!(m.observations.len(), 6);
@@ -277,4 +277,39 @@ fn platzhalter_aus_aelteren_reports() {
         m.statistik.fundstelle_unvollstaendig.get("eventlog"),
         Some(&1)
     );
+}
+
+#[test]
+fn spaeterer_name_ergaenzt_sid_entitaet() {
+    let nur_sid = fund(
+        "eventlog",
+        "Prozess erstellt",
+        "Security.evtx",
+        &[
+            ("event_id", "4688"),
+            ("event_record_id", "1"),
+            ("benutzer_sid", "S-1-5-18"),
+        ],
+    );
+    let mit_name = fund(
+        "eventlog",
+        "Anmeldung erfolgreich",
+        "Security.evtx",
+        &[
+            ("event_id", "4624"),
+            ("event_record_id", "2"),
+            ("benutzer", "SYSTEM"),
+            ("benutzer_sid", "S-1-5-18"),
+            ("benutzer_domaene", "NT-AUTORITÄT"),
+        ],
+    );
+    let m = normalisieren(&[nur_sid, mit_name], &kontext());
+    let konten: Vec<_> = m
+        .entities
+        .iter()
+        .filter(|e| e.kind == EntityKind::UserAccount)
+        .collect();
+    assert_eq!(konten.len(), 1);
+    assert_eq!(konten[0].display_name, "SYSTEM");
+    assert_eq!(konten[0].attributes["domaene"], "NT-AUTORITÄT");
 }
