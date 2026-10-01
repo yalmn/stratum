@@ -1,0 +1,32 @@
+# Lokale PostgreSQL für das Datenmodell von stratum.
+#
+# Nur auf 127.0.0.1 erreichbar. Das Passwort steht in .stratum_db_passwort
+# (nicht im Repository); dieselbe Datei liest stratum über
+# STRATUM_DB_PASSWORT_DATEI. Das Schema legt stratum selbst an (Migrationen
+# im Crate stratum-store), nicht dieser Container.
+services:
+  datenbank:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: stratum
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_passwort
+    secrets:
+      - db_passwort
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - stratum_daten:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "stratum", "-d", "stratum"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+secrets:
+  db_passwort:
+    file: ./.stratum_db_passwort
+
+volumes:
+  stratum_daten:

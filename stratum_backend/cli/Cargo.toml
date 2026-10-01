@@ -18,6 +18,7 @@ stratum-creds = { path = "../creds" }
 stratum-analysis = { path = "../analysis" }
 stratum-ewf.workspace = true
 stratum-normalize = { path = "../normalize" }
+stratum-store = { path = "../store" }
 stratum-model = { path = "../../stratum_model" }
 uuid = "1.26.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }
@@ -26,6 +27,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 serde = { workspace = true }
 serde_json = "1.0.151"
 sha2.workspace = true
+tokio = { version = "1.53.1", features = ["rt"] }
 indicatif = "0.18.6"
 
 [dev-dependencies]

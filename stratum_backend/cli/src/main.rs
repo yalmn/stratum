@@ -131,6 +131,14 @@ struct Cli {
     #[arg(long, value_name = "DATEI")]
     modell: Option<PathBuf>,
 
+    /// Das Datenmodell zusätzlich in PostgreSQL schreiben. Die Verbindung
+    /// kommt aus `STRATUM_DB_URL`, das Passwort aus der Datei in
+    /// `STRATUM_DB_PASSWORT_DATEI` (nicht von der Kommandozeile, damit es
+    /// nicht in der Prozessliste steht). Das Schema wird beim ersten Mal
+    /// angelegt.
+    #[arg(long, requires = "modell")]
+    db: bool,
+
     /// Fall-ID (UUID) für das Datenmodell. Ohne Angabe wird sie aus dem
     /// Image-Hash abgeleitet, sodass Läufe über dasselbe Image dieselben IDs
     /// ergeben.
@@ -623,13 +631,13 @@ fn main() -> Result<()> {
     let modell = match modell_file {
         Some((path, file)) => {
             let info = modell_schreiben(
-                &path,
-                file,
+                (&path, file),
                 &img,
                 hashes.as_ref(),
                 fall_id,
                 &ctx,
                 &analysis.findings,
+                cli.db,
             )?;
             warnings.extend(info.hinweise.iter().map(|h| format!("Modell: {h}")));
             Some(info)
@@ -854,13 +862,13 @@ fn ewf_report(
 
 /// Bildet die Funde auf das Datenmodell ab und schreibt es als JSON.
 fn modell_schreiben(
-    path: &std::path::Path,
-    file: std::fs::File,
+    (path, file): (&std::path::Path, std::fs::File),
     img: &ImageReader,
     hashes: Option<&stratum_core::ImageHashes>,
     fall_id: Option<uuid::Uuid>,
     ctx: &AnalysisContext<'_>,
     funde: &[stratum_analysis::RawFinding],
+    db: bool,
 ) -> Result<report::ModellInfo> {
     use stratum_model::{ids::derived_uuid, CaseId, EvidenceId};
     let mut hinweise = Vec::new();
@@ -903,6 +911,11 @@ fn modell_schreiben(
         .map_err(|e| e.into_error())
         .and_then(|h| h.finish())
         .with_context(|| format!("Modell nicht abschließbar: {}", path.display()))?;
+    let datenbank = if db {
+        Some(in_datenbank(&k, &m, &datei_hashes.sha256)?)
+    } else {
+        None
+    };
     hinweise.append(&mut m.hinweise);
     eprintln!(
         "[+] Modell: {} Ereignisse, {} Entitäten, {} Beziehungen in {}",
@@ -925,7 +938,43 @@ fn modell_schreiben(
         herkunftsangaben: m.provenance.len(),
         statistik: std::mem::take(&mut m.statistik),
         hinweise,
+        datenbank,
     })
+}
+
+/// Schreibt das Modell in PostgreSQL (`STRATUM_DB_URL`). Asynchron nur
+/// hier, in einer eigenen Laufzeit; die Analyse bleibt synchron.
+fn in_datenbank(
+    k: &stratum_normalize::Kontext,
+    m: &stratum_normalize::Modell,
+    modell_sha256: &str,
+) -> Result<stratum_store::Geschrieben> {
+    let url = std::env::var("STRATUM_DB_URL")
+        .context("--db: Umgebungsvariable STRATUM_DB_URL ist nicht gesetzt")?;
+    eprintln!("[*] Schreibe Modell in die Datenbank ...");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Laufzeit für die Datenbank nicht erstellbar")?;
+    // Passwort aus einer Datei (dieselbe, die Docker als Secret nutzt).
+    let passwort = match std::env::var_os("STRATUM_DB_PASSWORT_DATEI") {
+        Some(p) => Some(
+            std::fs::read_to_string(&p)
+                .with_context(|| format!("Passwortdatei nicht lesbar: {}", p.to_string_lossy()))?
+                .trim()
+                .to_string(),
+        ),
+        None => None,
+    };
+    let g = rt.block_on(async {
+        let db = stratum_store::Datenbank::verbinden_mit(&url, passwort.as_deref()).await?;
+        db.modell_speichern(k, m, Some(modell_sha256)).await
+    })?;
+    eprintln!(
+        "[+] Datenbank: Lauf {}, neu {} Artefakte, {} Ereignisse, {} Entitäten",
+        g.lauf_id, g.artefakte, g.ereignisse, g.entitaeten
+    );
+    Ok(g)
 }
 
 #[cfg(test)]

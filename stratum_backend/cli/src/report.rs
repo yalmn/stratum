@@ -82,6 +82,10 @@ pub struct ModellInfo {
     /// Hinweise.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hinweise: Vec<String>,
+    /// In die Datenbank geschrieben (mit `--db`): Analyselauf und neu
+    /// angelegte Zeilen je Tabelle.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub datenbank: Option<stratum_store::Geschrieben>,
 }
 
 /// Verweis auf die MFT-Zeitachse mit Hashes und Zählern.

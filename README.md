@@ -543,6 +543,36 @@ eindeutig einer SID zugeordnet ist; das steht dann an der Entität. Ohne
 was abgebildet wurde, was noch keinen Mapper hat und wo die Fundstelle
 unvollständig ist.
 
+## Datenbank (PostgreSQL)
+
+Mit `--modell <DATEI> --db` schreibt stratum das Datenmodell zusätzlich in
+eine lokale PostgreSQL. Die Analyse selbst braucht keine Datenbank; ohne
+`--db` bleibt alles wie bisher.
+
+Die Datenbank läuft per Docker nur auf 127.0.0.1 (`compose.yaml`). Das
+Passwort liegt in `.stratum_db_passwort` im Projektverzeichnis (nicht im
+Repository); dieselbe Datei nutzt Docker als Secret und stratum über
+`STRATUM_DB_PASSWORT_DATEI`. Die Verbindung steht ohne Passwort in
+`STRATUM_DB_URL`:
+
+```sh
+openssl rand -hex 24 -out .stratum_db_passwort
+docker compose up -d
+export STRATUM_DB_URL=postgres://stratum@127.0.0.1:5432/stratum
+export STRATUM_DB_PASSWORT_DATEI=.stratum_db_passwort
+stratum merged.dd --modell modell.json --db -o report.json
+```
+
+Das Schema legt stratum beim ersten Verbinden über versionierte
+Migrationen an. Ein Modell wird in einer Transaktion geschrieben; dank der
+abgeleiteten IDs legt ein zweiter Lauf über dieselbe Evidence im selben
+Fall nichts doppelt an. Herkunftsangaben speichern Fundstelle und Parser
+nur, wenn sie vom Artefakt abweichen; die View `provenance_full` setzt sie
+wieder zusammen. `occurred_utc` dient dem Sortieren und ist auf die
+Mikrosekunde gerundet; die verlustfreie Zeit mit Originalwert steht in
+`occurred_at`. Am Testimage (rund 8.400 Artefakte, 7.600 Ereignisse) dauert
+das Schreiben etwa 4 Sekunden und belegt 33 MB.
+
 ## E01-Images
 
 stratum liest Expert-Witness-Images (EWF-E01, von EnCase 1 bis 7, FTK Imager,

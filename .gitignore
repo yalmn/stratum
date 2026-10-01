@@ -10,3 +10,6 @@
 # Kleine, selbst erzeugte Test-Images
 !stratum_backend/ewf/tests/fixtures/*.E01
 .DS_Store
+
+# Passwort der lokalen Datenbank (compose.yaml)
+.stratum_db_passwort
