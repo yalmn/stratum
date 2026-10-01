@@ -5,6 +5,7 @@
 //! aus (Registry-Eckdaten und lokale Konten). Optional durchsucht er das Image
 //! mit einer Begriffstabelle. Das Ergebnis ist ein JSON-Report.
 
+mod abruf;
 mod bdp;
 mod extract;
 mod liveness;
@@ -52,7 +53,8 @@ use report::{
     about
 )]
 struct Cli {
-    /// Pfad zum Roh-Image (z. B. merged.dd).
+    /// Pfad zum Image (Roh-Image wie merged.dd oder E01). Mit `--fund` der
+    /// Pfad zum JSON-Report.
     image: PathBuf,
 
     /// Zieldatei für den JSON-Report (Standard: Ausgabe auf stdout).
@@ -107,6 +109,20 @@ struct Cli {
     /// `<ZIEL>.herkunft.json` mit Quelle und Hashes; nichts wird überschrieben.
     #[arg(long, num_args = 3, value_names = ["VOLUME_OFFSET", "MFT", "ZIEL"])]
     dump_record: Option<Vec<String>>,
+
+    /// Einen Rohfund über seine Kennung aus einem Report ausgeben und beenden.
+    /// Der Pfad ist dann der Report, nicht das Image. Die Kennung wird aus dem
+    /// Inhalt nachgerechnet; Artefakte im Datenmodell verweisen mit
+    /// `rohfund_id` auf sie.
+    #[arg(long, value_name = "KENNUNG")]
+    fund: Option<String>,
+
+    /// Einen DPAPI-System-Masterkey (GUID = Dateiname) entschlüsseln, mit
+    /// Fundstelle und verwendetem Schlüssel ausgeben und beenden. Unabhängig
+    /// von `STRATUM_DEBUG`; der Lauf über das ganze Image gibt Masterkeys nur
+    /// im Debug-Modus aus.
+    #[arg(long, value_name = "GUID")]
+    masterkey: Option<String>,
 
     /// Funde zusätzlich auf das Datenmodell abbilden (Artefakte, Observationen,
     /// Entitäten, Ereignisse, Beziehungen, Herkunft) und als JSON in diese
@@ -218,6 +234,10 @@ const DEFAULT_KEYWORDS: &str = include_str!("../../begriffe/strafverfolgung.toml
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    if let Some(id) = &cli.fund {
+        return abruf::fund(&cli.image, id);
+    }
+
     let img = ImageReader::open(&cli.image)
         .with_context(|| format!("Image nicht lesbar: {}", cli.image.display()))?;
 
@@ -230,6 +250,10 @@ fn main() -> Result<()> {
             extract::Selector::Path(&d[0]),
             std::path::Path::new(&d[1]),
         );
+    }
+    if let Some(guid) = &cli.masterkey {
+        let targets = ntfs_targets(&img, cli.bdp.as_deref())?;
+        return abruf::masterkey(&img, targets, guid);
     }
     if let Some(d) = &cli.dump_record {
         let volume_offset = d[0]

@@ -34,91 +34,178 @@ impl Analyzer for DpapiAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         let debug = std::env::var_os("STRATUM_DEBUG").is_some();
-
-        for inst in ctx.installs.iter() {
-            let before = out.findings.len();
-
-            // DPAPI_SYSTEM aus den Hives holen: Maschinen- und Benutzerschlüssel.
-            let (Some(system), Some(security)) = (&inst.hives.system, &inst.hives.security) else {
-                continue;
-            };
-            let (Ok(system), Ok(security)) = (Hive::parse(system), Hive::parse(security)) else {
-                continue;
-            };
-            let secrets = match extract_lsa_secrets(&system, &security) {
-                Ok(s) => s,
-                Err(e) => {
-                    out.warnings.push(format!("DPAPI: {e}"));
-                    continue;
-                }
-            };
-            let Some(dpapi_system) = secrets.iter().find(|s| s.name == "DPAPI_SYSTEM") else {
-                continue;
-            };
-            if dpapi_system.value.len() < 44 {
-                out.warnings
-                    .push("DPAPI_SYSTEM zu kurz für Maschinen-/Benutzerschlüssel".into());
-                continue;
+        let mut funde = Vec::new();
+        durchlaufen(ctx, None, &mut out.warnings, |m| funde.push(m));
+        for m in funde {
+            let mut fd = Finding::new("dpapi", "System-Masterkey", &m.pfad)
+                .with("art", "system_masterkey")
+                .with("guid", &m.guid)
+                .with(
+                    "entschluesselt",
+                    if m.masterkey.is_some() { "ja" } else { "nein" },
+                )
+                .with("volume_offset", m.volume_offset.to_string())
+                .with("mft_record", m.mft_record.to_string());
+            if let Some(o) = m.mft_record_offset {
+                fd = fd.with("mft_record_offset", o.to_string());
             }
-            let machine: [u8; 20] = dpapi_system.value[4..24].try_into().unwrap();
-            let user: [u8; 20] = dpapi_system.value[24..44].try_into().unwrap();
-
-            // Passendes Volume über den Partitionsoffset finden.
-            let Some(v) = ctx
-                .volumes
-                .iter()
-                .find(|v| v.target.offset == inst.target.offset)
-            else {
-                continue;
-            };
-            let (mut vol, abbildung) = match ctx.open_volume(v) {
-                Ok(x) => x,
-                Err(e) => {
-                    out.warnings.push(format!(
-                        "DPAPI: Offset {} nicht lesbar: {e}",
-                        v.target.offset
-                    ));
-                    continue;
+            if let Some(mk) = &m.masterkey {
+                fd = fd
+                    .with("schluessel", m.schluessel)
+                    .with("entschluesselt_mit", m.entschluesselt_mit());
+                if debug {
+                    fd = fd.with("masterkey_hex", hex(mk));
                 }
-            };
-
-            for e in v.files.iter().filter(|f| is_system_masterkey_path(&f.path)) {
-                let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
-                    continue;
-                };
-                let guid = e.path.rsplit('\\').next().unwrap_or_default();
-
-                // Erst mit dem Benutzer-, dann mit dem Maschinenschlüssel.
-                let (mk, welcher) = match dpapi::decrypt_system_masterkey(&f.data, &user) {
-                    Ok(mk) => (Some(mk), "benutzer"),
-                    Err(_) => match dpapi::decrypt_system_masterkey(&f.data, &machine) {
-                        Ok(mk) => (Some(mk), "maschine"),
-                        Err(_) => (None, ""),
-                    },
-                };
-
-                let mut fd = Finding::new("dpapi", "System-Masterkey", &e.path)
-                    .with("art", "system_masterkey")
-                    .with("guid", guid)
-                    .with("entschluesselt", if mk.is_some() { "ja" } else { "nein" })
-                    .mit_datei(v.target.offset, &f.meta, &abbildung);
-                if let Some(mk) = mk {
-                    fd = fd.with("schluessel", welcher);
-                    if debug {
-                        fd = fd.with("masterkey_hex", hex(&mk));
-                    }
-                } else {
-                    out.warnings.push(format!(
-                        "{}: System-Masterkey nicht entschluesselbar",
-                        e.path
-                    ));
-                }
-                out.findings.push(fd);
+            } else {
+                out.warnings.push(format!(
+                    "{}: System-Masterkey nicht entschluesselbar",
+                    m.pfad
+                ));
             }
-
-            out.tag_origin(before, &inst.origin);
+            let start = out.findings.len();
+            out.findings.push(fd);
+            out.tag_origin(start, &m.herkunft);
         }
         out
+    }
+}
+
+/// Ein System-Masterkey mit Fundstelle und, falls gelungen, dem
+/// entschlüsselten Schlüssel.
+#[derive(Debug, Clone)]
+pub struct SystemMasterkey {
+    /// Pfad der Masterkey-Datei im Volume.
+    pub pfad: String,
+    /// GUID (Dateiname).
+    pub guid: String,
+    /// Herkunft (`live` oder Schattenkopie).
+    pub herkunft: String,
+    /// Volume-Offset im Image.
+    pub volume_offset: u64,
+    /// MFT-Nummer der Datei.
+    pub mft_record: u64,
+    /// Image-Offset des MFT-Datensatzes, falls bekannt.
+    pub mft_record_offset: Option<u64>,
+    /// Entschlüsselter Masterkey.
+    pub masterkey: Option<Vec<u8>>,
+    /// `benutzer` oder `maschine`: welcher Teil von `DPAPI_SYSTEM` passte.
+    pub schluessel: &'static str,
+}
+
+impl SystemMasterkey {
+    /// Klartext, womit entschlüsselt wurde.
+    pub fn entschluesselt_mit(&self) -> &'static str {
+        match self.schluessel {
+            "benutzer" => "DPAPI_SYSTEM, Benutzerschlüssel (LSA-Secret)",
+            "maschine" => "DPAPI_SYSTEM, Maschinenschlüssel (LSA-Secret)",
+            _ => "",
+        }
+    }
+
+    /// Masterkey als Hex.
+    pub fn masterkey_hex(&self) -> Option<String> {
+        self.masterkey.as_deref().map(hex)
+    }
+}
+
+/// Entschlüsselt gezielt die System-Masterkeys mit dieser GUID, unabhängig
+/// vom Debug-Modus. Für den Abruf eines einzelnen Schlüssels auf Anfrage.
+pub fn masterkey_abrufen(
+    ctx: &AnalysisContext<'_>,
+    guid: &str,
+    warnungen: &mut Vec<String>,
+) -> Vec<SystemMasterkey> {
+    let mut treffer = Vec::new();
+    durchlaufen(ctx, Some(guid), warnungen, |m| treffer.push(m));
+    treffer
+}
+
+/// Läuft über alle Installationen (live und Schattenkopien) und ihre
+/// System-Masterkeys; mit `nur_guid` nur über diese eine Datei.
+fn durchlaufen(
+    ctx: &AnalysisContext<'_>,
+    nur_guid: Option<&str>,
+    warnungen: &mut Vec<String>,
+    mut je: impl FnMut(SystemMasterkey),
+) {
+    for inst in ctx.installs.iter() {
+        // DPAPI_SYSTEM aus den Hives holen: Maschinen- und Benutzerschlüssel.
+        let (Some(system), Some(security)) = (&inst.hives.system, &inst.hives.security) else {
+            continue;
+        };
+        let (Ok(system), Ok(security)) = (Hive::parse(system), Hive::parse(security)) else {
+            continue;
+        };
+        let secrets = match extract_lsa_secrets(&system, &security) {
+            Ok(s) => s,
+            Err(e) => {
+                warnungen.push(format!("DPAPI: {e}"));
+                continue;
+            }
+        };
+        let Some(dpapi_system) = secrets.iter().find(|s| s.name == "DPAPI_SYSTEM") else {
+            continue;
+        };
+        let (Some(machine), Some(user)) = (
+            dpapi_system
+                .value
+                .get(4..24)
+                .and_then(|b| <[u8; 20]>::try_from(b).ok()),
+            dpapi_system
+                .value
+                .get(24..44)
+                .and_then(|b| <[u8; 20]>::try_from(b).ok()),
+        ) else {
+            warnungen.push("DPAPI_SYSTEM zu kurz für Maschinen-/Benutzerschlüssel".into());
+            continue;
+        };
+
+        // Passendes Volume über den Partitionsoffset finden.
+        let Some(v) = ctx
+            .volumes
+            .iter()
+            .find(|v| v.target.offset == inst.target.offset)
+        else {
+            continue;
+        };
+        let (mut vol, abbildung) = match ctx.open_volume(v) {
+            Ok(x) => x,
+            Err(e) => {
+                warnungen.push(format!(
+                    "DPAPI: Offset {} nicht lesbar: {e}",
+                    v.target.offset
+                ));
+                continue;
+            }
+        };
+
+        for e in v.files.iter().filter(|f| is_system_masterkey_path(&f.path)) {
+            let guid = e.path.rsplit('\\').next().unwrap_or_default();
+            if nur_guid.is_some_and(|g| !g.eq_ignore_ascii_case(guid)) {
+                continue;
+            }
+            let Ok(Some(f)) = vol.read_file_by_record(e.mft_record, &e.path) else {
+                continue;
+            };
+            // Erst mit dem Benutzer-, dann mit dem Maschinenschlüssel.
+            let (masterkey, schluessel) = match dpapi::decrypt_system_masterkey(&f.data, &user) {
+                Ok(mk) => (Some(mk.to_vec()), "benutzer"),
+                Err(_) => match dpapi::decrypt_system_masterkey(&f.data, &machine) {
+                    Ok(mk) => (Some(mk.to_vec()), "maschine"),
+                    Err(_) => (None, ""),
+                },
+            };
+            je(SystemMasterkey {
+                pfad: e.path.clone(),
+                guid: guid.to_string(),
+                herkunft: inst.origin.clone(),
+                volume_offset: v.target.offset,
+                mft_record: e.mft_record,
+                mft_record_offset: f.meta.record_offset.and_then(|o| abbildung.image(o)),
+                masterkey,
+                schluessel,
+            });
+        }
     }
 }
 

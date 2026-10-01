@@ -64,7 +64,7 @@ pub use catalog::{
     CATALOG_SOURCE,
 };
 pub use context::{AnalysisContext, DpapiInput, NtfsTarget};
-pub use dpapi::DpapiAnalyzer;
+pub use dpapi::{masterkey_abrufen, DpapiAnalyzer, SystemMasterkey};
 pub use eventlog::EventLogAnalyzer;
 pub use filepersist::FilePersistenceAnalyzer;
 pub use finding::{assign_ids, Finding, RawFinding};
