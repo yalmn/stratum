@@ -57,6 +57,24 @@ impl Finding {
         self.attributes.insert(key.into(), value.into());
         self
     }
+
+    /// Fundstelle einer gelesenen NTFS-Datei: Volume-Offset, MFT-Nummer und
+    /// Image-Offset des MFT-Datensatzes (bei Schattenkopien über die
+    /// Abbildung, sonst unverändert).
+    pub(crate) fn mit_datei(
+        self,
+        volume_offset: u64,
+        meta: &stratum_ntfs::FileMeta,
+        abbildung: &crate::schatten::Abbildung<'_>,
+    ) -> Self {
+        let f = self
+            .with("volume_offset", volume_offset.to_string())
+            .with("mft_record", meta.mft_record.to_string());
+        match meta.record_offset.and_then(|o| abbildung.image(o)) {
+            Some(o) => f.with("mft_record_offset", o.to_string()),
+            None => f,
+        }
+    }
 }
 
 /// Name des Funds im Sinn des Datenmodells: ein Rohfund, den der Normalizer

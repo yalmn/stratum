@@ -14,6 +14,7 @@
 use stratum_ntfs::NtfsVolume;
 
 use crate::lnk::{parse_lnk, Lnk};
+use crate::schatten::Abbildung;
 use crate::{AnalysisContext, Analyzer, Finding, FsIndex, Outcome};
 
 /// Analyzer für Jump Lists.
@@ -31,7 +32,7 @@ impl Analyzer for JumpListAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for v in &ctx.volumes {
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings
@@ -40,8 +41,8 @@ impl Analyzer for JumpListAnalyzer {
                 }
             };
             let codepage = ctx.ansi_codepage(v.target.offset);
-            automatic(&mut vol, v, codepage, &mut out);
-            custom(&mut vol, v, codepage, &mut out);
+            automatic(&mut vol, v, &abbildung, codepage, &mut out);
+            custom(&mut vol, v, &abbildung, codepage, &mut out);
         }
         out
     }
@@ -50,6 +51,7 @@ impl Analyzer for JumpListAnalyzer {
 fn automatic<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
     v: &FsIndex,
+    abbildung: &Abbildung<'_>,
     codepage: Option<&str>,
     out: &mut Outcome,
 ) {
@@ -81,8 +83,13 @@ fn automatic<R: std::io::Read + std::io::Seek>(
             }
             if let Some(mut link) = parse_lnk(&bytes) {
                 link.decode_ansi(codepage);
-                out.findings
-                    .push(lnk_finding(&link, &e.path, &benutzer, &appid, Some(&name)));
+                out.findings.push(
+                    lnk_finding(&link, &e.path, &benutzer, &appid, Some(&name)).mit_datei(
+                        v.target.offset,
+                        &f.meta,
+                        abbildung,
+                    ),
+                );
             }
         }
     }
@@ -91,6 +98,7 @@ fn automatic<R: std::io::Read + std::io::Seek>(
 fn custom<R: std::io::Read + std::io::Seek>(
     vol: &mut NtfsVolume<R>,
     v: &FsIndex,
+    abbildung: &Abbildung<'_>,
     codepage: Option<&str>,
     out: &mut Outcome,
 ) {
@@ -117,7 +125,7 @@ fn custom<R: std::io::Read + std::io::Seek>(
                 out.findings.push(
                     lnk_finding(&link, &e.path, &benutzer, &appid, None)
                         .with("datei_offset", offset.to_string())
-                        .with("mft_record", e.mft_record.to_string()),
+                        .mit_datei(v.target.offset, &f.meta, abbildung),
                 );
             }
         }

@@ -5,7 +5,9 @@
 //! Hives (SOFTWARE, SYSTEM je Installation und NTUSER.DAT je Benutzer) und
 //! brauchen keinen Dateizugriff mehr. Damit sind sie sehr schnell.
 
-use stratum_registry::Hive;
+use std::collections::BTreeMap;
+
+use stratum_registry::{Hive, Key, Value};
 
 use crate::knownfolder::Umgebung;
 use crate::pathrating::{rate_command, PathStatus};
@@ -496,17 +498,86 @@ fn typed_urls(hive: &Hive, user: &str, out: &mut Outcome) {
         return;
     };
     let Ok(values) = key.values() else { return };
+    // Ab Windows 8 steht je `urlN` die Eingabezeit als FILETIME in
+    // `TypedURLsTime` unter demselben Wertnamen.
+    let zeiten = hive.open_key(&format!("{TYPED_URLS}Time")).ok().flatten();
     for v in values {
-        if let Some(url) = v.as_string() {
-            if !url.is_empty() {
-                out.findings.push(
-                    Finding::new("useraktivitaet", url, format!("HKCU {user}\\TypedURLs"))
-                        .with("art", "typed_url")
-                        .with("benutzer", user),
-                );
+        let Some(url) = v.as_string().filter(|u| !u.is_empty()) else {
+            continue;
+        };
+        let mut f = mru_fund(&key, TYPED_URLS, &v, user, "typed_url", url, None);
+        let zeit = zeiten
+            .as_ref()
+            .and_then(|z| z.value(v.name()).ok().flatten());
+        if let Some(z) = zeit {
+            let ft = z
+                .data()
+                .get(..8)
+                .and_then(|b| b.try_into().ok())
+                .map(u64::from_le_bytes);
+            if let Some((ft, u)) = ft.and_then(|ft| Some((ft, ft_unix(ft)?))) {
+                f = f
+                    .with("eingegeben_unix", u.to_string())
+                    .with("eingegeben_filetime", ft.to_string())
+                    .with("eingegeben_hive_offset", z.file_offset().to_string());
+            }
+        }
+        out.findings.push(f);
+    }
+}
+
+/// Positionen in `MRUListEx` (Liste von u32-Wertnummern bis 0xFFFFFFFF) oder
+/// `MRUList` (Buchstaben als Wertnamen). Position 0 ist der zuletzt
+/// verwendete Eintrag.
+fn mru_positionen(key: &Key<'_, '_>) -> BTreeMap<String, usize> {
+    let mut pos = BTreeMap::new();
+    if let Ok(Some(v)) = key.value("MRUListEx") {
+        for (i, c) in v.data().chunks_exact(4).enumerate() {
+            let n = u32::from_le_bytes([c[0], c[1], c[2], c[3]]);
+            if n == u32::MAX {
+                break;
+            }
+            pos.insert(n.to_string(), i);
+        }
+    } else if let Ok(Some(v)) = key.value("MRUList") {
+        if let Some(s) = v.as_string() {
+            for (i, c) in s.chars().enumerate() {
+                pos.insert(c.to_string(), i);
             }
         }
     }
+    pos
+}
+
+/// Fund für einen Eintrag einer MRU-Liste in der NTUSER.DAT, mit Zellposition
+/// und Name des Werts, Position in der MRU-Liste (falls vorhanden) und letzter
+/// Änderung des Schlüssels. Die Schlüsselzeit gehört nur sicher zum Eintrag
+/// an Position 0.
+fn mru_fund(
+    key: &Key<'_, '_>,
+    pfad: &str,
+    v: &Value<'_>,
+    user: &str,
+    art: &str,
+    name: impl Into<String>,
+    positionen: Option<&BTreeMap<String, usize>>,
+) -> Finding {
+    let mut f = Finding::new("useraktivitaet", name, format!("HKCU {user}\\{pfad}"))
+        .with("art", art)
+        .with("benutzer", user)
+        .with("wert", v.name())
+        .with("hive_offset", v.file_offset().to_string())
+        .with("key_hive_offset", key.file_offset().to_string());
+    let ft = key.last_written();
+    if let Some(z) = ft_unix(ft) {
+        f = f
+            .with("key_letzte_aenderung_unix", z.to_string())
+            .with("key_letzte_aenderung_filetime", ft.to_string());
+    }
+    if let Some(p) = positionen.and_then(|p| p.get(v.name())) {
+        f = f.with("mru_position", p.to_string());
+    }
+    f
 }
 
 fn userassist(hive: &Hive, user: &str, env: &Umgebung, out: &mut Outcome) {
@@ -599,7 +670,7 @@ fn run_mru(hive: &Hive, user: &str, out: &mut Outcome) {
         return;
     };
     let Ok(values) = key.values() else { return };
-    let zeit = ft_unix(key.last_written());
+    let pos = mru_positionen(&key);
     for v in values {
         if v.name().eq_ignore_ascii_case("MRUList") {
             continue;
@@ -609,13 +680,8 @@ fn run_mru(hive: &Hive, user: &str, out: &mut Outcome) {
         if cmd.is_empty() {
             continue;
         }
-        let mut f = Finding::new("useraktivitaet", cmd, format!("HKCU {user}\\RunMRU"))
-            .with("art", "run_mru")
-            .with("benutzer", user);
-        if let Some(z) = zeit {
-            f = f.with("key_letzte_aenderung_unix", z.to_string());
-        }
-        out.findings.push(f);
+        out.findings
+            .push(mru_fund(&key, &path, &v, user, "run_mru", cmd, Some(&pos)));
     }
 }
 
@@ -631,11 +697,8 @@ fn typed_paths(hive: &Hive, user: &str, out: &mut Outcome) {
         if p.is_empty() {
             continue;
         }
-        out.findings.push(
-            Finding::new("useraktivitaet", p, format!("HKCU {user}\\TypedPaths"))
-                .with("art", "typed_path")
-                .with("benutzer", user),
-        );
+        out.findings
+            .push(mru_fund(&key, &path, &v, user, "typed_path", p, None));
     }
 }
 
@@ -647,7 +710,7 @@ fn word_wheel(hive: &Hive, user: &str, out: &mut Outcome) {
         return;
     };
     let Ok(values) = key.values() else { return };
-    let zeit = ft_unix(key.last_written());
+    let pos = mru_positionen(&key);
     for v in values {
         if v.name().eq_ignore_ascii_case("MRUListEx") {
             continue;
@@ -656,17 +719,15 @@ fn word_wheel(hive: &Hive, user: &str, out: &mut Outcome) {
         if term.is_empty() {
             continue;
         }
-        let mut f = Finding::new(
-            "useraktivitaet",
+        out.findings.push(mru_fund(
+            &key,
+            &path,
+            &v,
+            user,
+            "explorer_suche",
             term,
-            format!("HKCU {user}\\WordWheelQuery"),
-        )
-        .with("art", "explorer_suche")
-        .with("benutzer", user);
-        if let Some(z) = zeit {
-            f = f.with("key_letzte_aenderung_unix", z.to_string());
-        }
-        out.findings.push(f);
+            Some(&pos),
+        ));
     }
 }
 
@@ -678,16 +739,16 @@ fn recent_docs(hive: &Hive, user: &str, out: &mut Outcome) {
         return;
     };
     // Der Wurzelschlüssel und jeder Endungs-Unterschlüssel tragen Einträge.
-    let mut keys = vec![(root.clone(), "RecentDocs".to_string())];
+    let mut keys = vec![(root.clone(), base.clone())];
     if let Ok(subs) = root.subkeys() {
         for s in subs {
-            let label = format!("RecentDocs\\{}", s.name());
-            keys.push((s, label));
+            let pfad = format!("{base}\\{}", s.name());
+            keys.push((s, pfad));
         }
     }
-    for (key, label) in keys {
+    for (key, pfad) in keys {
         let Ok(values) = key.values() else { continue };
-        let zeit = ft_unix(key.last_written());
+        let pos = mru_positionen(&key);
         for v in values {
             let n = v.name();
             if n.eq_ignore_ascii_case("MRUListEx") || n.is_empty() {
@@ -697,13 +758,15 @@ fn recent_docs(hive: &Hive, user: &str, out: &mut Outcome) {
             if name.is_empty() {
                 continue;
             }
-            let mut f = Finding::new("useraktivitaet", name, format!("HKCU {user}\\{label}"))
-                .with("art", "recent_doc")
-                .with("benutzer", user);
-            if let Some(z) = zeit {
-                f = f.with("key_letzte_aenderung_unix", z.to_string());
-            }
-            out.findings.push(f);
+            out.findings.push(mru_fund(
+                &key,
+                &pfad,
+                &v,
+                user,
+                "recent_doc",
+                name,
+                Some(&pos),
+            ));
         }
     }
 }
@@ -718,26 +781,25 @@ fn last_visited_mru(hive: &Hive, user: &str, out: &mut Outcome) {
             continue;
         };
         let Ok(values) = key.values() else { continue };
-        let zeit = ft_unix(key.last_written());
+        let pos = mru_positionen(&key);
         for v in values {
-            if v.name().eq_ignore_ascii_case("MRUListEx") {
+            let n = v.name();
+            if n.eq_ignore_ascii_case("MRUListEx") || n.eq_ignore_ascii_case("MRUList") {
                 continue;
             }
             let prog = utf16_prefix(v.data());
             if prog.is_empty() {
                 continue;
             }
-            let mut f = Finding::new(
-                "useraktivitaet",
+            out.findings.push(mru_fund(
+                &key,
+                &path,
+                &v,
+                user,
+                "dialog_programm",
                 prog,
-                format!("HKCU {user}\\ComDlg32\\{key_name}"),
-            )
-            .with("art", "dialog_programm")
-            .with("benutzer", user);
-            if let Some(z) = zeit {
-                f = f.with("key_letzte_aenderung_unix", z.to_string());
-            }
-            out.findings.push(f);
+                Some(&pos),
+            ));
         }
     }
 }
@@ -754,7 +816,8 @@ fn opensave_mru(hive: &Hive, user: &str, out: &mut Outcome) {
     let Ok(exts) = root.subkeys() else { return };
     for ext in exts {
         let Ok(values) = ext.values() else { continue };
-        let zeit = ft_unix(ext.last_written());
+        let pfad = format!("{PATH}\\{}", ext.name());
+        let pos = mru_positionen(&ext);
         for v in values {
             if v.name().eq_ignore_ascii_case("MRUListEx") {
                 continue;
@@ -762,17 +825,15 @@ fn opensave_mru(hive: &Hive, user: &str, out: &mut Outcome) {
             let Some(name) = pidl_last_name(v.data()) else {
                 continue;
             };
-            let mut f = Finding::new(
-                "useraktivitaet",
+            out.findings.push(mru_fund(
+                &ext,
+                &pfad,
+                &v,
+                user,
+                "dialog_datei",
                 name,
-                format!("HKCU {user}\\OpenSavePidlMRU\\{}", ext.name()),
-            )
-            .with("art", "dialog_datei")
-            .with("benutzer", user);
-            if let Some(z) = zeit {
-                f = f.with("key_letzte_aenderung_unix", z.to_string());
-            }
-            out.findings.push(f);
+                Some(&pos),
+            ));
         }
     }
 }
@@ -1048,7 +1109,14 @@ mod tests {
         val.extend_from_slice(&[0x30, 0x00, 0x01, 0x02]); // PIDL-Rest
         let mut b = HiveBuilder::new();
         let v0 = b.vk("0", 3, &val); // REG_BINARY
-        let txt = b.key(".txt", None, &[v0]);
+        let v1 = b.vk("1", 3, &utf16z("neu.txt"));
+        // Wert 1 zuletzt verwendet, dann Wert 0.
+        let mru: Vec<u8> = [1u32, 0, u32::MAX]
+            .iter()
+            .flat_map(|n| n.to_le_bytes())
+            .collect();
+        let liste = b.vk("MRUListEx", 3, &mru);
+        let txt = b.key(".txt", None, &[v0, v1, liste]);
         let rd_list = b.lh(&[txt]);
         let rd = b.key_with_list("RecentDocs", rd_list, 1, &[]);
         let ex_list = b.lh(&[rd]);
@@ -1068,8 +1136,23 @@ mod tests {
         let hive = Hive::parse(&ntuser).unwrap();
         let mut out = Outcome::default();
         recent_docs(&hive, "alice", &mut out);
-        assert!(out.findings.iter().any(|f| f.name == "brief.txt"
-            && f.attributes.get("art").map(String::as_str) == Some("recent_doc")));
+        assert_eq!(out.findings.len(), 2, "MRUListEx ist kein Eintrag");
+        let fund = |n: &str| out.findings.iter().find(|f| f.name == n).unwrap();
+        let (alt, neu) = (fund("brief.txt"), fund("neu.txt"));
+        assert_eq!(alt.attributes["art"], "recent_doc");
+        assert_eq!(neu.attributes["mru_position"], "0");
+        assert_eq!(alt.attributes["mru_position"], "1");
+        assert_eq!(alt.attributes["wert"], "0");
+        assert!(
+            alt.source.ends_with("Explorer\\RecentDocs\\.txt"),
+            "{}",
+            alt.source
+        );
+        assert_ne!(alt.attributes["hive_offset"], neu.attributes["hive_offset"]);
+        assert_eq!(
+            alt.attributes["key_hive_offset"],
+            neu.attributes["key_hive_offset"]
+        );
     }
 
     #[test]

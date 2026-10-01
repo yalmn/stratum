@@ -25,7 +25,7 @@ impl Analyzer for LnkAnalyzer {
     fn run(&self, ctx: &AnalysisContext<'_>) -> Outcome {
         let mut out = Outcome::default();
         for v in &ctx.volumes {
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings
@@ -60,7 +60,19 @@ impl Analyzer for LnkAnalyzer {
                 } else {
                     link.target_path.clone()
                 };
-                let mut fd = Finding::new("useraktivitaet", name, &e.path).with("art", "lnk");
+                let mut fd = Finding::new("useraktivitaet", name, &e.path)
+                    .with("art", "lnk")
+                    .mit_datei(v.target.offset, &f.meta, &abbildung);
+                // Eigene Zeiten der Verknüpfung: Windows legt sie beim ersten
+                // Öffnen des Ziels an und schreibt sie bei jedem weiteren neu.
+                for (k, ft) in [
+                    ("lnk_erstellt", f.meta.created),
+                    ("lnk_geaendert", f.meta.modified),
+                ] {
+                    if ft != 0 {
+                        fd = fd.with(format!("{k}_filetime"), ft.to_string());
+                    }
+                }
                 if !benutzer.is_empty() {
                     fd = fd.with("benutzer", benutzer);
                 }

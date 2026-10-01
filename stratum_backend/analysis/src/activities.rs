@@ -48,7 +48,7 @@ impl Analyzer for ActivitiesCacheAnalyzer {
             if dateien.is_empty() {
                 continue;
             }
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings
@@ -57,8 +57,8 @@ impl Analyzer for ActivitiesCacheAnalyzer {
                 }
             };
             for e in dateien {
-                let data = match vol.read_file_by_record(e.mft_record, &e.path) {
-                    Ok(Some(f)) => f.data,
+                let (data, meta) = match vol.read_file_by_record(e.mft_record, &e.path) {
+                    Ok(Some(f)) => (f.data, f.meta),
                     Ok(None) => continue,
                     Err(error) => {
                         out.warnings
@@ -83,11 +83,19 @@ impl Analyzer for ActivitiesCacheAnalyzer {
                                 .with("art", "activities_cache_db")
                                 .with("eintraege", rows.len().to_string())
                                 .with("wal", if wal.is_some() { "ja" } else { "nein" })
-                                .with("mft_record", e.mft_record.to_string())
-                                .with("volume_offset", v.target.offset.to_string()),
+                                .mit_datei(v.target.offset, &meta, &abbildung),
                         );
+                        // Zeilen aus einem WAL stehen nicht in der Hauptdatei;
+                        // `wal` sagt, ob eines einbezogen wurde.
+                        let wal = if wal.is_some() { "ja" } else { "nein" };
                         for row in rows {
-                            out.findings.push(row.finding(&e.path, &benutzer));
+                            out.findings.push(
+                                row.finding(&e.path, &benutzer).with("wal", wal).mit_datei(
+                                    v.target.offset,
+                                    &meta,
+                                    &abbildung,
+                                ),
+                            );
                         }
                     }
                     Err(error) => out
