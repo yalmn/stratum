@@ -432,9 +432,12 @@ fn bam_entries(
             format!("SYSTEM\\{base}\\{sid}"),
         )
         .with("art", if dienst == "bam" { "bam" } else { "dam" })
-        .with("sid", sid);
+        .with("sid", sid)
+        .with("hive_offset", v.file_offset().to_string());
         if let Some(z) = ft_unix(ft) {
-            f = f.with("letzte_ausfuehrung_unix", z.to_string());
+            f = f
+                .with("letzte_ausfuehrung_unix", z.to_string())
+                .with("letzte_ausfuehrung_filetime", ft.to_string());
         }
         out.findings.push(f);
     }

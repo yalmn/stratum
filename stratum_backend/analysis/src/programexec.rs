@@ -55,20 +55,41 @@ fn amcache(hive: &Hive, out: &mut Outcome) {
             .flatten()
             .and_then(|v| v.as_string());
         let Some(path) = path else { continue };
-        let mut f =
-            Finding::new("programmausfuehrung", path.clone(), path).with("quelle", "amcache");
+        let mut f = Finding::new(
+            "programmausfuehrung",
+            path.clone(),
+            format!("Amcache.hve\\Root\\InventoryApplicationFile\\{}", e.name()),
+        )
+        .with("quelle", "amcache")
+        .with("pfad", path)
+        .with("hive_offset", e.file_offset().to_string());
         if let Some(u) = filetime_to_unix(e.last_written()) {
-            f = f.with("registriert_unix", u.to_string());
+            f = f
+                .with("registriert_unix", u.to_string())
+                .with("registriert_filetime", e.last_written().to_string());
         }
-        if let Some(sha1) = e.value("FileId").ok().flatten().and_then(|v| v.as_string()) {
-            // FileId ist der SHA-1 mit vier führenden Nullen.
-            let sha1 = sha1.trim_start_matches('0');
-            if !sha1.is_empty() {
-                f = f.with("sha1", sha1.to_string());
+        if let Some(id) = e.value("FileId").ok().flatten().and_then(|v| v.as_string()) {
+            if let Some(sha1) = sha1_aus_file_id(&id) {
+                f = f.with("sha1", sha1);
             }
         }
         out.findings.push(f);
     }
+}
+
+/// SHA-1 aus `FileId`: vier Nullen als Präfix, dann 40 Hexzeichen. Nur genau
+/// dieses Präfix wird entfernt; ein Hash, der selbst mit 0 beginnt, bleibt
+/// vollständig.
+fn sha1_aus_file_id(id: &str) -> Option<String> {
+    let id = id.trim();
+    let hash = match id.len() {
+        44 => id.strip_prefix("0000")?,
+        40 => id,
+        _ => return None,
+    };
+    hash.bytes()
+        .all(|b| b.is_ascii_hexdigit())
+        .then(|| hash.to_ascii_lowercase())
 }
 
 /// Shimcache: `...\Control\Session Manager\AppCompatCache` Wert `AppCompatCache`
@@ -82,20 +103,35 @@ fn shimcache(system: &Hive, out: &mut Outcome) {
     let Ok(Some(value)) = key.value("AppCompatCache") else {
         return;
     };
-    for (prog, ft) in parse_shimcache_win10(value.data()) {
-        let mut f =
-            Finding::new("programmausfuehrung", prog.clone(), prog).with("quelle", "shimcache");
-        if let Some(u) = ft.and_then(filetime_to_unix) {
-            f = f.with("letzte_aenderung_unix", u.to_string());
+    for (nr, (prog, ft, eintrag_offset)) in
+        parse_shimcache_win10(value.data()).into_iter().enumerate()
+    {
+        let mut f = Finding::new(
+            "programmausfuehrung",
+            prog.clone(),
+            format!("SYSTEM\\{path}\\AppCompatCache"),
+        )
+        .with("quelle", "shimcache")
+        .with("pfad", prog)
+        .with("hive_offset", value.file_offset().to_string())
+        .with("eintrag", nr.to_string())
+        .with("eintrag_offset", eintrag_offset.to_string());
+        if let Some(ft) = ft {
+            if let Some(u) = filetime_to_unix(ft) {
+                f = f
+                    .with("letzte_aenderung_unix", u.to_string())
+                    .with("letzte_aenderung_filetime", ft.to_string());
+            }
         }
         out.findings.push(f);
     }
 }
 
 /// Parst das Windows-10-Shimcache-Format (`10ts`-Einträge). Liefert je Eintrag
-/// den Pfad und die letzte Änderungszeit als FILETIME. Defensiv: bei jeder
+/// den Pfad, die letzte Änderungszeit als FILETIME und den Offset des Eintrags
+/// in den Wertdaten. Defensiv: bei jeder
 /// Unstimmigkeit bricht das Parsen ab, statt Müll zu liefern.
-fn parse_shimcache_win10(blob: &[u8]) -> Vec<(String, Option<u64>)> {
+fn parse_shimcache_win10(blob: &[u8]) -> Vec<(String, Option<u64>, usize)> {
     let mut out = Vec::new();
     if blob.len() < 4 {
         return out;
@@ -122,7 +158,7 @@ fn parse_shimcache_win10(blob: &[u8]) -> Vec<(String, Option<u64>)> {
             .get(path_start + path_len..path_start + path_len + 8)
             .map(|b| u64::from_le_bytes(b.try_into().unwrap()));
         if !path.is_empty() {
-            out.push((path, ft));
+            out.push((path, ft, pos));
         }
         // Naechster Eintrag: cell_size zaehlt ab Offset pos+12.
         let next = pos + 12 + cell_size;
@@ -201,6 +237,27 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].0, "C:\\Windows\\notepad.exe");
         assert_eq!(parsed[0].1.and_then(filetime_to_unix), Some(1_609_459_200));
+        assert_eq!(parsed[0].2, 0x34, "Eintrag beginnt nach dem Kopf");
+    }
+
+    /// Fehler aus dem Testimage: zwei SHA-1, die mit 0 beginnen, verloren
+    /// diese Ziffer, weil alle führenden Nullen entfernt wurden.
+    #[test]
+    fn sha1_nur_ohne_praefix() {
+        let mit_null = "0000008033ab10bb6747e1e2671ea044e0f3fac684e39";
+        assert_eq!(mit_null.len(), 45);
+        let id = "00000033ab10bb6747e1e2671ea044e0f3fac684e398";
+        assert_eq!(id.len(), 44);
+        assert_eq!(
+            sha1_aus_file_id(id).as_deref(),
+            Some("0033ab10bb6747e1e2671ea044e0f3fac684e398")
+        );
+        assert_eq!(
+            sha1_aus_file_id("0000C5F5172A3E4D42ADEE15C16CC3DF3A21E2BC2B80").as_deref(),
+            Some("c5f5172a3e4d42adee15c16cc3df3a21e2bc2b80")
+        );
+        assert_eq!(sha1_aus_file_id(mit_null), None);
+        assert_eq!(sha1_aus_file_id("0000xyz"), None);
     }
 
     #[test]
