@@ -57,6 +57,18 @@ pub fn ntfs(f: &RawFinding) -> Option<SourceLocator> {
     })
 }
 
+/// Verweis auf den Rohfund im Report statt einer Kopie: die Kennung ist ein
+/// Inhaltshash und lässt sich mit `stratum <REPORT> --fund <KENNUNG>`
+/// abrufen und nachprüfen. Hat der Fund keine Kennung (etwa ohne
+/// Report erzeugt), bleibt er vollständig im Artefakt.
+fn rohfund_verweis(f: &RawFinding) -> Value {
+    if f.id.is_empty() {
+        serde_json::to_value(f).unwrap_or(Value::Null)
+    } else {
+        json!({"rohfund_id": f.id, "domain": f.domain})
+    }
+}
+
 /// Artefakt und Observation für einen Rohfund anlegen. Die Observation
 /// enthält die Attribute ohne reine Herkunftsangaben.
 pub fn artefakt(
@@ -77,7 +89,7 @@ pub fn artefakt(
         kind,
         source_locator: locator,
         parser: parser.clone(),
-        raw_metadata: serde_json::to_value(f).unwrap_or(Value::Null),
+        raw_metadata: rohfund_verweis(f),
         created_at: k.zeitpunkt,
     });
     const HERKUNFT: &[&str] = &[

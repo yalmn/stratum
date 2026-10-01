@@ -222,6 +222,34 @@ fn masterkey(f: &RawFinding, b: &mut Baukasten<'_>) -> Abbildung {
     if let Some(u) = sid.and_then(|s| benutzer(b, None, Some(s), None, None)) {
         gehoert_zu(b, cid, u, &prov);
     }
+    // Entschlüsselt mit einem Teil von DPAPI_SYSTEM: dieselbe Entität wie beim
+    // LSA-Secret, damit der Weg zum Schlüssel im Modell sichtbar ist.
+    if status == "entschluesselt" {
+        // Ohne Werte des Masterkey-Funds anlegen; die Werte von DPAPI_SYSTEM
+        // kommen aus dessen eigenem LSA-Fund.
+        let mut e = Entity::new(
+            b.k.case_id,
+            EntityKind::Credential,
+            format!("credential:{}:lsa:dpapi_system", host_teil(b)),
+            "LSA-Secret DPAPI_SYSTEM".into(),
+            b.k.zeitpunkt,
+        );
+        e.attributes = json!({"art": "lsa_secret", "sensibel": true});
+        let lsa = b.entity(e, None);
+        let mut r = Relationship::new(
+            b.k.case_id,
+            RelationshipKind::DerivedFrom,
+            cid,
+            lsa,
+            GELESEN,
+        );
+        r.attributes = json!({
+            "grundlage": "entschluesselt mit",
+            "schluessel": text(f, "schluessel"),
+            "entschluesselt_mit": text(f, "entschluesselt_mit"),
+        });
+        b.relationship(r, prov.clone());
+    }
     vollstaendig(ok)
 }
 

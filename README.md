@@ -85,6 +85,8 @@ stratum <image.dd> [-o report.json] [-k begriffe.toml] [--bdp bdp.info] [--no-ha
 | `--check-onion` | gefundene .onion-Adressen online über Tor auf Erreichbarkeit prüfen (opt-in) |
 | `--dump <pfad> <ziel>` | eine einzelne Datei aus dem Image extrahieren und beenden (ohne Analyse) |
 | `--dump-record <volume_offset> <mft> <ziel>` | eine Datei über Volume-Offset und MFT-Nummer extrahieren (Werte aus dem Katalog) |
+| `--fund <kennung>` | einen Rohfund aus einem Report ausgeben; der Pfad ist dann der Report. Die Kennung wird aus dem Inhalt nachgerechnet |
+| `--masterkey <guid>` | einen DPAPI-System-Masterkey entschlüsseln und mit Fundstelle und verwendetem Schlüssel ausgeben |
 | `--catalog <datei>` | Dateikatalog aller Dateien und Verzeichnisse als JSON Lines schreiben |
 | `--datei-hashes` | im Katalog zusätzlich SHA-256 und Signaturtyp jeder Datei bestimmen (liest alle Inhalte, dauert lange) |
 | `--mft-timeline <datei>` | vollständige SI-/FN-MACB-Zeitachse einschließlich gelöschter MFT-Datensätze schreiben |
@@ -266,7 +268,7 @@ stratum merged.dd --bdp bdp.info --dpapi-password 'GefundenesPasswort'
 
 Alternativ nimmt das Tool den vorberechneten SHA-1 (`--dpapi-sha1`) oder einen andernorts entschlüsselten Masterkey (`--dpapi-masterkey`) entgegen. Unterstützt ist der heute übliche Pfad (SHA-512 und AES-256, Windows Vista bis 11); ältere Kombinationen werden erkannt und als nicht unterstützt gemeldet.
 
-Die System-Masterkeys unter `Windows\System32\Microsoft\Protect\S-1-5-18` entschlüsselt stratum ohne Benutzerpasswort direkt aus `DPAPI_SYSTEM` (Domäne `dpapi`). Das legt die Grundlage für maschinengebundene DPAPI-Daten und dient zugleich der Qualitätssicherung: es ist derselbe Masterkey-Code wie beim Browser-Pfad. Mit gesetztem `STRATUM_DEBUG` gibt jeder Fund den entschlüsselten Masterkey als Hex aus, sodass er sich gegen ein unabhängiges Werkzeug abgleichen lässt.
+Die System-Masterkeys unter `Windows\System32\Microsoft\Protect\S-1-5-18` entschlüsselt stratum ohne Benutzerpasswort direkt aus `DPAPI_SYSTEM` (Domäne `dpapi`). Das legt die Grundlage für maschinengebundene DPAPI-Daten und dient zugleich der Qualitätssicherung: es ist derselbe Masterkey-Code wie beim Browser-Pfad. Jeder Fund nennt, womit entschlüsselt wurde (Benutzer- oder Maschinenschlüssel aus `DPAPI_SYSTEM`). Den Masterkey selbst gibt der Lauf über das ganze Image nur mit gesetztem `STRATUM_DEBUG` als Hex aus. Einen einzelnen Masterkey ruft `--masterkey <GUID>` jederzeit gezielt ab, etwa zum Abgleich mit einem unabhängigen Werkzeug.
 
 Firefox-Passwörter (`logins.json`) sind über `key4.db` verschlüsselt (PBKDF2-HMAC-SHA256 und AES-256 für den Schlüssel, 3DES für die Einträge). stratum entschlüsselt sie ohne Zusatzdaten aus dem Image, solange kein Firefox-Hauptpasswort gesetzt ist. Ist eines gesetzt, wird es mit `--firefox-password` übergeben:
 
@@ -465,6 +467,12 @@ Zeitangaben tragen UTC-Zeitpunkt, Originalwert, Genauigkeit und Bedeutung
 Ortszeiten ohne bekannte Zone werden nicht umgerechnet.
 
 Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
+
+Artefakte enthalten den Rohfund nicht als Kopie, sondern verweisen mit
+`rohfund_id` auf ihn. Die Kennung ist ein Inhaltshash über den Fund; mit
+`stratum <REPORT> --fund <KENNUNG>` wird er aus dem Report geholt und die
+Kennung nachgerechnet, sodass eine nachträgliche Änderung auffällt. Die
+gelesenen Felder stehen zusätzlich in der Observation.
 
 **Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
 auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes

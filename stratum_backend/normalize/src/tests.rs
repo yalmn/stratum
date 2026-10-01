@@ -1181,6 +1181,7 @@ fn zugangsdaten_mit_geheimwerten() {
                 ("guid", "4a8c3c12-16ea-4574-ac95-754337df36c6"),
                 ("entschluesselt", "ja"),
                 ("schluessel", "maschine"),
+                ("entschluesselt_mit", "DPAPI_SYSTEM, Maschinenschlüssel (LSA-Secret)"),
                 ("masterkey_hex", "00112233445566778899aabbccddeeff"),
                 ("volume_offset", "122683392"),
                 ("mft_record", "4711"),
@@ -1232,5 +1233,37 @@ fn zugangsdaten_mit_geheimwerten() {
         .iter()
         .any(|r| r.source_entity_id == mk.id && r.target_entity_id == system.id));
     assert_eq!(anna.attributes["art"], "dcc2");
+    // Masterkey verweist auf DPAPI_SYSTEM, ohne dessen Entität mit eigenen
+    // Werten zu füllen.
+    let dpapi_system = entitaet(&m, EntityKind::Credential, "LSA-Secret DPAPI_SYSTEM");
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::DerivedFrom
+            && r.source_entity_id == mk.id
+            && r.target_entity_id == dpapi_system.id));
+    assert!(dpapi_system.attributes.get("masterkey_hex").is_none());
     assert_eq!(sc.attributes["wert"], "Dienstkennwort1");
+}
+
+#[test]
+fn artefakt_verweist_auf_rohfund() {
+    let mut f = fund(
+        "usb",
+        "{fff43352-3b0a-11f1-b1a1-806e6f6e6963}",
+        "HKCU ich\\MountPoints2",
+        &[
+            ("art", "mount_point"),
+            ("benutzer", "ich"),
+            ("hive_offset", "1"),
+        ],
+    );
+    f.id = "0123456789abcdef".into();
+    let m = normalisieren(&[f], &kontext());
+    assert_eq!(
+        m.artifacts[0].raw_metadata,
+        serde_json::json!({"rohfund_id": "0123456789abcdef", "domain": "usb"})
+    );
+    // Die Felder stehen weiter in der Observation.
+    assert_eq!(m.observations[0].fields["benutzer"], "ich");
 }
