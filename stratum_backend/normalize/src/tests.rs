@@ -955,7 +955,7 @@ fn aufgaben_und_run_schluessel() {
 }
 
 #[test]
-fn browser_verlauf_datei_und_keine_passwoerter() {
+fn browser_verlauf_datei_und_login() {
     let webcache = "Users\\ich\\AppData\\Local\\Microsoft\\Windows\\WebCache\\WebCacheV01.dat";
     let ese = [
         ("volume_offset", "122683392"),
@@ -1039,11 +1039,13 @@ fn browser_verlauf_datei_und_keine_passwoerter() {
         .iter()
         .any(|r| r.kind == RelationshipKind::UsesFile && r.target_entity_id == datei.id));
 
-    // Das Klartextpasswort steht nirgends im Modell.
-    assert_eq!(m.statistik.ohne_mapper.get("browser"), Some(&1));
-    let json = serde_json::to_string(&m).unwrap();
-    assert!(!json.contains("geheim123"));
-    assert!(!json.contains("bank.tld"));
+    // Das Login ist als Zugangsdaten mit URL, Benutzername und Passwort
+    // abgebildet.
+    assert!(m.statistik.ohne_mapper.is_empty());
+    let login = entitaet(&m, EntityKind::Credential, "Login https://bank.tld/");
+    assert_eq!(login.attributes["status"], "entschluesselt");
+    assert_eq!(login.attributes["passwort"], "geheim123");
+    assert_eq!(login.attributes["sensibel"], true);
 }
 
 #[test]
@@ -1128,4 +1130,107 @@ fn srum_programme_nach_kennungstyp() {
     let zeit = ereignisse[0].occurred_at.as_ref().unwrap();
     assert_eq!(zeit.semantics, TimeSemantics::ArtifactTime);
     assert_eq!(zeit.utc.to_rfc3339(), "2026-04-18T08:57:00+00:00");
+}
+
+#[test]
+fn zugangsdaten_mit_geheimwerten() {
+    let funde =
+        vec![
+        fund(
+            "lsa",
+            "DPAPI_SYSTEM",
+            "SECURITY\\Policy\\Secrets\\DPAPI_SYSTEM\\CurrVal",
+            &[
+                ("art", "lsa_secret"),
+                ("wert", "010000002933c9bf9680940199"),
+                ("darstellung", "hex"),
+                ("laenge", "44"),
+                ("dpapi_machinekey", "2933c9bf968094019a0b78fedc684872b91d572a"),
+                ("dpapi_userkey", "ee719241ad42fa33463d5c53c94ebefd8dc3df3b"),
+                ("hive_offset", "8000"),
+            ],
+        ),
+        fund(
+            "lsa",
+            "_SC_VBoxService",
+            "SECURITY\\Policy\\Secrets\\_SC_VBoxService\\CurrVal",
+            &[
+                ("art", "lsa_secret"),
+                ("wert", "Dienstkennwort1"),
+                ("laenge", "30"),
+                ("hive_offset", "8100"),
+            ],
+        ),
+        fund(
+            "lsa",
+            "FIRMA\\anna",
+            "SECURITY\\Cache",
+            &[
+                ("art", "dcc2"),
+                ("dcc2_hash", "deadbeefdeadbeefdeadbeefdeadbeef"),
+                ("wertname", "NL$1"),
+                ("hive_offset", "8200"),
+            ],
+        ),
+        fund(
+            "dpapi",
+            "System-Masterkey",
+            "Windows\\System32\\Microsoft\\Protect\\S-1-5-18\\4a8c3c12-16ea-4574-ac95-754337df36c6",
+            &[
+                ("art", "system_masterkey"),
+                ("guid", "4a8c3c12-16ea-4574-ac95-754337df36c6"),
+                ("entschluesselt", "ja"),
+                ("schluessel", "maschine"),
+                ("masterkey_hex", "00112233445566778899aabbccddeeff"),
+                ("volume_offset", "122683392"),
+                ("mft_record", "4711"),
+                ("mft_record_offset", "3348733952"),
+            ],
+        ),
+    ];
+    let m = normalisieren(&funde, &kontext());
+    assert_eq!(m.statistik.abgebildet.get("lsa"), Some(&3));
+    assert_eq!(m.statistik.abgebildet.get("dpapi"), Some(&1));
+    assert!(m.statistik.fundstelle_unvollstaendig.is_empty());
+
+    // Geheimwerte stehen an der Entität, als sensibel gekennzeichnet.
+    let anna = entitaet(&m, EntityKind::Credential, "Gecachte Anmeldung FIRMA\\anna");
+    assert_eq!(
+        anna.attributes["dcc2_hash"],
+        "deadbeefdeadbeefdeadbeefdeadbeef"
+    );
+    assert_eq!(anna.attributes["sensibel"], true);
+    let dpapi = entitaet(&m, EntityKind::Credential, "LSA-Secret DPAPI_SYSTEM");
+    assert_eq!(
+        dpapi.attributes["dpapi_machinekey"],
+        "2933c9bf968094019a0b78fedc684872b91d572a"
+    );
+
+    // Metadaten und Bezüge.
+    let sc = entitaet(&m, EntityKind::Credential, "LSA-Secret _SC_VBoxService");
+    assert_eq!(sc.attributes["laenge"], "30");
+    let dienst = entitaet(&m, EntityKind::Service, "VBoxService");
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.kind == RelationshipKind::BelongsTo
+            && r.source_entity_id == sc.id
+            && r.target_entity_id == dienst.id));
+    let mk = entitaet(
+        &m,
+        EntityKind::Credential,
+        "DPAPI-Masterkey 4a8c3c12-16ea-4574-ac95-754337df36c6",
+    );
+    assert_eq!(mk.attributes["status"], "entschluesselt");
+    let system = m
+        .entities
+        .iter()
+        .find(|e| e.kind == EntityKind::UserAccount && e.attributes["sid"] == "S-1-5-18")
+        .unwrap();
+    assert!(m
+        .relationships
+        .iter()
+        .any(|r| r.source_entity_id == mk.id && r.target_entity_id == system.id));
+    assert_eq!(anna.attributes["art"], "dcc2");
+    assert_eq!(sc.attributes["wert"], "Dienstkennwort1");
 }

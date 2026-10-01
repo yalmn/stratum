@@ -10,7 +10,7 @@
 //! - `file:///`-URLs verweisen auf die Datei mit demselben Pfad.
 //! - Datenbanken, Tabellen und die Bestandsaufnahme gespeicherter
 //!   Zugangsdaten (nur Anzahl) werden Artefakte ohne Entitäten. Entschlüsselte
-//!   Passwörter bildet der Normalizer nicht ab (siehe [`crate::normalisieren`]).
+//!   Logins bildet [`crate::zugangsdaten`] ab.
 
 use serde_json::json;
 use stratum_analysis::RawFinding;

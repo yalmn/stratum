@@ -469,7 +469,8 @@ Das Modell hängt von keinem Backend-Crate ab; ein Test prüft das.
 **Normalizer.** Mit `--modell <DATEI>` bildet stratum die Funde (Rohfunde)
 auf das Modell ab und schreibt es als JSON; der Report verweist mit Hashes
 und Zählern darauf. Abgebildet werden bisher Ereignisprotokolle, Prefetch,
-USB, Programmausführung, Benutzeraktivität, Persistenz, Browser und SRUM:
+USB, Programmausführung, Benutzeraktivität, Persistenz, Browser, SRUM und
+Zugangsdaten:
 
 - Ereignisprotokolle: je Datensatz ein Artefakt und ein Ereignis
   (Anmeldung, Abmeldung, Anmeldeversuch, Prozessstart, Dienst installiert,
@@ -505,15 +506,20 @@ USB, Programmausführung, Benutzeraktivität, Persistenz, Browser und SRUM:
 - Browser: Verlauf aus Chromium, Firefox und den Verlaufscontainern des
   WebCache als Besuch, Cache-, DOMStore- und Cookie-Einträge nur als
   Nutzung der URL. `file:///`-URLs verweisen auf die Datei mit demselben
-  Pfad. Von gespeicherten Zugangsdaten geht nur die Bestandsaufnahme
-  (Anzahl) ins Modell; entschlüsselte Passwörter bleiben im Report und
-  werden nicht abgebildet.
+  Pfad.
 - SRUM: jede Zeile als Nutzung mit Programm, Konto und Rechner. Das
   Programm richtet sich nach dem Kennungstyp: Dienst (dieselbe Entität wie
   aus der Registry), App-Paket, Datei oder Programmname; Kennungen der
   App-Timeline (`!!svchost.exe!…`) werden auf den Programmnamen
   zurückgeführt. `TimeStamp` ist als Artefaktzeit gekennzeichnet, weil
   nicht belegt ist, welchen Zeitpunkt er genau festhält.
+- Zugangsdaten: LSA-Secrets, gecachte Domänenanmeldungen (DCC2),
+  DPAPI-System-Masterkeys und entschlüsselte Browser-Logins als
+  Credential-Entitäten mit Status, Länge und den Werten wie im Report
+  (Passwort, Hash, Secret, Schlüssel). Sie tragen `sensibel: true`, damit
+  der spätere Zugriff gesondert geprüft und protokolliert werden kann.
+  Dienstkennwörter (`_SC_<Dienst>`) gehören zum Dienst, Masterkeys zum
+  Konto aus dem Pfad, Logins zum Profil und zur URL.
 
 Dateien ohne MFT-Nummer werden über den Pfad zusammengeführt, getrennt nach
 Laufwerksbuchstabe (`c:`) und Gerätepfad (`\Device\HarddiskVolume3`). Steht

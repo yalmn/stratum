@@ -60,6 +60,9 @@ pub enum EntityKind {
     UsbDevice,
     /// Zertifikat.
     Certificate,
+    /// Zugangsdaten (LSA-Secret, Masterkey, gespeichertes Login). Trägt nur
+    /// Metadaten wie Art, Länge und Status, nie den Geheimwert.
+    Credential,
     /// Hashwert.
     Hash,
     /// Software.
