@@ -179,6 +179,9 @@ fn parse_log(data: &[u8], quelle: &LogSource<'_>, out: &mut Outcome) {
         if let Some(kanal) = string_at(&record.data, &["Event", "System", "Channel"]) {
             f = f.with("kanal", kanal);
         }
+        if let Some(anbieter) = provider(&record.data) {
+            f = f.with("anbieter", anbieter);
+        }
         for (attr, keys) in FIELD_MAP {
             if let Some(val) = event_data(&record.data, keys) {
                 if !val.is_empty() {
@@ -258,29 +261,84 @@ pub(crate) fn record_index(data: &[u8]) -> RecordIndex {
 }
 
 /// Prüft, ob ein Ereignis von Interesse ist, und liefert ID und Beschreibung.
+/// Ausgewertete Ereignisse: Anbieter, Ereignisnummer, Bedeutung. Nummern sind
+/// nur innerhalb eines Anbieters eindeutig (z. B. 4625 von
+/// `Microsoft-Windows-EventSystem` im Application-Log ist keine fehlgeschlagene
+/// Anmeldung). Anbieternamen nach der Microsoft-Dokumentation der Ereignisse.
+const ZUORDNUNG: &[(&str, u64, &str)] = &[
+    (SECURITY, 4624, "Anmeldung erfolgreich"),
+    (SECURITY, 4625, "Anmeldung fehlgeschlagen"),
+    (SECURITY, 4634, "Abmeldung"),
+    (SECURITY, 4647, "Abmeldung"),
+    (SECURITY, 4648, "Anmeldung mit expliziten Anmeldedaten"),
+    (SECURITY, 4672, "Anmeldung mit besonderen Rechten"),
+    (SECURITY, 4688, "Prozess erstellt"),
+    (SECURITY, 4697, "Dienst installiert"),
+    (SECURITY, 4720, "Benutzerkonto erstellt"),
+    (SECURITY, 4722, "Benutzerkonto aktiviert"),
+    (SECURITY, 4725, "Benutzerkonto deaktiviert"),
+    (SECURITY, 4726, "Benutzerkonto gelöscht"),
+    (SECURITY, 4728, "Zu privilegierter Gruppe hinzugefügt"),
+    (SECURITY, 4732, "Zu privilegierter Gruppe hinzugefügt"),
+    (SECURITY, 4756, "Zu privilegierter Gruppe hinzugefügt"),
+    (
+        "Microsoft-Windows-Eventlog",
+        1102,
+        "Ereignisprotokoll gelöscht",
+    ),
+    (
+        "Microsoft-Windows-Eventlog",
+        104,
+        "Ereignisprotokoll gelöscht",
+    ),
+    ("Service Control Manager", 7045, "Dienst installiert"),
+    (
+        "EventLog",
+        6005,
+        "Ereignisprotokolldienst gestartet (Systemstart)",
+    ),
+    (
+        "EventLog",
+        6006,
+        "Ereignisprotokolldienst gestoppt (Herunterfahren)",
+    ),
+    (
+        "Microsoft-Windows-TerminalServices-RemoteConnectionManager",
+        1149,
+        "RDP: Netzwerkanmeldung",
+    ),
+    (
+        "Microsoft-Windows-TerminalServices-LocalSessionManager",
+        21,
+        "RDP: Sitzung angemeldet",
+    ),
+    (
+        "Microsoft-Windows-TerminalServices-LocalSessionManager",
+        25,
+        "RDP: Sitzung wiederverbunden",
+    ),
+];
+const SECURITY: &str = "Microsoft-Windows-Security-Auditing";
+
+/// Anbieter aus `Event.System.Provider.#attributes.Name`.
+fn provider(v: &Value) -> Option<&str> {
+    v.get("Event")?
+        .get("System")?
+        .get("Provider")?
+        .get("#attributes")?
+        .get("Name")?
+        .as_str()
+}
+
+/// Bedeutung eines Ereignisses nach Anbieter und Nummer, `None` für alle
+/// nicht ausgewerteten.
 fn event_of_interest(v: &Value) -> Option<(u64, &'static str)> {
     let id = event_id(v)?;
-    let beschreibung = match id {
-        4624 => "Anmeldung erfolgreich",
-        4625 => "Anmeldung fehlgeschlagen",
-        4634 | 4647 => "Abmeldung",
-        4648 => "Anmeldung mit expliziten Anmeldedaten",
-        4672 => "Anmeldung mit besonderen Rechten",
-        4688 => "Prozess erstellt",
-        4720 => "Benutzerkonto erstellt",
-        4722 => "Benutzerkonto aktiviert",
-        4725 => "Benutzerkonto deaktiviert",
-        4726 => "Benutzerkonto gelöscht",
-        4728 | 4732 | 4756 => "Zu privilegierter Gruppe hinzugefügt",
-        4697 | 7045 => "Dienst installiert",
-        1102 | 104 => "Ereignisprotokoll gelöscht",
-        6005 => "Ereignisprotokolldienst gestartet (Systemstart)",
-        6006 => "Ereignisprotokolldienst gestoppt (Herunterfahren)",
-        1149 => "RDP: Netzwerkanmeldung",
-        21 | 25 => "RDP: Sitzung angemeldet/wiederverbunden",
-        _ => return None,
-    };
-    Some((id, beschreibung))
+    let anbieter = provider(v)?;
+    ZUORDNUNG
+        .iter()
+        .find(|(p, i, _)| *i == id && p.eq_ignore_ascii_case(anbieter))
+        .map(|(_, _, b)| (id, *b))
 }
 
 /// Zuordnung von Report-Attribut zu möglichen EventData-Feldnamen.
@@ -356,7 +414,11 @@ mod tests {
     fn interesse_und_felder() {
         let v = json!({
             "Event": {
-                "System": {"EventID": 4625, "Channel": "Security"},
+                "System": {
+                    "EventID": 4625,
+                    "Channel": "Security",
+                    "Provider": {"#attributes": {"Name": "Microsoft-Windows-Security-Auditing"}}
+                },
                 "EventData": {"TargetUserName": "alice", "IpAddress": "10.0.0.5", "LogonType": 3}
             }
         });
@@ -457,5 +519,43 @@ mod tests {
     fn uninteressantes_ereignis() {
         let v = json!({"Event": {"System": {"EventID": 4798}}});
         assert!(event_of_interest(&v).is_none());
+    }
+
+    fn mit(id: u64, anbieter: &str) -> Value {
+        json!({"Event": {"System": {
+            "EventID": {"#attributes": {"Qualifiers": 16384}, "#text": id},
+            "Provider": {"#attributes": {"Name": anbieter}}
+        }}})
+    }
+
+    /// Gleiche Nummer, anderer Anbieter: keine Deutung. Die Fälle stammen aus
+    /// echten Protokollen (4625 von EventSystem im Application-Log, 21 von
+    /// AppModel-Runtime, 25 im System-Log, 1102 von ShellCommon).
+    #[test]
+    fn deutung_nur_mit_passendem_anbieter() {
+        assert!(event_of_interest(&mit(4625, "Microsoft-Windows-EventSystem")).is_none());
+        assert!(event_of_interest(&mit(21, "Microsoft-Windows-AppModel-Runtime")).is_none());
+        assert!(event_of_interest(&mit(25, "Microsoft-Windows-Kernel-General")).is_none());
+        assert!(event_of_interest(&mit(
+            1102,
+            "Microsoft-Windows-ShellCommon-StartLayoutPopulation"
+        ))
+        .is_none());
+        assert!(event_of_interest(&json!({"Event": {"System": {"EventID": 4624}}})).is_none());
+        assert_eq!(
+            event_of_interest(&mit(
+                25,
+                "Microsoft-Windows-TerminalServices-LocalSessionManager"
+            )),
+            Some((25, "RDP: Sitzung wiederverbunden"))
+        );
+        assert_eq!(
+            event_of_interest(&mit(1102, "Microsoft-Windows-Eventlog")),
+            Some((1102, "Ereignisprotokoll gelöscht"))
+        );
+        assert_eq!(
+            event_of_interest(&mit(6005, "EventLog")),
+            Some((6005, "Ereignisprotokolldienst gestartet (Systemstart)"))
+        );
     }
 }

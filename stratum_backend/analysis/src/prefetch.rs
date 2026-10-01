@@ -36,7 +36,7 @@ impl Analyzer for PrefetchAnalyzer {
             if entries.is_empty() {
                 continue;
             }
-            let (mut vol, _) = match ctx.open_volume(v) {
+            let (mut vol, abbildung) = match ctx.open_volume(v) {
                 Ok(x) => x,
                 Err(e) => {
                     out.warnings
@@ -51,9 +51,22 @@ impl Analyzer for PrefetchAnalyzer {
 
                 let mut finding = Finding::new("prefetch", programm, &e.path)
                     .with("art", "ausfuehrung")
-                    .with("prefetch_datei", name);
+                    .with("prefetch_datei", name)
+                    .with("mft_record", e.mft_record.to_string())
+                    .with("volume_offset", v.target.offset.to_string());
 
-                if let Ok(Some(file)) = vol.read_file_by_record(e.mft_record, &e.path) {
+                let file = match vol.read_file_by_record(e.mft_record, &e.path) {
+                    Ok(f) => f,
+                    Err(err) => {
+                        out.warnings
+                            .push(format!("{}: nicht lesbar: {err}", e.path));
+                        None
+                    }
+                };
+                if let Some(file) = file {
+                    if let Some(o) = file.meta.record_offset.and_then(|o| abbildung.image(o)) {
+                        finding = finding.with("mft_record_offset", o.to_string());
+                    }
                     if let Some(u) = filetime_to_unix(file.meta.modified) {
                         finding = finding.with("letzte_aenderung_unix", u.to_string());
                     }

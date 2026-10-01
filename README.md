@@ -234,7 +234,11 @@ belegt weder einen erfolgreichen Download noch die Ausführung der Datei.
 ### Ereignisprotokolle
 
 Aus den `.evtx`-Dateien unter `winevt\Logs` meldet stratum ausgewählte
-Ereignisse (Anmeldungen, Konten, Dienste, Protokolllöschung, RDP). Jeder Fund
+Ereignisse (Anmeldungen, Konten, Dienste, Protokolllöschung, RDP). Gedeutet
+wird nach Anbieter und Ereignisnummer, denn Nummern sind nur innerhalb eines
+Anbieters eindeutig: 4625 von `Microsoft-Windows-Security-Auditing` ist eine
+fehlgeschlagene Anmeldung, 4625 von `Microsoft-Windows-EventSystem` im
+Application-Log nicht. Der Anbieter steht als `anbieter` im Fund. Jeder Fund
 trägt `event_record_id`, die Zeit als `zeit_utc` mit 100-ns-Auflösung und als
 FILETIME sowie den Anker der Protokolldatei (Volume-Offset, MFT-Nummer, Offset
 des MFT-Datensatzes). `datei_offset` nennt den Beginn des Datensatzes in der
