@@ -128,6 +128,20 @@ fn ablauf_mit_datenbank() {
     let als_chef = ["--als", "chef", "--als-passwort-datei", chef];
     let als_mia = ["--als", "mia", "--als-passwort-datei", mia];
 
+    // Ungültiger Name: verständliche Meldung, noch vor Passwort und Datenbank.
+    nein(
+        &[
+            "superadmin",
+            "einrichten",
+            "NAME",
+            "--anzeigename",
+            "N",
+            "--passwort-datei",
+            chef,
+        ],
+        "etwa name",
+    );
+
     ok(&[
         "superadmin",
         "einrichten",

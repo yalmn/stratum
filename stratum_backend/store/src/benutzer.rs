@@ -65,6 +65,32 @@ fn passwort_hash(p: &str) -> Result<String, StoreError> {
         .to_string())
 }
 
+/// Prüft einen Anmeldenamen wie die Datenbank (`^[a-z0-9._-]{1,64}$`),
+/// aber mit verständlicher Meldung.
+pub fn anmeldename_pruefen(name: &str) -> Result<(), StoreError> {
+    let gueltig = (1..=64).contains(&name.len())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b));
+    if gueltig {
+        return Ok(());
+    }
+    let klein = name.to_lowercase();
+    let hinweis = if klein != name
+        && klein
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+    {
+        format!(" (etwa {klein})")
+    } else {
+        String::new()
+    };
+    Err(StoreError::Eingabe(format!(
+        "Anmeldename {name:?} ungültig: nur Kleinbuchstaben a-z, Ziffern und . _ -, \
+         1 bis 64 Zeichen{hinweis}"
+    )))
+}
+
 fn rechte_namen(rechte: &[Permission]) -> Vec<&'static str> {
     let mut n: Vec<_> = rechte.iter().map(|p| p.name()).collect();
     n.sort_unstable();
@@ -304,6 +330,7 @@ impl Datenbank {
             AuditResult::Success,
             json!({"superadmin": true}),
         );
+        anmeldename_pruefen(username)?;
         let erste = akteur == ActorId::cli() && self.aktive_superadmins().await? == 0;
         if !erste {
             self.nur_superadmin(akteur, &e).await?;
@@ -343,6 +370,7 @@ impl Datenbank {
         display_name: &str,
         passwort: &str,
     ) -> Result<User, StoreError> {
+        anmeldename_pruefen(username)?;
         let hash = passwort_hash(passwort)?;
         let u = User {
             id: ActorId::new(),
@@ -783,6 +811,7 @@ async fn konto_einfuegen(
     hash: Option<String>,
     durch: Option<ActorId>,
 ) -> Result<(), StoreError> {
+    anmeldename_pruefen(&u.username)?;
     let entschieden = u.status != UserStatus::Pending;
     sqlx::query(
         "INSERT INTO app_user (id, username, display_name, kind, password_hash, status, \
@@ -863,6 +892,18 @@ mod tests {
         assert!(Argon2::default()
             .verify_password(b"irgendwas", ATTRAPPE)
             .is_err());
+    }
+
+    #[test]
+    fn anmeldenamen() {
+        for n in ["mia", "h.yalman", "admin_2", "a-b"] {
+            assert!(anmeldename_pruefen(n).is_ok(), "{n}");
+        }
+        for n in ["", "NAME", "mia müller", "ä", &"x".repeat(65)] {
+            assert!(anmeldename_pruefen(n).is_err(), "{n}");
+        }
+        let f = anmeldename_pruefen("NAME").unwrap_err().to_string();
+        assert!(f.contains("etwa name"), "{f}");
     }
 
     #[test]

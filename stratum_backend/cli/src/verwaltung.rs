@@ -308,6 +308,7 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
                 passwort_datei,
                 als,
             } => {
+                stratum_store::anmeldename_pruefen(&name)?;
                 let a = akteur(&rt, &db, &als)?;
                 let p = passwort(
                     passwort_datei.as_ref(),
@@ -384,6 +385,7 @@ fn konto(rt: &tokio::runtime::Runtime, db: &Datenbank, k: KontoBefehl) -> Result
             anzeigename,
             passwort_datei,
         } => {
+            stratum_store::anmeldename_pruefen(&name)?;
             let p = passwort(passwort_datei.as_ref(), "Neues Passwort: ", true)?;
             rt.block_on(db.registrieren(&name, &anzeigename, &p))?;
             eprintln!(

@@ -45,7 +45,7 @@ pub struct AuditZeile {
     /// Anmeldename des Akteurs.
     pub akteur: String,
 }
-pub use benutzer::PASSWORT_MINDESTLAENGE;
+pub use benutzer::{anmeldename_pruefen, PASSWORT_MINDESTLAENGE};
 
 /// Fehler beim Speichern.
 #[derive(Debug, thiserror::Error)]
@@ -81,6 +81,9 @@ pub enum StoreError {
     /// Aktion nicht erlaubt (fehlende Rolle, Anmeldung abgelehnt).
     #[error("verweigert: {0}")]
     Verweigert(String),
+    /// Eingabe ungültig (z. B. Anmeldename).
+    #[error("{0}")]
+    Eingabe(String),
     /// Passwort ungültig oder nicht verarbeitbar.
     #[error("Passwort: {0}")]
     Passwort(String),
