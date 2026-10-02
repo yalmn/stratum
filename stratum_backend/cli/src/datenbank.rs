@@ -1,5 +1,6 @@
-//! Schreiben in PostgreSQL (`--db`): Fall und Evidence registrieren, Modell
-//! als Analyselauf speichern, Lauf nach dem Report abschließen.
+//! Schreiben in PostgreSQL (`--db`): vor der Analyse Fall und Evidence
+//! registrieren und den Lauf beginnen, dann Dateikatalog und Modell
+//! speichern, nach dem Report den Lauf abschließen.
 //!
 //! Asynchron nur hier, in einer eigenen Laufzeit; die Analyse bleibt
 //! synchron.
@@ -43,17 +44,14 @@ pub struct Sitzung {
     rt: tokio::runtime::Runtime,
     db: Datenbank,
     lauf: stratum_model::AnalysisRunId,
+    fall_neu: bool,
+    evidence_neu: bool,
+    dateien: u64,
 }
 
 impl Auftrag {
-    /// Registriert Fall und Evidence und schreibt das Modell als Lauf mit
-    /// Stand `running`.
-    pub fn ausfuehren(
-        &self,
-        k: &stratum_normalize::Kontext,
-        m: &stratum_normalize::Modell,
-        modell_sha256: &str,
-    ) -> Result<(Sitzung, Geschrieben)> {
+    /// Verbindet, registriert Fall und Evidence und beginnt den Lauf.
+    pub fn beginnen(&self, k: &stratum_normalize::Kontext) -> Result<Sitzung> {
         let url = std::env::var("STRATUM_DB_URL")
             .context("--db: Umgebungsvariable STRATUM_DB_URL ist nicht gesetzt")?;
         // Passwort aus einer Datei (dieselbe, die Docker als Secret nutzt).
@@ -68,7 +66,6 @@ impl Auftrag {
             ),
             None => None,
         };
-        eprintln!("[*] Schreibe Modell in die Datenbank ...");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -81,29 +78,27 @@ impl Auftrag {
             started_at: self.gestartet,
             configuration: &self.konfiguration,
             configuration_hash: Some(&konfig_hash),
-            model_sha256: Some(modell_sha256),
         };
-        let (db, g) = rt.block_on(async {
+        let (db, lauf, fall_neu, evidence_neu) = rt.block_on(async {
             let db = Datenbank::verbinden_mit(&url, passwort.as_deref()).await?;
             let fall_neu = db.fall_anlegen(&fall).await?;
             let evidence_neu = db.evidence_registrieren(&evidence).await?;
-            let mut g = db.modell_speichern(k, m, &angaben).await?;
-            g.fall_neu = fall_neu;
-            g.evidence_neu = evidence_neu;
-            Ok::<_, stratum_store::StoreError>((db, g))
+            let lauf = db.lauf_beginnen(k, &angaben).await?;
+            Ok::<_, stratum_store::StoreError>((db, lauf, fall_neu, evidence_neu))
         })?;
         eprintln!(
-            "[+] Datenbank: Lauf {}, neu {} Artefakte, {} Ereignisse, {} Entitäten",
-            g.lauf_id, g.artefakte, g.ereignisse, g.entitaeten
+            "[+] Datenbank: Fall {}{}, Lauf {lauf}",
+            k.case_id,
+            if fall_neu { " (neu)" } else { "" }
         );
-        Ok((
-            Sitzung {
-                rt,
-                db,
-                lauf: g.lauf_id,
-            },
-            g,
-        ))
+        Ok(Sitzung {
+            rt,
+            db,
+            lauf,
+            fall_neu,
+            evidence_neu,
+            dateien: 0,
+        })
     }
 
     fn dateiname(&self) -> String {
@@ -171,6 +166,36 @@ impl Auftrag {
 }
 
 impl Sitzung {
+    /// Schreibt das Modell in den Lauf.
+    pub fn modell(
+        &self,
+        m: &stratum_normalize::Modell,
+        modell_sha256: &str,
+    ) -> Result<Geschrieben> {
+        eprintln!("[*] Schreibe Modell in die Datenbank ...");
+        let mut g =
+            self.rt
+                .block_on(self.db.modell_speichern(self.lauf, m, Some(modell_sha256)))?;
+        g.fall_neu = self.fall_neu;
+        g.evidence_neu = self.evidence_neu;
+        g.dateien = self.dateien;
+        eprintln!(
+            "[+] Datenbank: neu {} Artefakte, {} Ereignisse, {} Entitäten, {} Dateien",
+            g.artefakte, g.ereignisse, g.entitaeten, g.dateien
+        );
+        Ok(g)
+    }
+
+    /// Schreiber für den Dateikatalog: nimmt JSON Lines an und schreibt sie
+    /// blockweise in die Datenbank.
+    pub fn katalog(&mut self) -> KatalogSchreiber<'_> {
+        KatalogSchreiber {
+            sitzung: self,
+            puffer: Vec::with_capacity(1 << 22),
+            zeilen: 0,
+        }
+    }
+
     /// Beendet den Lauf. Bei Erfolg mit dem SHA-256 des Reports.
     pub fn abschliessen(self, report_sha256: Option<&str>) -> Result<()> {
         let stand = if report_sha256.is_some() {
@@ -191,17 +216,85 @@ impl Sitzung {
 
 /// Konfiguration des Laufs für die Datenbank. Geheimnisse (Passwörter,
 /// Schlüssel) erscheinen nur als Art, nie mit Wert.
-pub fn konfiguration(
-    cli_werte: &[(&str, Value)],
-    analyzer: &[Box<dyn stratum_analysis::Analyzer>],
-) -> Value {
+pub fn konfiguration(cli_werte: &[(&str, Value)], analyzer: &[&str]) -> Value {
     let mut m = serde_json::Map::new();
-    m.insert(
-        "analyzer".into(),
-        json!(analyzer.iter().map(|a| a.name()).collect::<Vec<_>>()),
-    );
+    m.insert("analyzer".into(), json!(analyzer));
     for (k, v) in cli_werte {
         m.insert((*k).into(), v.clone());
     }
     Value::Object(m)
+}
+
+/// Zeilen je Block beim Schreiben des Katalogs in die Datenbank.
+const KATALOG_BLOCK: usize = 16_384;
+
+/// Nimmt den Katalog als JSON Lines entgegen und schreibt ihn in Blöcken
+/// von [`KATALOG_BLOCK`] Zeilen in die Datenbank. So liegt nie der ganze
+/// Katalog im Speicher.
+pub struct KatalogSchreiber<'a> {
+    sitzung: &'a mut Sitzung,
+    puffer: Vec<u8>,
+    zeilen: usize,
+}
+
+impl KatalogSchreiber<'_> {
+    /// Schreibt alle vollständigen Zeilen im Puffer.
+    fn senden(&mut self) -> std::io::Result<()> {
+        let Some(ende) = self.puffer.iter().rposition(|b| *b == b'\n') else {
+            return Ok(());
+        };
+        // JSON Lines enthalten keine rohen Zeilenumbrüche (serde maskiert
+        // sie), also wird aus jedem Umbruch ein Komma.
+        let rest = self.puffer.split_off(ende + 1);
+        self.puffer.pop();
+        let mut array = Vec::with_capacity(self.puffer.len() + 2);
+        array.push(b'[');
+        array.extend(
+            self.puffer
+                .iter()
+                .map(|b| if *b == b'\n' { b',' } else { *b }),
+        );
+        array.push(b']');
+        self.puffer = rest;
+        self.zeilen = 0;
+        let text = String::from_utf8(array)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        let s = &mut *self.sitzung;
+        let neu =
+            s.rt.block_on(s.db.katalog_speichern(s.lauf, &text))
+                .map_err(std::io::Error::other)?;
+        s.dateien += neu;
+        Ok(())
+    }
+}
+
+impl std::io::Write for KatalogSchreiber<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.puffer.extend_from_slice(buf);
+        self.zeilen += buf.iter().filter(|b| **b == b'\n').count();
+        if self.zeilen >= KATALOG_BLOCK {
+            self.senden()?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.senden()
+    }
+}
+
+/// Schreibt in zwei Ziele zugleich (Katalogdatei und Datenbank).
+pub struct Beide<A, B>(pub A, pub B);
+
+impl<A: std::io::Write, B: std::io::Write> std::io::Write for Beide<A, B> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write_all(buf)?;
+        self.1.write_all(buf)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()?;
+        self.1.flush()
+    }
 }

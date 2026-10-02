@@ -8,10 +8,10 @@
 //! erstmals und zuletzt gesehen und fehlende Attribute. Attribute ohne Wert
 //! (`null` im Modell) werden als leeres Objekt gespeichert.
 //!
-//! Reihenfolge für einen Lauf: Fall anlegen, Evidence registrieren, Modell
-//! speichern (Lauf mit Stand `running`), nach dem Report den Lauf
-//! abschließen. Fall und Evidence bleiben registriert, auch wenn die Analyse
-//! danach scheitert.
+//! Reihenfolge für einen Lauf: Fall anlegen, Evidence registrieren, Lauf
+//! beginnen (Stand `running`), Dateikatalog und Modell speichern, nach dem
+//! Report den Lauf abschließen. Fall und Evidence bleiben registriert, auch
+//! wenn die Analyse danach scheitert.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -51,6 +51,12 @@ pub enum StoreError {
     /// Ein Finding verweist auf Objekte, die es im Fall nicht gibt.
     #[error("Finding verweist auf {0} Objekt(e), die es im Fall nicht gibt")]
     FindingBeleg(i64),
+    /// Lauf ist unbekannt oder nicht mehr im Stand `running`.
+    #[error("Analyselauf {0} läuft nicht")]
+    LaufNichtAktiv(AnalysisRunId),
+    /// Zeit im Dateikatalog nicht im erwarteten Format.
+    #[error("Dateikatalog: Zeit nicht lesbar: {0}")]
+    KatalogZeit(String),
     /// Wert passt nicht in die Datenbank (z. B. Größe über `i64::MAX`).
     #[error("Wert nicht speicherbar: {0}")]
     Wert(&'static str),
@@ -65,8 +71,6 @@ pub struct LaufAngaben<'a> {
     pub configuration: &'a Value,
     /// SHA-256 der Konfiguration in ihrer serialisierten Form.
     pub configuration_hash: Option<&'a str>,
-    /// SHA-256 der Modelldatei, falls eine geschrieben wurde.
-    pub model_sha256: Option<&'a str>,
 }
 
 /// Abschlussstand eines Laufs.
@@ -99,6 +103,8 @@ pub struct Geschrieben {
     pub fall_neu: bool,
     /// Evidence neu registriert (vom Aufrufer gesetzt).
     pub evidence_neu: bool,
+    /// Neue Zeilen im Dateikatalog (vom Aufrufer gesetzt).
+    pub dateien: u64,
     /// Artefakte.
     pub artefakte: u64,
     /// Observationen.
@@ -309,23 +315,20 @@ impl Datenbank {
         Ok(())
     }
 
-    /// Schreibt ein Modell als neuen Analyselauf mit Stand `running`. Fall
-    /// und Evidence müssen registriert sein. Den Lauf danach mit
+    /// Beginnt einen Analyselauf mit Stand `running`. Fall und Evidence
+    /// müssen registriert sein. Den Lauf danach mit
     /// [`Self::lauf_abschliessen`] beenden.
-    pub async fn modell_speichern(
+    pub async fn lauf_beginnen(
         &self,
         k: &Kontext,
-        m: &Modell,
         angaben: &LaufAngaben<'_>,
-    ) -> Result<Geschrieben, StoreError> {
+    ) -> Result<AnalysisRunId, StoreError> {
         let lauf = AnalysisRunId::new();
-        let mut tx = self.pool.begin().await?;
-
         sqlx::query(
             "INSERT INTO analysis_run (id, case_id, evidence_id, evidence_sha256, host, \
-             stratum_version, started_at, model_sha256, statistics, notes, status, \
-             configuration, configuration_hash) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'running', $11, $12)",
+             stratum_version, started_at, statistics, notes, status, configuration, \
+             configuration_hash) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', '[]', 'running', $8, $9)",
         )
         .bind(lauf.0)
         .bind(k.case_id.0)
@@ -334,13 +337,63 @@ impl Datenbank {
         .bind(k.host.as_deref())
         .bind(&k.stratum_version)
         .bind(angaben.started_at)
-        .bind(angaben.model_sha256)
-        .bind(Json(&m.statistik))
-        .bind(Json(&m.hinweise))
         .bind(Json(angaben.configuration))
         .bind(angaben.configuration_hash)
-        .execute(&mut *tx)
+        .execute(&self.pool)
         .await?;
+        Ok(lauf)
+    }
+
+    /// Schreibt einen Block des Dateikatalogs. `zeilen` ist ein JSON-Array
+    /// aus Katalogzeilen, wie sie `stratum_analysis::write_catalog_with` als
+    /// JSON Lines erzeugt; Fall und Evidence kommen vom Lauf. Vorhandene
+    /// Zeilen bleiben, erhalten aber einmal die Inhaltsangaben (SHA-256,
+    /// Typ), falls sie ihnen fehlen. Liefert die Zahl neuer Zeilen.
+    pub async fn katalog_speichern(
+        &self,
+        lauf: AnalysisRunId,
+        zeilen: &str,
+    ) -> Result<u64, StoreError> {
+        let aktiv: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM analysis_run WHERE id = $1 AND status = 'running'")
+                .bind(lauf.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        if aktiv.is_none() {
+            return Err(StoreError::LaufNichtAktiv(lauf));
+        }
+        let zeilen = katalog_zeiten(zeilen)?;
+        let neu: Vec<bool> = sqlx::query_scalar(FILE)
+            .bind(zeilen)
+            .bind(lauf.0)
+            .fetch_all(&self.pool)
+            .await?;
+        Ok(neu.into_iter().filter(|n| *n).count() as u64)
+    }
+
+    /// Schreibt ein Modell in einen laufenden Analyselauf, in einer
+    /// Transaktion.
+    pub async fn modell_speichern(
+        &self,
+        lauf: AnalysisRunId,
+        m: &Modell,
+        model_sha256: Option<&str>,
+    ) -> Result<Geschrieben, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let aktiv = sqlx::query(
+            "UPDATE analysis_run SET model_sha256 = $2, statistics = $3, notes = $4 \
+             WHERE id = $1 AND status = 'running'",
+        )
+        .bind(lauf.0)
+        .bind(model_sha256)
+        .bind(Json(&m.statistik))
+        .bind(Json(&m.hinweise))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if aktiv != 1 {
+            return Err(StoreError::LaufNichtAktiv(lauf));
+        }
 
         let mut g = Geschrieben {
             lauf_id: lauf,
@@ -390,8 +443,9 @@ impl Datenbank {
         .bind(stand.als_text())
         .bind(finished_at)
         .bind(report_sha256)
-        .fetch_one(&mut *tx)
-        .await?;
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(StoreError::LaufNichtAktiv(lauf))?;
         if stand == LaufStand::Completed {
             sqlx::query(
                 "UPDATE evidence SET support = 'analyzed' WHERE id = $1 AND support = 'recognized'",
@@ -427,6 +481,7 @@ impl Datenbank {
                 "SELECT count(*) FROM evidence WHERE case_id = $1",
             ),
             ("finding", "SELECT count(*) FROM finding WHERE case_id = $1"),
+            ("file", "SELECT count(*) FROM file WHERE case_id = $1"),
         ] {
             let n: i64 = sqlx::query_scalar(sql)
                 .bind(case_id)
@@ -516,3 +571,54 @@ const PROVENANCE: &str = "INSERT INTO provenance \
     FROM jsonb_to_recordset($1) AS x(object jsonb, provenance jsonb, role text) \
     LEFT JOIN artifact a ON a.id = (x.provenance->>'artifact_id')::uuid \
     ON CONFLICT DO NOTHING";
+
+/// Ersetzt im Katalogblock die Zeiten (`si`, `fn`: ISO-Text) durch
+/// FILETIME. Werte ab 2^63 werden bitgleich als negative Zahl abgelegt.
+fn katalog_zeiten(zeilen: &str) -> Result<String, StoreError> {
+    let mut v: Vec<Value> = serde_json::from_str(zeilen)?;
+    for zeile in &mut v {
+        for art in ["si", "fn"] {
+            let Some(Value::Object(zeiten)) = zeile.get_mut(art) else {
+                continue;
+            };
+            for wert in zeiten.values_mut() {
+                if let Value::String(t) = wert {
+                    let ft = stratum_core::time::iso_to_filetime(t)
+                        .ok_or_else(|| StoreError::KatalogZeit(t.clone()))?;
+                    *wert = Value::from(ft as i64);
+                }
+            }
+        }
+    }
+    Ok(serde_json::to_string(&v)?)
+}
+
+/// Dateikatalog. Größen über `i64::MAX` kann es in NTFS nicht geben; ein
+/// solcher Wert aus einem beschädigten Datensatz wird NULL statt den ganzen
+/// Block abzulehnen (die JSON-Lines-Datei behält ihn).
+const FILE: &str = "INSERT INTO file AS f \
+    SELECT r.case_id, r.evidence_id, x.volume_offset, x.mft_record, x.pfad, x.name, \
+      x.parent_record, x.typ = 'verzeichnis', x.sequenz, \
+      CASE WHEN x.groesse <= 9223372036854775807 THEN x.groesse::bigint END, \
+      CASE WHEN x.gueltige_laenge <= 9223372036854775807 THEN x.gueltige_laenge::bigint END, \
+      (x.si->>'erstellt')::bigint, (x.si->>'geaendert')::bigint, \
+      (x.si->>'mft_geaendert')::bigint, (x.si->>'zugriff')::bigint, \
+      (x.fn->>'erstellt')::bigint, (x.fn->>'geaendert')::bigint, \
+      (x.fn->>'mft_geaendert')::bigint, (x.fn->>'zugriff')::bigint, \
+      ARRAY(SELECT jsonb_array_elements_text(COALESCE(x.attribute, '[]'))), \
+      x.streams, x.hardlinks, x.reparse_tag, x.wof, x.mft_record_offset, x.sha256, \
+      x.dateityp, x.mime, x.signatur, x.hash_fehler, x.fehler, x.inhalt_fehler, r.id \
+    FROM jsonb_to_recordset($1::jsonb) AS x(volume_offset bigint, mft_record bigint, \
+      sequenz integer, parent_record bigint, typ text, pfad text, name text, groesse numeric, \
+      gueltige_laenge numeric, si jsonb, fn jsonb, attribute jsonb, streams jsonb, \
+      hardlinks integer, reparse_tag text, wof text, mft_record_offset bigint, sha256 text, \
+      dateityp text, mime text, signatur jsonb, hash_fehler text, fehler text, \
+      inhalt_fehler text) \
+    JOIN analysis_run r ON r.id = $2 \
+    ON CONFLICT (evidence_id, volume_offset, mft_record, parent_record, name) DO UPDATE SET \
+      sha256 = EXCLUDED.sha256, file_type = EXCLUDED.file_type, mime = EXCLUDED.mime, \
+      signature = EXCLUDED.signature, valid_length = EXCLUDED.valid_length, \
+      hash_error = EXCLUDED.hash_error \
+    WHERE f.sha256 IS NULL AND f.hash_error IS NULL \
+      AND (EXCLUDED.sha256 IS NOT NULL OR EXCLUDED.hash_error IS NOT NULL) \
+    RETURNING (xmax = 0)";

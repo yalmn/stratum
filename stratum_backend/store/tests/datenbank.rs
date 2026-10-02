@@ -161,7 +161,6 @@ async fn modell_schreiben_und_wiederholen() {
         started_at: k.zeitpunkt,
         configuration: &konfiguration,
         configuration_hash: Some("c0ffee"),
-        model_sha256: Some("abc"),
     };
 
     assert!(db.fall_anlegen(&fall(&k)).await.unwrap());
@@ -186,7 +185,8 @@ async fn modell_schreiben_und_wiederholen() {
         Err(StoreError::EvidenceAbweichung { .. })
     ));
 
-    let erst = db.modell_speichern(&k, &m, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let erst = db.modell_speichern(lauf, &m, Some("abc")).await.unwrap();
     assert_eq!(erst.artefakte, m.artifacts.len() as u64);
     assert_eq!(erst.ereignisse, m.events.len() as u64);
     assert_eq!(erst.beteiligungen, m.participants.len() as u64);
@@ -194,7 +194,8 @@ async fn modell_schreiben_und_wiederholen() {
     assert_eq!(erst.herkunftsangaben, m.provenance.len() as u64);
 
     // Zweiter Lauf: dieselben IDs, nichts kommt doppelt hinzu.
-    let zweit = db.modell_speichern(&k, &m, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let zweit = db.modell_speichern(lauf, &m, Some("abc")).await.unwrap();
     assert_eq!(zweit.artefakte, 0);
     assert_eq!(zweit.ereignisse, 0);
     assert_eq!(zweit.beteiligungen, 0);
@@ -247,7 +248,6 @@ async fn lauf_finding_und_evidence_beziehung() {
         started_at: k.zeitpunkt,
         configuration: &konfiguration,
         configuration_hash: None,
-        model_sha256: None,
     };
     db.fall_anlegen(&fall(&k)).await.unwrap();
     let ev = evidence(
@@ -261,9 +261,10 @@ async fn lauf_finding_und_evidence_beziehung() {
     // Ohne registrierte Evidence kein Lauf.
     let mut fremd = kontext();
     fremd.case_id = k.case_id;
-    assert!(db.modell_speichern(&fremd, &m, &angaben).await.is_err());
+    assert!(db.lauf_beginnen(&fremd, &angaben).await.is_err());
 
-    let g = db.modell_speichern(&k, &m, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let g = db.modell_speichern(lauf, &m, None).await.unwrap();
     let ende = k.zeitpunkt + chrono::Duration::seconds(5);
     db.lauf_abschliessen(g.lauf_id, LaufStand::Completed, ende, Some("d00d"))
         .await
@@ -280,11 +281,21 @@ async fn lauf_finding_und_evidence_beziehung() {
         (stand.as_str(), bericht.as_str(), support.as_str()),
         ("completed", "d00d", "analyzed")
     );
-    // Ein abgeschlossener Lauf lässt sich nicht noch einmal beenden.
-    assert!(db
-        .lauf_abschliessen(g.lauf_id, LaufStand::Failed, ende, None)
-        .await
-        .is_err());
+    // Ein abgeschlossener Lauf lässt sich nicht noch einmal beenden und
+    // nimmt nichts mehr an.
+    assert!(matches!(
+        db.lauf_abschliessen(g.lauf_id, LaufStand::Failed, ende, None)
+            .await,
+        Err(StoreError::LaufNichtAktiv(_))
+    ));
+    assert!(matches!(
+        db.modell_speichern(g.lauf_id, &m, None).await,
+        Err(StoreError::LaufNichtAktiv(_))
+    ));
+    assert!(matches!(
+        db.katalog_speichern(g.lauf_id, "[]").await,
+        Err(StoreError::LaufNichtAktiv(_))
+    ));
 
     // Finding mit Belegen aus diesem Fall.
     db.finding_speichern(&finding(&k, DerivationKind::AnalystAsserted, &m))
@@ -412,4 +423,198 @@ async fn uebernommene_evidence_wird_einmal_vervollstaendigt() {
         .await
         .unwrap();
     assert_eq!(name, "merged.dd");
+}
+
+/// Zwei Zeilen im Format von `--catalog`, eine davon mit einer Größe, die es
+/// in NTFS nicht geben kann.
+const KATALOG: &str = r#"[
+{"volume_offset":122683392,"mft_record":5,"sequenz":5,"parent_record":5,"typ":"verzeichnis","pfad":"","name":"","si":{"erstellt":"2026-04-18T09:40:47.3257138Z","geaendert":"2026-04-18T09:40:47.3257138Z","mft_geaendert":"2026-04-18T09:40:47.3257138Z","zugriff":"2026-04-18T09:40:47.3257138Z"},"attribute":["versteckt","system"],"hardlinks":1,"mft_record_offset":3343918080},
+{"volume_offset":122683392,"mft_record":51283,"sequenz":3,"parent_record":2000,"typ":"datei","pfad":"Windows\\System32\\calc.exe","name":"calc.exe","groesse":49152,"fn":{"erstellt":"2026-04-18T09:41:00.0000001Z"},"streams":[{"name":"WofCompressedData","groesse":20000}],"hardlinks":2,"reparse_tag":"0x80000017","wof":"XPRESS8K","mft_record_offset":3396423680},
+{"volume_offset":122683392,"mft_record":77,"parent_record":5,"typ":"datei","pfad":"kaputt","name":"kaputt","groesse":18446744073709551615,"fehler":"Datensatz nicht lesbar"}
+]"#;
+
+#[tokio::test(flavor = "current_thread")]
+async fn dateikatalog() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    let k = kontext();
+    let konfiguration = serde_json::json!({});
+    let angaben = LaufAngaben {
+        started_at: k.zeitpunkt,
+        configuration: &konfiguration,
+        configuration_hash: None,
+    };
+    db.fall_anlegen(&fall(&k)).await.unwrap();
+    db.evidence_registrieren(&evidence(
+        &k,
+        k.evidence_id,
+        &k.evidence_sha256,
+        EvidenceKind::RawDiskImage,
+    ))
+    .await
+    .unwrap();
+    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    assert_eq!(db.katalog_speichern(lauf, KATALOG).await.unwrap(), 3);
+    assert_eq!(db.katalog_speichern(lauf, KATALOG).await.unwrap(), 0);
+
+    let (verz, zeit, ft, attr, groesse): (bool, String, i64, Vec<String>, Option<i64>) =
+        sqlx::query_as(
+            "SELECT is_directory, filetime_iso(si_created), si_created, attributes, size \
+             FROM file WHERE evidence_id = $1 AND mft_record = 5",
+        )
+        .bind(k.evidence_id.0)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert!(verz);
+    assert_eq!(zeit, "2026-04-18T09:40:47.3257138Z");
+    assert_eq!(ft, 134209788473257138);
+    assert_eq!(attr, ["versteckt", "system"]);
+    assert_eq!(groesse, None);
+    let (pfad, wof, strom): (String, String, i64) = sqlx::query_as(
+        "SELECT path, wof, (streams->0->>'groesse')::bigint FROM file \
+         WHERE evidence_id = $1 AND mft_record = 51283",
+    )
+    .bind(k.evidence_id.0)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        (pfad.as_str(), wof.as_str(), strom),
+        ("Windows\\System32\\calc.exe", "XPRESS8K", 20000)
+    );
+    let (groesse, fehler): (Option<i64>, String) =
+        sqlx::query_as("SELECT size, error FROM file WHERE evidence_id = $1 AND mft_record = 77")
+            .bind(k.evidence_id.0)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!((groesse, fehler.as_str()), (None, "Datensatz nicht lesbar"));
+
+    // Späterer Lauf mit Dateiinhalten ergänzt den Hash einmal.
+    let mit_hash = KATALOG.replace(
+        r#""wof":"XPRESS8K","#,
+        r#""wof":"XPRESS8K","sha256":"96b43352","dateityp":"pe","#,
+    );
+    assert_eq!(db.katalog_speichern(lauf, &mit_hash).await.unwrap(), 0);
+    let (hash, typ): (String, String) = sqlx::query_as(
+        "SELECT sha256, file_type FROM file WHERE evidence_id = $1 AND mft_record = 51283",
+    )
+    .bind(k.evidence_id.0)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!((hash.as_str(), typ.as_str()), ("96b43352", "pe"));
+    let zahlen = db.zaehlen(k.case_id.0).await.unwrap();
+    assert!(zahlen.contains(&("file".to_string(), 3)));
+
+    // Kinder eines Verzeichnisses über den Index.
+    let kinder: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM file WHERE evidence_id = $1 AND volume_offset = 122683392 \
+         AND parent_record = 5 AND mft_record <> 5",
+    )
+    .bind(k.evidence_id.0)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(kinder, 1);
+}
+
+/// Echter Katalog (JSON Lines von `--catalog`) aus `STRATUM_KATALOG_REFERENZ`,
+/// in Blöcken wie bei `--db`. Prüft Vollständigkeit und misst die Dauer.
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn katalog_referenz() {
+    let Some(pfad) = std::env::var_os("STRATUM_KATALOG_REFERENZ") else {
+        eprintln!("STRATUM_KATALOG_REFERENZ nicht gesetzt, Test übersprungen");
+        return;
+    };
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    let text = std::fs::read_to_string(pfad).unwrap();
+    let zeilen: Vec<&str> = text.lines().collect();
+    let k = kontext();
+    let konfiguration = serde_json::json!({});
+    let angaben = LaufAngaben {
+        started_at: k.zeitpunkt,
+        configuration: &konfiguration,
+        configuration_hash: None,
+    };
+    db.fall_anlegen(&fall(&k)).await.unwrap();
+    db.evidence_registrieren(&evidence(
+        &k,
+        k.evidence_id,
+        &k.evidence_sha256,
+        EvidenceKind::RawDiskImage,
+    ))
+    .await
+    .unwrap();
+    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let start = std::time::Instant::now();
+    let mut neu = 0;
+    let bloecke: Vec<String> = zeilen
+        .chunks(16_384)
+        .map(|b| format!("[{}]", b.join(",")))
+        .collect();
+    for block in &bloecke {
+        neu += db.katalog_speichern(lauf, block).await.unwrap();
+    }
+    eprintln!(
+        "{} Zeilen, {neu} neu, {:.1} s",
+        zeilen.len(),
+        start.elapsed().as_secs_f64()
+    );
+    assert_eq!(neu, zeilen.len() as u64);
+    // Jede Zeit kommt als derselbe Text zurück, den der Katalog schrieb.
+    for block in &bloecke {
+        let falsch: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM jsonb_to_recordset($1::jsonb) AS x(volume_offset bigint, \
+             mft_record bigint, parent_record bigint, name text, si jsonb, fn jsonb) \
+             JOIN file f ON f.evidence_id = $2 AND f.volume_offset = x.volume_offset \
+             AND f.mft_record = x.mft_record AND f.parent_record = x.parent_record \
+             AND f.name = x.name \
+             WHERE filetime_iso(f.si_created) IS DISTINCT FROM x.si->>'erstellt' \
+             OR filetime_iso(f.si_modified) IS DISTINCT FROM x.si->>'geaendert' \
+             OR filetime_iso(f.si_mft_modified) IS DISTINCT FROM x.si->>'mft_geaendert' \
+             OR filetime_iso(f.si_accessed) IS DISTINCT FROM x.si->>'zugriff' \
+             OR filetime_iso(f.fn_created) IS DISTINCT FROM x.fn->>'erstellt' \
+             OR filetime_iso(f.fn_modified) IS DISTINCT FROM x.fn->>'geaendert' \
+             OR filetime_iso(f.fn_mft_modified) IS DISTINCT FROM x.fn->>'mft_geaendert' \
+             OR filetime_iso(f.fn_accessed) IS DISTINCT FROM x.fn->>'zugriff'",
+        )
+        .bind(block)
+        .bind(k.evidence_id.0)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(falsch, 0);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn filetime_rundlauf() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    // Grenzwerte: kleinster Wert, Unix-Epoche, fünfstellige Jahre, oberstes
+    // Bit gesetzt (in Windows ungültig) und größter Wert.
+    for ft in [
+        1u64,
+        116_444_736_000_000_000,
+        134_209_788_473_257_138,
+        2_650_467_743_999_999_999,
+        (1 << 63) - 1,
+        1 << 63,
+        u64::MAX,
+    ] {
+        let iso = stratum_core::time::filetime_to_iso(ft).unwrap();
+        let zurueck: String = sqlx::query_scalar("SELECT filetime_iso($1)")
+            .bind(ft as i64)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(zurueck, iso);
+    }
 }

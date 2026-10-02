@@ -2516,6 +2516,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stratum-analysis",
+ "stratum-core",
  "stratum-model",
  "stratum-normalize",
  "thiserror 2.0.21",

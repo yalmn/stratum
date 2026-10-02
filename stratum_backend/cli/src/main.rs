@@ -51,7 +51,9 @@ use report::{
         env!("STRATUM_REVISION_GEAENDERT"),
         ")"
     ),
-    about
+    about,
+    // Der Dateikatalog geht in eine Datei, in die Datenbank oder in beide.
+    group = clap::ArgGroup::new("katalog_ziel").args(["catalog", "db"]).multiple(true)
 )]
 struct Cli {
     /// Pfad zum Image (Roh-Image wie merged.dd oder E01). Mit `--fund` der
@@ -154,8 +156,9 @@ struct Cli {
 
     /// Im Dateikatalog zusätzlich SHA-256 und Signaturtyp jeder Datei
     /// bestimmen. Liest dafür jede Datei vollständig und dauert entsprechend
-    /// lange; die Integrität sichert bereits der Image-Hash.
-    #[arg(long, requires = "catalog")]
+    /// lange; die Integrität sichert bereits der Image-Hash. Braucht
+    /// `--catalog` oder `--db`.
+    #[arg(long, requires = "katalog_ziel")]
     datei_hashes: bool,
 
     /// Vollständige MFT-Zeitachse mit SI-/FN-MACB-Ereignissen als JSON Lines.
@@ -410,54 +413,168 @@ fn main() -> Result<()> {
         );
     }
 
-    let catalog = match catalog_file {
-        Some((path, file)) => {
-            eprintln!("[*] Schreibe Dateikatalog ...");
-            let mut w =
-                std::io::BufWriter::with_capacity(1 << 20, stratum_core::HashingWriter::new(file));
-            let started = std::time::Instant::now();
-            let progress = |done: u64, total: u64| {
-                eprintln!(
-                    "[*] Dateikatalog: {done} von {total} Einträgen ({} s)",
-                    started.elapsed().as_secs()
-                );
+    // Domänen-Analyzer zusammenstellen: Tor läuft immer, die Keyword-Suche nur
+    // bei aktiver Begriffsliste. Schon hier, weil die Datenbank sie als
+    // Konfiguration des Laufs festhält.
+    let use_default = !cli.no_default_keywords;
+    let mut analyzers: Vec<Box<dyn Analyzer>> = vec![
+        Box::new(TorAnalyzer),
+        Box::new(PersistenceAnalyzer),
+        Box::new(UsbAnalyzer),
+        Box::new(UserActivityAnalyzer),
+        Box::new(BrowserAnalyzer),
+        Box::new(PrefetchAnalyzer),
+        Box::new(EventLogAnalyzer),
+        Box::new(VssAnalyzer),
+        Box::new(ProgramExecutionAnalyzer),
+        Box::new(LsaAnalyzer),
+        Box::new(DpapiAnalyzer),
+        Box::new(BamAnalyzer),
+        Box::new(FilePersistenceAnalyzer),
+        Box::new(RecycleBinAnalyzer),
+        Box::new(LnkAnalyzer),
+        Box::new(JumpListAnalyzer),
+        Box::new(PowerShellHistoryAnalyzer),
+        Box::new(ZoneIdentifierAnalyzer),
+        Box::new(ShellBagsAnalyzer),
+        Box::new(ActivitiesCacheAnalyzer),
+        Box::new(SrumAnalyzer),
+        Box::new(WebCacheAnalyzer),
+    ];
+    let (keyword_analyzer, keywords) = if !use_default && cli.keywords.is_empty() {
+        (None, None)
+    } else {
+        let (analyzer, info) = build_keyword_analyzer(use_default, &cli.keywords)?;
+        (Some(analyzer), Some(info))
+    };
+
+    let mut kontext = if cli.modell.is_some() {
+        Some(kontext_bilden(&img, hashes.as_ref(), fall_id, &ctx))
+    } else {
+        None
+    };
+
+    // Fall, Evidence und Lauf vor der Analyse registrieren; Katalog und
+    // Modell gehören dann zu diesem Lauf.
+    let mut sitzung = match (cli.db, &hashes, &kontext) {
+        (true, Some(h), Some((k, _))) => {
+            let mut namen: Vec<&str> = analyzers.iter().map(|a| a.name()).collect();
+            if keyword_analyzer.is_some() {
+                namen.push("KeywordAnalyzer");
+            }
+            let auftrag = datenbank::Auftrag {
+                gestartet,
+                image: img.path().to_path_buf(),
+                format: img.format(),
+                groesse: img.len(),
+                hashes: h.clone(),
+                akquisezeit: img
+                    .ewf()
+                    .and_then(|e| e.info().acquired_unix())
+                    .and_then(|u| chrono::DateTime::from_timestamp(u, 0)),
+                metadaten: serde_json::json!({
+                    "md5": h.md5,
+                    "sha1": h.sha1,
+                    "ewf": ewf_info,
+                    "bdp_info": cli.bdp.as_ref().map(|p| p.display().to_string()),
+                }),
+                konfiguration: datenbank::konfiguration(
+                    &[
+                        ("begriffe", serde_json::json!(keywords)),
+                        ("raw_sweep", cli.raw_sweep.into()),
+                        ("check_onion", cli.check_onion.into()),
+                        (
+                            "bdp_info",
+                            serde_json::json!(cli.bdp.as_ref().map(|p| p.display().to_string())),
+                        ),
+                        ("dpapi", serde_json::json!(dpapi_art(&cli))),
+                        ("firefox_passwort", cli.firefox_password.is_some().into()),
+                        ("katalog", cli.catalog.is_some().into()),
+                        ("datei_hashes", cli.datei_hashes.into()),
+                        ("mft_timeline", cli.mft_timeline.is_some().into()),
+                        ("usn_journal", cli.usn_journal.is_some().into()),
+                    ],
+                    &namen,
+                ),
             };
-            let summary = stratum_analysis::write_catalog_with(
+            Some(auftrag.beginnen(k)?)
+        }
+        _ => None,
+    };
+
+    // Dateikatalog als JSON Lines in die Datei, in die Datenbank oder beides.
+    let catalog = if catalog_file.is_some() || sitzung.is_some() {
+        eprintln!("[*] Schreibe Dateikatalog ...");
+        let started = std::time::Instant::now();
+        let progress = |done: u64, total: u64| {
+            eprintln!(
+                "[*] Dateikatalog: {done} von {total} Einträgen ({} s)",
+                started.elapsed().as_secs()
+            );
+        };
+        let options = stratum_analysis::CatalogOptions {
+            inhalte: cli.datei_hashes,
+            progress: Some(&progress),
+        };
+        let mut datei = catalog_file.map(|(path, file)| {
+            (
+                path,
+                std::io::BufWriter::with_capacity(1 << 20, stratum_core::HashingWriter::new(file)),
+            )
+        });
+        let mut db = sitzung.as_mut().map(datenbank::Sitzung::katalog);
+        let summary = match (&mut datei, &mut db) {
+            (Some((_, f)), Some(d)) => stratum_analysis::write_catalog_with(
                 &img,
                 &ctx.volumes,
-                &mut w,
-                stratum_analysis::CatalogOptions {
-                    inhalte: cli.datei_hashes,
-                    progress: Some(&progress),
-                },
-            )
-            .with_context(|| format!("Katalog nicht schreibbar: {}", path.display()))?;
-            let (_, hashes) = w
-                .into_inner()
-                .map_err(|e| e.into_error())
-                .and_then(|h| h.finish())
-                .with_context(|| format!("Katalog nicht abschließbar: {}", path.display()))?;
-            eprintln!(
-                "[+] Dateikatalog: {} Einträge ({} Fehler) in {}",
-                summary.eintraege,
-                summary.fehler,
-                path.display()
-            );
-            if summary.fehler > 0 {
-                warnings.push(format!(
-                    "Dateikatalog: {} Einträge ohne lesbaren MFT-Datensatz (Feld fehler)",
-                    summary.fehler
-                ));
+                datenbank::Beide(f, d),
+                options,
+            ),
+            (Some((_, f)), None) => {
+                stratum_analysis::write_catalog_with(&img, &ctx.volumes, f, options)
             }
-            Some(CatalogInfo {
-                pfad: path.display().to_string(),
-                quelle: stratum_analysis::CATALOG_SOURCE,
-                format: "JSON Lines, ein Eintrag je Zeile, sortiert nach Volume und Pfad",
-                hashes,
-                summary,
-            })
+            (None, Some(d)) => stratum_analysis::write_catalog_with(&img, &ctx.volumes, d, options),
+            (None, None) => unreachable!("Katalog ohne Ziel"),
         }
-        None => None,
+        .context("Dateikatalog nicht schreibbar")?;
+        drop(db);
+        if summary.fehler > 0 {
+            warnings.push(format!(
+                "Dateikatalog: {} Einträge ohne lesbaren MFT-Datensatz (Feld fehler)",
+                summary.fehler
+            ));
+        }
+        match datei {
+            Some((path, w)) => {
+                let (_, hashes) = w
+                    .into_inner()
+                    .map_err(|e| e.into_error())
+                    .and_then(|h| h.finish())
+                    .with_context(|| format!("Katalog nicht abschließbar: {}", path.display()))?;
+                eprintln!(
+                    "[+] Dateikatalog: {} Einträge ({} Fehler) in {}",
+                    summary.eintraege,
+                    summary.fehler,
+                    path.display()
+                );
+                Some(CatalogInfo {
+                    pfad: path.display().to_string(),
+                    quelle: stratum_analysis::CATALOG_SOURCE,
+                    format: "JSON Lines, ein Eintrag je Zeile, sortiert nach Volume und Pfad",
+                    hashes,
+                    summary,
+                })
+            }
+            None => {
+                eprintln!(
+                    "[+] Dateikatalog: {} Einträge ({} Fehler) in der Datenbank",
+                    summary.eintraege, summary.fehler
+                );
+                None
+            }
+        }
+    } else {
+        None
     };
 
     let mft_timeline = match mft_timeline_file {
@@ -563,39 +680,8 @@ fn main() -> Result<()> {
         });
     }
 
-    // Domänen-Analyzer zusammenstellen: Tor läuft immer, die Keyword-Suche nur
-    // bei aktiver Begriffsliste.
-    let use_default = !cli.no_default_keywords;
-    let mut analyzers: Vec<Box<dyn Analyzer>> = vec![
-        Box::new(TorAnalyzer),
-        Box::new(PersistenceAnalyzer),
-        Box::new(UsbAnalyzer),
-        Box::new(UserActivityAnalyzer),
-        Box::new(BrowserAnalyzer),
-        Box::new(PrefetchAnalyzer),
-        Box::new(EventLogAnalyzer),
-        Box::new(VssAnalyzer),
-        Box::new(ProgramExecutionAnalyzer),
-        Box::new(LsaAnalyzer),
-        Box::new(DpapiAnalyzer),
-        Box::new(BamAnalyzer),
-        Box::new(FilePersistenceAnalyzer),
-        Box::new(RecycleBinAnalyzer),
-        Box::new(LnkAnalyzer),
-        Box::new(JumpListAnalyzer),
-        Box::new(PowerShellHistoryAnalyzer),
-        Box::new(ZoneIdentifierAnalyzer),
-        Box::new(ShellBagsAnalyzer),
-        Box::new(ActivitiesCacheAnalyzer),
-        Box::new(SrumAnalyzer),
-        Box::new(WebCacheAnalyzer),
-    ];
-
     let mut keyword_bar = None;
-    let keywords = if !use_default && cli.keywords.is_empty() {
-        None
-    } else {
-        let (analyzer, info) = build_keyword_analyzer(use_default, &cli.keywords)?;
+    if let Some(analyzer) = keyword_analyzer {
         let pb = bytes_bar(img.len(), "Suche");
         let bar = pb.clone();
         let analyzer = analyzer
@@ -606,8 +692,7 @@ fn main() -> Result<()> {
             }));
         analyzers.push(Box::new(analyzer));
         keyword_bar = Some(pb);
-        Some(info)
-    };
+    }
 
     eprintln!("[*] Führe Domänen-Analyzer aus ...");
     let mut analysis = run_all(&ctx, &analyzers);
@@ -630,61 +715,13 @@ fn main() -> Result<()> {
 
     stratum_analysis::assign_ids(&mut analysis.findings);
     let timeline = stratum_analysis::build_timeline(&analysis.findings);
-    let auftrag = match (cli.db, &hashes) {
-        (true, Some(h)) => Some(datenbank::Auftrag {
-            gestartet,
-            image: img.path().to_path_buf(),
-            format: img.format(),
-            groesse: img.len(),
-            hashes: h.clone(),
-            akquisezeit: img
-                .ewf()
-                .and_then(|e| e.info().acquired_unix())
-                .and_then(|u| chrono::DateTime::from_timestamp(u, 0)),
-            metadaten: serde_json::json!({
-                "md5": h.md5,
-                "sha1": h.sha1,
-                "ewf": ewf_info,
-                "bdp_info": cli.bdp.as_ref().map(|p| p.display().to_string()),
-            }),
-            konfiguration: datenbank::konfiguration(
-                &[
-                    ("begriffe", serde_json::json!(keywords)),
-                    ("raw_sweep", cli.raw_sweep.into()),
-                    ("check_onion", cli.check_onion.into()),
-                    (
-                        "bdp_info",
-                        serde_json::json!(cli.bdp.as_ref().map(|p| p.display().to_string())),
-                    ),
-                    ("dpapi", serde_json::json!(dpapi_art(&cli))),
-                    ("firefox_passwort", cli.firefox_password.is_some().into()),
-                    ("katalog", cli.catalog.is_some().into()),
-                    ("datei_hashes", cli.datei_hashes.into()),
-                    ("mft_timeline", cli.mft_timeline.is_some().into()),
-                    ("usn_journal", cli.usn_journal.is_some().into()),
-                ],
-                &analyzers,
-            ),
-        }),
-        _ => None,
-    };
-    let mut sitzung = None;
-    let modell = match modell_file {
-        Some((path, file)) => {
-            let (info, s) = modell_schreiben(
-                (&path, file),
-                &img,
-                hashes.as_ref(),
-                fall_id,
-                &ctx,
-                &analysis.findings,
-                auftrag.as_ref(),
-            )?;
-            sitzung = s;
+    let modell = match (modell_file, kontext.take()) {
+        (Some((path, file)), Some(k)) => {
+            let info = modell_schreiben((&path, file), k, &analysis.findings, sitzung.as_ref())?;
             warnings.extend(info.hinweise.iter().map(|h| format!("Modell: {h}")));
             Some(info)
         }
-        None => None,
+        _ => None,
     };
     eprintln!("[+] Zeitstrahl mit {} Ereignissen", timeline.len());
 
@@ -928,16 +965,14 @@ fn ewf_report(
     }
 }
 
-/// Bildet die Funde auf das Datenmodell ab und schreibt es als JSON.
-fn modell_schreiben(
-    (path, file): (&std::path::Path, std::fs::File),
+/// Kontext für das Datenmodell: Fall- und Evidence-ID, Hash, Rechnername.
+/// Dazu Hinweise für den Report.
+fn kontext_bilden(
     img: &ImageReader,
     hashes: Option<&stratum_core::ImageHashes>,
     fall_id: Option<uuid::Uuid>,
     ctx: &AnalysisContext<'_>,
-    funde: &[stratum_analysis::RawFinding],
-    db: Option<&datenbank::Auftrag>,
-) -> Result<(report::ModellInfo, Option<datenbank::Sitzung>)> {
+) -> (stratum_normalize::Kontext, Vec<String>) {
     use stratum_model::{ids::derived_uuid, CaseId, EvidenceId};
     let mut hinweise = Vec::new();
     let evidence_key = match hashes {
@@ -977,6 +1012,19 @@ fn modell_schreiben(
         stratum_version: format!("{} ({})", tool.version, tool.revision),
         zeitpunkt: chrono::Utc::now(),
     };
+    (k, hinweise)
+}
+
+/// Bildet die Funde auf das Datenmodell ab und schreibt es als JSON, mit
+/// `--db` zusätzlich in den laufenden Analyselauf.
+fn modell_schreiben(
+    (path, file): (&std::path::Path, std::fs::File),
+    (mut k, mut hinweise): (stratum_normalize::Kontext, Vec<String>),
+    funde: &[stratum_analysis::RawFinding],
+    db: Option<&datenbank::Sitzung>,
+) -> Result<report::ModellInfo> {
+    // Zeitpunkt der Abbildung, wie vor der Registrierung in der Datenbank.
+    k.zeitpunkt = chrono::Utc::now();
     eprintln!("[*] Bilde Funde auf das Datenmodell ab ...");
     let mut m = stratum_normalize::normalisieren(funde, &k);
     let mut w = std::io::BufWriter::new(stratum_core::HashingWriter::new(file));
@@ -987,12 +1035,9 @@ fn modell_schreiben(
         .map_err(|e| e.into_error())
         .and_then(|h| h.finish())
         .with_context(|| format!("Modell nicht abschließbar: {}", path.display()))?;
-    let (sitzung, datenbank) = match db {
-        Some(a) => {
-            let (s, g) = a.ausfuehren(&k, &m, &datei_hashes.sha256)?;
-            (Some(s), Some(g))
-        }
-        None => (None, None),
+    let datenbank = match db {
+        Some(s) => Some(s.modell(&m, &datei_hashes.sha256)?),
+        None => None,
     };
     hinweise.append(&mut m.hinweise);
     eprintln!(
@@ -1006,8 +1051,8 @@ fn modell_schreiben(
         pfad: path.display().to_string(),
         format: "json",
         hashes: datei_hashes,
-        fall_id: case_id.to_string(),
-        evidence_id: evidence_id.to_string(),
+        fall_id: k.case_id.to_string(),
+        evidence_id: k.evidence_id.to_string(),
         artefakte: m.artifacts.len(),
         observationen: m.observations.len(),
         entitaeten: m.entities.len(),
@@ -1018,7 +1063,7 @@ fn modell_schreiben(
         hinweise,
         datenbank,
     };
-    Ok((info, sitzung))
+    Ok(info)
 }
 
 #[cfg(test)]

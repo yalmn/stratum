@@ -605,6 +605,16 @@ Datenbank selbst. Ergebnisse späterer Korrelationsregeln landen als
 Beziehung oder Ereignis mit `derivation = 'correlated'`, die Regel steht in
 der Herkunft.
 
+Mit `--db` steht außerdem der Dateikatalog in der Tabelle `file`, auch
+ohne `--catalog` (mit `--catalog` zusätzlich als Datei, beide aus
+demselben Durchlauf). Er wird in Blöcken geschrieben, nie als Ganzes im
+Speicher gehalten. Zeiten stehen verlustfrei als FILETIME in `bigint`
+(100 ns); `filetime_iso(si_modified)` liefert wieder den Text des Katalogs.
+Werte mit gesetztem obersten Bit (in Windows ungültig) bleiben bitgleich
+erhalten und erscheinen als negative Zahl. Ein späterer Lauf mit
+`--datei-hashes` ergänzt fehlende SHA-256-Werte und Dateitypen. Am
+Testimage: rund 149.000 Einträge in etwa 13 Sekunden, 92 MB.
+
 ## E01-Images
 
 stratum liest Expert-Witness-Images (EWF-E01, von EnCase 1 bis 7, FTK Imager,
