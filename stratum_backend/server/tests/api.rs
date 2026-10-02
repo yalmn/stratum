@@ -167,6 +167,38 @@ async fn ablauf(db: Datenbank) {
         .await
         .unwrap();
     assert_eq!(antwort.status(), StatusCode::OK);
+    // Anmeldung auch per HTTP-Basic (curl -u), ohne Körper.
+    let antwort = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/sitzung")
+                // tom:tom-passwort-789
+                .header(header::AUTHORIZATION, "Basic dG9tOnRvbS1wYXNzd29ydC03ODk=")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(antwort.status(), StatusCode::OK);
+    // Kaputtes JSON: Fehler im gewohnten Format.
+    let antwort = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/sitzung")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("kein json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(antwort.status(), StatusCode::BAD_REQUEST);
+    let v: Value = serde_json::from_slice(
+        &axum::body::to_bytes(antwort.into_body(), 1 << 16)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(v["fehler"].as_str().unwrap().contains("HTTP-Basic"));
     let t_mia = anmelden(&app, "mia", "mia-passwort-456").await;
     let t_tom = anmelden(&app, "tom", "tom-passwort-789").await;
     let (_, _, v) = anfrage(&app, "GET", "/api/v1/ich", Some(&t_mia), None).await;
@@ -199,6 +231,18 @@ async fn ablauf(db: Datenbank) {
     let fall_id = CaseId(v["id"].as_str().unwrap().parse().unwrap());
     let (s, _, _) = anfrage(&app, "POST", "/api/v1/faelle", Some(&t_chef), Some(fall)).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
+    let antwort = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/faelle")
+                .header(header::AUTHORIZATION, format!("Bearer {t_chef}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{\"titel\": 1}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(antwort.status(), StatusCode::BAD_REQUEST);
     let (s, _, v) = anfrage(&app, "GET", "/api/v1/faelle", Some(&t_mia), None).await;
     assert_eq!((s, v.as_array().unwrap().len()), (StatusCode::OK, 1));
     let (s, _, _) = anfrage(&app, "GET", "/api/v1/faelle/GIBTSNICHT", Some(&t_mia), None).await;

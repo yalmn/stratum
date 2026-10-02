@@ -12,7 +12,7 @@
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request, State};
 use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -93,6 +93,38 @@ fn token(h: &HeaderMap) -> Option<String> {
         })
 }
 
+/// JSON-Körper einer Anfrage; ungültiges JSON wird ein Fehler im
+/// gewohnten Format statt der Textmeldung von Axum.
+pub struct Koerper<T>(pub T);
+
+impl<T: serde::de::DeserializeOwned, S: Send + Sync> FromRequest<S> for Koerper<T> {
+    type Rejection = ApiFehler;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        match Json::<T>::from_request(req, state).await {
+            Ok(Json(t)) => Ok(Koerper(t)),
+            Err(e) => Err(ApiFehler::Anfrage(format!(
+                "Anfrage ungültig: {}",
+                e.body_text()
+            ))),
+        }
+    }
+}
+
+/// Name und Passwort aus `Authorization: Basic …` (RFC 7617).
+fn basic(h: &HeaderMap) -> Option<(String, String)> {
+    use base64ct::Encoding;
+    let wert = h
+        .get(header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Basic ")?;
+    let roh = base64ct::Base64::decode_vec(wert.trim()).ok()?;
+    let text = String::from_utf8(roh).ok()?;
+    let (n, p) = text.split_once(':')?;
+    Some((n.to_string(), p.to_string()))
+}
+
 /// Angemeldetes Konto einer Anfrage.
 pub struct Angemeldet(pub User);
 
@@ -143,11 +175,21 @@ struct Anmeldung {
     passwort: String,
 }
 
+/// Anmeldung: JSON `{"name", "passwort"}` oder HTTP-Basic (damit etwa
+/// `curl -u NAME` das Passwort verdeckt abfragt).
 async fn anmelden(
     State(z): State<Zustand>,
     headers: HeaderMap,
-    Json(a): Json<Anmeldung>,
+    body: axum::body::Bytes,
 ) -> Antwort<Response> {
+    let a = match basic(&headers) {
+        Some((name, passwort)) if body.is_empty() => Anmeldung { name, passwort },
+        _ => serde_json::from_slice::<Anmeldung>(&body).map_err(|e| {
+            ApiFehler::Anfrage(format!(
+                "Anmeldung als JSON {{\"name\", \"passwort\"}} oder per HTTP-Basic: {e}"
+            ))
+        })?,
+    };
     let client = headers
         .get(header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
@@ -224,7 +266,7 @@ struct NeuerFall {
 async fn fall_neu(
     State(z): State<Zustand>,
     Angemeldet(u): Angemeldet,
-    Json(n): Json<NeuerFall>,
+    Koerper(n): Koerper<NeuerFall>,
 ) -> Antwort<(StatusCode, Json<Case>)> {
     if z.db.fall_id(&n.nummer).await?.is_some() {
         return Err(ApiFehler::Anfrage(format!(
@@ -274,7 +316,7 @@ async fn analyse(
     State(z): State<Zustand>,
     Angemeldet(u): Angemeldet,
     Path(nummer): Path<String>,
-    Json(a): Json<NeueAnalyse>,
+    Koerper(a): Koerper<NeueAnalyse>,
 ) -> Antwort<(StatusCode, Json<Value>)> {
     let fall = fall_id(&z, &nummer).await?;
     let ev = z.db.evidence_id(fall, &a.evidence).await?.ok_or_else(|| {
@@ -409,6 +451,19 @@ async fn audit_pruefen(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn basic_auth() {
+        let mut h = HeaderMap::new();
+        // "mia:pass:wort" (Doppelpunkt im Passwort erlaubt)
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Basic bWlhOnBhc3M6d29ydA=="),
+        );
+        assert_eq!(basic(&h), Some(("mia".into(), "pass:wort".into())));
+        h.insert(header::AUTHORIZATION, HeaderValue::from_static("Basic !!!"));
+        assert_eq!(basic(&h), None);
+    }
 
     #[test]
     fn token_aus_header_und_cookie() {

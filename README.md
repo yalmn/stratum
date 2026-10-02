@@ -735,7 +735,9 @@ da die API ohne TLS läuft. Mit `--worker` läuft ein Worker im selben
 Prozess. Strg+C beendet den Server; ein laufender Job wird dabei
 abgebrochen (auch mitten im Image-Hash) und als `cancelled` beendet.
 
-Anmeldung mit `POST /api/v1/sitzung` (`{"name", "passwort"}`); die Antwort
+Anmeldung mit `POST /api/v1/sitzung`, entweder mit JSON `{"name",
+"passwort"}` oder per HTTP-Basic (`curl -u mia -c cookies.txt -X POST …`
+fragt das Passwort verdeckt ab); die Antwort
 enthält ein Token und setzt es als HttpOnly-Cookie `stratum_sitzung`. Jede
 weitere Anfrage braucht das Cookie oder `Authorization: Bearer <Token>`.
 Die Datenbank kennt nur den SHA-256 des Tokens; eine Sitzung endet mit
