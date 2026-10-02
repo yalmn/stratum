@@ -52,11 +52,32 @@ fn mit<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> {
     [a, b].concat()
 }
 
+/// Passwort der Datenbank aus `STRATUM_DB_PASSWORT_DATEI`, relative Pfade
+/// vom Projektverzeichnis aus (wie bei stratum selbst).
+fn db_passwort() -> Option<String> {
+    let p = std::path::PathBuf::from(std::env::var_os("STRATUM_DB_PASSWORT_DATEI")?);
+    let p = if p.is_relative() {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(p)
+    } else {
+        p
+    };
+    Some(
+        std::fs::read_to_string(&p)
+            .unwrap_or_else(|e| panic!("Passwortdatei {} nicht lesbar: {e}", p.display()))
+            .trim()
+            .to_string(),
+    )
+}
+
 fn sql(url: &str, befehl: String) {
     use sqlx::{Connection as _, Executor as _};
     let rt = tokio_rt();
     rt.block_on(async {
-        let mut c = sqlx::PgConnection::connect(url).await.unwrap();
+        let mut o: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        if let Some(p) = db_passwort() {
+            o = o.password(&p);
+        }
+        let mut c = sqlx::PgConnection::connect_with(&o).await.unwrap();
         c.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(befehl)))
             .await
             .unwrap();
