@@ -312,6 +312,17 @@ pub enum KontoBefehl {
         #[command(flatten)]
         als: Als,
     },
+    /// Passwort ändern: das eigene (fragt das bisherige ab) oder als
+    /// Superadmin das eines anderen Kontos. Offene Sitzungen enden.
+    Passwort {
+        /// Anmeldename des Kontos.
+        name: String,
+        /// Neues Passwort aus dieser Datei statt der Abfrage.
+        #[arg(long, value_name = "DATEI")]
+        neues_passwort_datei: Option<PathBuf>,
+        #[command(flatten)]
+        als: Als,
+    },
     /// Dienstkonto (ohne Passwort) anlegen.
     Dienst {
         /// Anmeldename.
@@ -695,6 +706,38 @@ fn konto(rt: &tokio::runtime::Runtime, db: &Datenbank, k: KontoBefehl) -> Result
             let id = konto_id(rt, db, &name)?;
             rt.block_on(db.konto_rollen_setzen(a, id, &ids))?;
             eprintln!("[+] Rollen von {name} gesetzt");
+        }
+        KontoBefehl::Passwort {
+            name,
+            neues_passwort_datei,
+            als,
+        } => {
+            stratum_store::anmeldename_pruefen(&name)?;
+            let handelnd = match &als.als {
+                Some(n) => n.clone(),
+                None => crate::konfig::konfig()?.konto().unwrap_or(name.clone()),
+            };
+            let (a, bisher) = if handelnd == name {
+                // Eigenes Passwort: das bisherige ist zugleich die Anmeldung.
+                let b = passwort(
+                    als.als_passwort_datei.as_ref(),
+                    &format!("Bisheriges Passwort für {name}: "),
+                    false,
+                )?;
+                (rt.block_on(db.anmelden(&name, &b))?.id, Some(b))
+            } else {
+                (
+                    anmelden(rt, db, Some(&handelnd), als.als_passwort_datei.as_deref())?,
+                    None,
+                )
+            };
+            let neu = passwort(
+                neues_passwort_datei.as_ref(),
+                &format!("Neues Passwort für {name}: "),
+                true,
+            )?;
+            rt.block_on(db.passwort_aendern(a, &name, bisher.as_deref(), &neu))?;
+            eprintln!("[+] Passwort von {name} geändert; offene Sitzungen sind beendet");
         }
         KontoBefehl::Dienst {
             name,

@@ -748,6 +748,81 @@ impl Datenbank {
         Ok(())
     }
 
+    /// Ändert ein Passwort. Das eigene nur mit dem bisherigen Passwort,
+    /// das eines anderen Kontos nur als Superadmin. Alle offenen Sitzungen
+    /// des Kontos enden; im Audit steht die Änderung, nie das Passwort.
+    pub async fn passwort_aendern(
+        &self,
+        akteur: ActorId,
+        username: &str,
+        bisher: Option<&str>,
+        neu: &str,
+    ) -> Result<(), StoreError> {
+        let ziel: Option<(uuid::Uuid, Option<String>)> =
+            sqlx::query_as("SELECT id, password_hash FROM app_user WHERE username = $1")
+                .bind(username)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some((id, hash)) = ziel else {
+            return Err(StoreError::NichtGefunden(format!("kein Konto {username}")));
+        };
+        let user = ActorId(id);
+        let e = eintrag(
+            akteur,
+            AuditAction::PasswordChange,
+            "user",
+            user,
+            AuditResult::Success,
+            json!({"eigenes": akteur == user}),
+        );
+        if akteur == user {
+            let passt = match (bisher, hash.as_deref()) {
+                (Some(b), Some(h)) => Argon2::default().verify_password(b.as_bytes(), h).is_ok(),
+                _ => false,
+            };
+            if !passt {
+                self.audit(&AuditEintrag {
+                    ergebnis: AuditResult::Denied,
+                    details: json!({"eigenes": true, "grund": "bisheriges_passwort_falsch"}),
+                    ..e
+                })
+                .await?;
+                return Err(StoreError::Verweigert("bisheriges Passwort falsch".into()));
+            }
+        } else {
+            self.nur_superadmin(akteur, &e).await?;
+        }
+        if hash.is_none() {
+            return Err(StoreError::Eingabe(
+                "Dienstkonten haben kein Passwort".into(),
+            ));
+        }
+        let neu_hash = passwort_hash(neu)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE app_user SET password_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(neu_hash)
+            .execute(&mut *tx)
+            .await?;
+        let beendet = sqlx::query(
+            "UPDATE app_session SET ended_at = now() WHERE user_id = $1 AND ended_at IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                details: json!({"eigenes": akteur == user, "beendete_sitzungen": beendet}),
+                ..e
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Meldet ein Konto an. Abgelehnt werden unbekannte Namen, nicht
     /// freigegebene oder gesperrte Konten, Dienstkonten und falsche
     /// Passwörter, jeweils mit Audit, ohne nach außen zu verraten, welcher

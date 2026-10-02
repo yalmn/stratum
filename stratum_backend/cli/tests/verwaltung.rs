@@ -291,6 +291,23 @@ fn ablauf_mit_datenbank() {
             "LOGIN success mia",
         ]
     );
+    // Eigenes Passwort ändern (bisheriges aus der Datei), danach gilt nur
+    // noch das neue.
+    let mia_neu = tmp.path().join("mia_neu");
+    std::fs::write(&mia_neu, "mia-passwort-NEU-1").unwrap();
+    let mia_neu = mia_neu.to_str().unwrap();
+    ok(&mit(
+        &[
+            "konto",
+            "passwort",
+            "mia",
+            "--neues-passwort-datei",
+            mia_neu,
+        ],
+        &als_mia,
+    ));
+    nein(&mit(&["konto", "liste"], &als_mia), "Anmeldung abgelehnt");
+    let als_mia = ["--als", "mia", "--als-passwort-datei", mia_neu];
     ok(&mit(&["superadmin", "ernennen", "mia"], &als_chef));
     ok(&mit(&["superadmin", "entziehen", "chef"], &als_mia));
     nein(

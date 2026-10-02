@@ -30,6 +30,8 @@ pub enum AuditAction {
     UserReject,
     /// Konto gesperrt.
     UserDisable,
+    /// Passwort geändert oder neu gesetzt.
+    PasswordChange,
     /// Kontenliste gelesen.
     UserList,
     /// Superadmin-Recht vergeben oder entzogen.

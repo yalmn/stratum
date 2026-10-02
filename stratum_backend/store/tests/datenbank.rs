@@ -1014,6 +1014,41 @@ async fn rollen_registrierung_freigabe() {
         modify.1,
         serde_json::json!(["case.create", "case.edit", "case.view"])
     );
+    // Passwort ändern: eigenes nur mit dem bisherigen, fremdes nur als
+    // Superadmin; offene Sitzungen enden.
+    let (token, _) = db
+        .sitzung_anlegen("mia", "noch ein Passwort!", None)
+        .await
+        .unwrap();
+    assert!(db.sitzung_pruefen(&token).await.unwrap().is_some());
+    assert!(matches!(
+        db.passwort_aendern(mia.id, "mia", Some("falsch"), "ganz neues Passwort")
+            .await,
+        Err(StoreError::Verweigert(_))
+    ));
+    assert!(db
+        .passwort_aendern(mia.id, "mia", Some("noch ein Passwort!"), "kurz")
+        .await
+        .is_err());
+    db.passwort_aendern(
+        mia.id,
+        "mia",
+        Some("noch ein Passwort!"),
+        "ganz neues Passwort",
+    )
+    .await
+    .unwrap();
+    assert!(db.sitzung_pruefen(&token).await.unwrap().is_none());
+    assert!(db.anmelden("mia", "noch ein Passwort!").await.is_err());
+    db.anmelden("mia", "ganz neues Passwort").await.unwrap();
+    // mia ist Superadmin (siehe oben) und darf ein fremdes Passwort setzen.
+    db.passwort_aendern(mia.id, "xaver", None, "zurückgesetzt 123")
+        .await
+        .unwrap();
+    assert!(db
+        .passwort_aendern(dienst.id, "mia", None, "von einem Dienst!!")
+        .await
+        .is_err());
     let hash: String =
         sqlx::query_scalar("SELECT password_hash FROM app_user WHERE username = 'chef'")
             .fetch_one(db.pool())

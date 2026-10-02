@@ -761,6 +761,9 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 Fehler kommen als `{"fehler": "…"}` mit 400, 401, 403, 404 oder 500
 (innere Fehler ohne Einzelheiten).
 
+`konto passwort NAME` ändert ein Passwort: das eigene nach Eingabe des
+bisherigen, als Superadmin das eines anderen Kontos; offene Sitzungen des
+Kontos enden, im Audit steht `PASSWORD_CHANGE` (nie das Passwort).
 Weitere: `konto ablehnen`, `konto sperren`, `konto dienst` (Dienstkonto
 ohne Passwort), `rolle aendern` (ohne `--recht` bleiben die
 Berechtigungen, mit `--recht` gelten genau die angegebenen), `rolle
