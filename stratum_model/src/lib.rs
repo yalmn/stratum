@@ -15,6 +15,7 @@
 #![warn(missing_docs)]
 
 pub mod artifact;
+pub mod audit;
 pub mod case;
 pub mod entity;
 pub mod event;
@@ -25,8 +26,10 @@ pub mod observation;
 pub mod provenance;
 pub mod relationship;
 pub mod time;
+pub mod user;
 
 pub use artifact::{Artifact, ArtifactKind};
+pub use audit::{AuditAction, AuditEvent, AuditResult};
 pub use case::{Case, CaseClassification, CaseStatus};
 pub use entity::{canonical, Entity, EntityKind};
 pub use event::{Event, EventKind, EventParticipant, ParticipantRole};
@@ -35,8 +38,8 @@ pub use evidence::{
 };
 pub use finding::{Finding, FindingCategory, FindingDisposition, FindingPriority, FindingStatus};
 pub use ids::{
-    ActorId, AnalysisRunId, ArtifactId, CaseId, EntityId, EventId, EvidenceId, EvidenceRelationId,
-    FindingId, ObservationId, RelationshipId, TagId,
+    ActorId, AnalysisRunId, ArtifactId, AuditEventId, CaseId, EntityId, EventId, EvidenceId,
+    EvidenceRelationId, FindingId, ObservationId, RelationshipId, TagId,
 };
 pub use observation::{Observation, ObservationKind};
 pub use provenance::{
@@ -45,3 +48,4 @@ pub use provenance::{
 };
 pub use relationship::{Relationship, RelationshipKind};
 pub use time::{ForensicTime, TimePrecision, TimeSemantics};
+pub use user::{Role, User, UserKind};

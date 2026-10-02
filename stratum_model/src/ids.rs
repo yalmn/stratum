@@ -96,11 +96,30 @@ id_typ!(
     ActorId
 );
 verwaltung!(ActorId);
+
+impl ActorId {
+    /// Systemkonto der Kommandozeile, solange sie ohne Anmeldung arbeitet.
+    /// Fest, damit die Datenbank es anlegen kann (Migration 0004).
+    pub fn cli() -> Self {
+        Self(derived_uuid("akteur", &[b"stratum-cli"]))
+    }
+
+    /// Platzhalter für Aktionen ohne bekannten Benutzer, etwa eine
+    /// Anmeldung mit unbekanntem Namen.
+    pub fn unbekannt() -> Self {
+        Self(derived_uuid("akteur", &[b"unbekannt"]))
+    }
+}
 id_typ!(
     /// Schlagwort.
     TagId
 );
 verwaltung!(TagId);
+id_typ!(
+    /// Audit-Ereignis.
+    AuditEventId
+);
+verwaltung!(AuditEventId);
 id_typ!(
     /// Beziehung zwischen zwei Evidence-Objekten.
     EvidenceRelationId
@@ -191,6 +210,19 @@ impl RelationshipId {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn feste_akteure_wie_in_migration_0004() {
+        use super::ActorId;
+        assert_eq!(
+            ActorId::cli().to_string(),
+            "90713752-b779-524a-be66-954f05a2e0c3"
+        );
+        assert_eq!(
+            ActorId::unbekannt().to_string(),
+            "924f4def-f441-57c7-8284-92be2c4250ad"
+        );
+    }
+
     use super::*;
 
     fn fall() -> CaseId {

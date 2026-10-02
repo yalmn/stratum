@@ -8,15 +8,65 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use stratum_model::{
-    ids::derived_uuid, ActorId, Case, CaseClassification, CaseStatus, Evidence, EvidenceKind,
-    EvidenceSupport,
+    ActorId, Case, CaseClassification, CaseStatus, Evidence, EvidenceKind, EvidenceSupport,
 };
 use stratum_store::{Datenbank, Geschrieben, LaufAngaben, LaufStand};
 
-/// Akteur für Aktionen über die CLI, solange es keine Benutzerkonten gibt.
-/// Fest, damit die spätere Benutzertabelle ihn übernehmen kann.
+/// Akteur für Aktionen über die CLI: das feste Systemkonto, solange die
+/// Kommandozeile ohne Anmeldung arbeitet. Wer sie aufgerufen hat, steht als
+/// Benutzer des Betriebssystems im Audit.
 pub fn cli_akteur() -> ActorId {
-    ActorId(derived_uuid("akteur", &[b"stratum-cli"]))
+    ActorId::cli()
+}
+
+/// Benutzer des Betriebssystems (bei `sudo` der aufrufende).
+fn betriebssystem_benutzer() -> Option<String> {
+    ["SUDO_USER", "USER", "LOGNAME"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
+}
+
+/// Verbindet mit der Datenbank aus `STRATUM_DB_URL`, Passwort aus der Datei
+/// in `STRATUM_DB_PASSWORT_DATEI`.
+pub fn verbinden() -> Result<(tokio::runtime::Runtime, Datenbank)> {
+    let url = std::env::var("STRATUM_DB_URL")
+        .context("Umgebungsvariable STRATUM_DB_URL ist nicht gesetzt")?;
+    // Passwort aus einer Datei (dieselbe, die Docker als Secret nutzt).
+    let passwort = match std::env::var_os("STRATUM_DB_PASSWORT_DATEI") {
+        Some(p) => Some(
+            std::fs::read_to_string(&p)
+                .with_context(|| format!("Passwortdatei nicht lesbar: {}", p.to_string_lossy()))?
+                .trim()
+                .to_string(),
+        ),
+        None => None,
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("Laufzeit für die Datenbank nicht erstellbar")?;
+    let db = rt.block_on(Datenbank::verbinden_mit(&url, passwort.as_deref()))?;
+    Ok((rt, db))
+}
+
+/// Rechnet die Audit-Kette nach (`--audit-pruefen`) und gibt das Ergebnis
+/// als JSON aus. Fehler in der Kette führen zu einem Fehler-Exitcode.
+pub fn audit_pruefen() -> Result<()> {
+    let (rt, db) = verbinden()?;
+    let p = rt.block_on(db.audit_pruefen(cli_akteur()))?;
+    println!("{}", serde_json::to_string_pretty(&p)?);
+    if !p.intakt() {
+        anyhow::bail!(
+            "Audit-Kette nicht intakt: {} Fehler in {} Ereignissen",
+            p.fehler_gesamt,
+            p.ereignisse
+        );
+    }
+    eprintln!(
+        "[+] Audit-Kette intakt: {} Ereignisse, letzter Hash {}",
+        p.ereignisse, p.letzter_hash
+    );
+    Ok(())
 }
 
 /// Was neben dem Modell in die Datenbank geht.
@@ -52,24 +102,7 @@ pub struct Sitzung {
 impl Auftrag {
     /// Verbindet, registriert Fall und Evidence und beginnt den Lauf.
     pub fn beginnen(&self, k: &stratum_normalize::Kontext) -> Result<Sitzung> {
-        let url = std::env::var("STRATUM_DB_URL")
-            .context("--db: Umgebungsvariable STRATUM_DB_URL ist nicht gesetzt")?;
-        // Passwort aus einer Datei (dieselbe, die Docker als Secret nutzt).
-        let passwort = match std::env::var_os("STRATUM_DB_PASSWORT_DATEI") {
-            Some(p) => Some(
-                std::fs::read_to_string(&p)
-                    .with_context(|| {
-                        format!("Passwortdatei nicht lesbar: {}", p.to_string_lossy())
-                    })?
-                    .trim()
-                    .to_string(),
-            ),
-            None => None,
-        };
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .context("Laufzeit für die Datenbank nicht erstellbar")?;
+        let (rt, db) = verbinden().context("--db")?;
         let fall = self.fall(k);
         let evidence = self.evidence(k);
         let konfig_hash =
@@ -78,13 +111,14 @@ impl Auftrag {
             started_at: self.gestartet,
             configuration: &self.konfiguration,
             configuration_hash: Some(&konfig_hash),
+            audit_details: json!({"betriebssystem_benutzer": betriebssystem_benutzer()}),
         };
-        let (db, lauf, fall_neu, evidence_neu) = rt.block_on(async {
-            let db = Datenbank::verbinden_mit(&url, passwort.as_deref()).await?;
-            let fall_neu = db.fall_anlegen(&fall).await?;
-            let evidence_neu = db.evidence_registrieren(&evidence).await?;
-            let lauf = db.lauf_beginnen(k, &angaben).await?;
-            Ok::<_, stratum_store::StoreError>((db, lauf, fall_neu, evidence_neu))
+        let a = cli_akteur();
+        let (lauf, fall_neu, evidence_neu) = rt.block_on(async {
+            let fall_neu = db.fall_anlegen(a, &fall).await?;
+            let evidence_neu = db.evidence_registrieren(a, &evidence).await?;
+            let lauf = db.lauf_beginnen(a, k, &angaben).await?;
+            Ok::<_, stratum_store::StoreError>((lauf, fall_neu, evidence_neu))
         })?;
         eprintln!(
             "[+] Datenbank: Fall {}{}, Lauf {lauf}",
@@ -205,6 +239,7 @@ impl Sitzung {
         };
         self.rt
             .block_on(self.db.lauf_abschliessen(
+                cli_akteur(),
                 self.lauf,
                 stand,
                 chrono::Utc::now(),

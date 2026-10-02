@@ -9,6 +9,8 @@ license.workspace = true
 stratum-model = { path = "../../stratum_model" }
 stratum-normalize = { path = "../normalize" }
 stratum-core.workspace = true
+argon2 = "0.6.0"
+sha2.workspace = true
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "migrate", "macros", "uuid", "chrono", "json"] }
 serde_json = "1.0.151"
 thiserror.workspace = true

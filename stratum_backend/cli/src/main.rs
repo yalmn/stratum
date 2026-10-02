@@ -57,8 +57,15 @@ use report::{
 )]
 struct Cli {
     /// Pfad zum Image (Roh-Image wie merged.dd oder E01). Mit `--fund` der
-    /// Pfad zum JSON-Report.
-    image: PathBuf,
+    /// Pfad zum JSON-Report. Entfällt bei `--audit-pruefen`.
+    #[arg(required_unless_present = "audit_pruefen")]
+    image: Option<PathBuf>,
+
+    /// Audit-Kette der Datenbank (`STRATUM_DB_URL`) vollständig nachrechnen,
+    /// Ergebnis als JSON ausgeben und beenden. Exitcode ungleich 0, wenn sie
+    /// nicht intakt ist.
+    #[arg(long, conflicts_with_all = ["db", "fund", "dump", "dump_record", "masterkey"])]
+    audit_pruefen: bool,
 
     /// Zieldatei für den JSON-Report (Standard: Ausgabe auf stdout).
     #[arg(short, long)]
@@ -247,12 +254,18 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let gestartet = chrono::Utc::now();
 
+    if cli.audit_pruefen {
+        return datenbank::audit_pruefen();
+    }
+    let Some(image) = cli.image.as_deref() else {
+        anyhow::bail!("Pfad zum Image fehlt");
+    };
     if let Some(id) = &cli.fund {
-        return abruf::fund(&cli.image, id);
+        return abruf::fund(image, id);
     }
 
-    let img = ImageReader::open(&cli.image)
-        .with_context(|| format!("Image nicht lesbar: {}", cli.image.display()))?;
+    let img = ImageReader::open(image)
+        .with_context(|| format!("Image nicht lesbar: {}", image.display()))?;
 
     // Schnellmodus: eine Datei extrahieren und beenden (keine Analyse).
     if let Some(d) = &cli.dump {

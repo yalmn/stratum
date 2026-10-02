@@ -615,6 +615,41 @@ erhalten und erscheinen als negative Zahl. Ein späterer Lauf mit
 `--datei-hashes` ergänzt fehlende SHA-256-Werte und Dateitypen. Am
 Testimage: rund 149.000 Einträge in etwa 13 Sekunden, 92 MB.
 
+### Benutzer, Rollen und Audit
+
+Konten haben feste Rollen (`administrator`, `case_manager`,
+`forensic_examiner`, `analyst`, `threat_intel_analyst`, `reviewer`,
+`read_only`, `automation_service`). Menschen melden sich mit Passwort an
+(Argon2id, mindestens 12 Zeichen), Dienstkonten haben keins. Konten und
+Rollen verwalten nur Administratoren; solange es kein menschliches
+Administratorkonto gibt, darf das Systemkonto `stratum-cli` das erste
+anlegen. Sensible Zugangsdaten sehen nur `administrator` und
+`forensic_examiner`. Die Kommandozeile arbeitet bis auf Weiteres ohne
+Anmeldung als `stratum-cli`; wer sie aufgerufen hat, steht als Benutzer
+des Betriebssystems im Audit.
+
+Das Audit (`audit_event`) hält fest, wer was getan hat: Fall angelegt,
+Evidence registriert oder gegen ihren Hash geprüft (eine Abweichung als
+`failure`), Analyse begonnen und beendet, Report erstellt, Konten,
+Rollen, Anmeldungen (auch abgelehnte, mit Grund), Findings, Beziehungen.
+Jedes Ereignis entsteht in derselben Transaktion wie die Aktion. Es ist
+eine Hash-Kette: ein Trigger vergibt die nächste Nummer und berechnet
+`SHA-256(vorheriger_hash + "\n" + nummer + "\n" + payload)` über den
+gespeicherten Text `payload`. Ändern, Löschen und Leeren lehnt die Tabelle
+ab. stratum arbeitet in der Datenbank als Rolle `stratum_app`, die nirgends
+löschen und das Audit nicht ändern darf.
+
+```sh
+stratum --audit-pruefen
+```
+
+rechnet die ganze Kette nach (lückenlose Nummern, Vorgänger-Hash, Hash,
+Spalten gleich Inhalt, Kopf gleich letztem Ereignis), gibt das Ergebnis als
+JSON aus und endet mit Fehler, wenn sie nicht intakt ist. Ein Superuser der
+Datenbank kann Trigger abschalten; eine Änderung findet dann das
+Nachrechnen. Spätere Ausbaustufe: signierte Prüfpunkte außerhalb der
+Datenbank.
+
 ## E01-Images
 
 stratum liest Expert-Witness-Images (EWF-E01, von EnCase 1 bis 7, FTK Imager,

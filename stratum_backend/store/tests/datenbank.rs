@@ -9,7 +9,12 @@ use stratum_model::{
     FindingCategory, FindingDisposition, FindingId, FindingPriority, FindingStatus,
 };
 use stratum_normalize::{normalisieren, Kontext};
-use stratum_store::{Datenbank, LaufAngaben, LaufStand, StoreError};
+use stratum_store::{Datenbank, LaufAngaben, LaufStand, NeuerBenutzer, StoreError};
+
+/// Handelnder Akteur in den Tests: das feste Konto der Kommandozeile.
+fn a() -> ActorId {
+    ActorId::cli()
+}
 
 fn url() -> Option<String> {
     std::env::var("STRATUM_DB_URL").ok()
@@ -69,7 +74,7 @@ fn fall(k: &Kontext) -> Case {
         status: stratum_model::CaseStatus::Active,
         classification: CaseClassification::Internal,
         created_at: k.zeitpunkt,
-        created_by: ActorId::new(),
+        created_by: ActorId::cli(),
         opened_at: None,
         closed_at: None,
         timezone: None,
@@ -92,7 +97,7 @@ fn evidence(k: &Kontext, id: EvidenceId, sha256: &str, kind: EvidenceKind) -> Ev
         blake3: "b".repeat(64),
         acquired_at: None,
         imported_at: k.zeitpunkt,
-        imported_by: ActorId::new(),
+        imported_by: ActorId::cli(),
         acquisition_method: None,
         read_only: true,
         support: EvidenceSupport::Recognized,
@@ -116,19 +121,15 @@ fn finding(k: &Kontext, derivation: DerivationKind, m: &stratum_normalize::Model
         event_refs: vec![m.events[0].id],
         artifact_refs: vec![m.artifacts[0].id],
         created_at: k.zeitpunkt,
-        created_by: ActorId::new(),
+        created_by: ActorId::cli(),
         updated_at: k.zeitpunkt,
     }
 }
 
-async fn verbinden() -> Option<Datenbank> {
-    let Some(url) = url() else {
-        eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
-        return None;
-    };
+fn passwort() -> Option<String> {
     // cargo test läuft im Ordner des Crates; ein relativer Pfad ist wie bei
     // stratum selbst vom Projektverzeichnis aus gemeint.
-    let passwort = std::env::var_os("STRATUM_DB_PASSWORT_DATEI").map(|p| {
+    std::env::var_os("STRATUM_DB_PASSWORT_DATEI").map(|p| {
         let p = std::path::PathBuf::from(p);
         let p = if p.is_relative() {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -141,9 +142,56 @@ async fn verbinden() -> Option<Datenbank> {
             .unwrap_or_else(|e| panic!("Passwortdatei {} nicht lesbar: {e}", p.display()))
             .trim()
             .to_string()
-    });
+    })
+}
+
+/// Eigentümer-Verbindung zur Datenbank aus `url` (Migrationen, Trigger-Tests).
+async fn eigentuemer(url: &str) -> sqlx::PgConnection {
+    use sqlx::Connection as _;
+    let mut o: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+    if let Some(p) = passwort() {
+        o = o.password(&p);
+    }
+    sqlx::PgConnection::connect_with(&o).await.unwrap()
+}
+
+/// Eigene, frische Datenbank für Tests, die die ganze Audit-Kette prüfen
+/// oder absichtlich beschädigen. Liefert Verbindung, URL und Namen.
+async fn frische_datenbank() -> Option<(Datenbank, String, String)> {
+    use sqlx::Executor as _;
+    let url = url()?;
+    let name = format!("stratum_test_{}", uuid::Uuid::now_v7().simple());
+    let mut o = eigentuemer(&url).await;
+    // Name aus einer UUID, kein fremder Text.
+    let sql = format!("CREATE DATABASE {name}");
+    o.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(sql)))
+        .await
+        .unwrap();
+    let (basis, _) = url.rsplit_once('/').unwrap();
+    let neu = format!("{basis}/{name}");
+    let db = Datenbank::verbinden_mit(&neu, passwort().as_deref())
+        .await
+        .expect("Verbindung");
+    Some((db, neu, name))
+}
+
+async fn frische_datenbank_entfernen(db: Datenbank, name: &str) {
+    use sqlx::Executor as _;
+    db.pool().close().await;
+    let mut o = eigentuemer(&url().unwrap()).await;
+    let sql = format!("DROP DATABASE {name} WITH (FORCE)");
+    o.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(sql)))
+        .await
+        .unwrap();
+}
+
+async fn verbinden() -> Option<Datenbank> {
+    let Some(url) = url() else {
+        eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
+        return None;
+    };
     Some(
-        Datenbank::verbinden_mit(&url, passwort.as_deref())
+        Datenbank::verbinden_mit(&url, passwort().as_deref())
             .await
             .expect("Verbindung"),
     )
@@ -161,18 +209,19 @@ async fn modell_schreiben_und_wiederholen() {
         started_at: k.zeitpunkt,
         configuration: &konfiguration,
         configuration_hash: Some("c0ffee"),
+        audit_details: serde_json::json!({}),
     };
 
-    assert!(db.fall_anlegen(&fall(&k)).await.unwrap());
-    assert!(!db.fall_anlegen(&fall(&k)).await.unwrap());
+    assert!(db.fall_anlegen(a(), &fall(&k)).await.unwrap());
+    assert!(!db.fall_anlegen(a(), &fall(&k)).await.unwrap());
     let ev = evidence(
         &k,
         k.evidence_id,
         &k.evidence_sha256,
         EvidenceKind::RawDiskImage,
     );
-    assert!(db.evidence_registrieren(&ev).await.unwrap());
-    assert!(!db.evidence_registrieren(&ev).await.unwrap());
+    assert!(db.evidence_registrieren(a(), &ev).await.unwrap());
+    assert!(!db.evidence_registrieren(a(), &ev).await.unwrap());
     // Gleiche ID mit anderem Inhalt: abgelehnt, nichts verändert.
     let falsch = evidence(
         &k,
@@ -181,11 +230,11 @@ async fn modell_schreiben_und_wiederholen() {
         EvidenceKind::RawDiskImage,
     );
     assert!(matches!(
-        db.evidence_registrieren(&falsch).await,
+        db.evidence_registrieren(a(), &falsch).await,
         Err(StoreError::EvidenceAbweichung { .. })
     ));
 
-    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
     let erst = db.modell_speichern(lauf, &m, Some("abc")).await.unwrap();
     assert_eq!(erst.artefakte, m.artifacts.len() as u64);
     assert_eq!(erst.ereignisse, m.events.len() as u64);
@@ -194,7 +243,7 @@ async fn modell_schreiben_und_wiederholen() {
     assert_eq!(erst.herkunftsangaben, m.provenance.len() as u64);
 
     // Zweiter Lauf: dieselben IDs, nichts kommt doppelt hinzu.
-    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
     let zweit = db.modell_speichern(lauf, &m, Some("abc")).await.unwrap();
     assert_eq!(zweit.artefakte, 0);
     assert_eq!(zweit.ereignisse, 0);
@@ -248,25 +297,26 @@ async fn lauf_finding_und_evidence_beziehung() {
         started_at: k.zeitpunkt,
         configuration: &konfiguration,
         configuration_hash: None,
+        audit_details: serde_json::json!({}),
     };
-    db.fall_anlegen(&fall(&k)).await.unwrap();
+    db.fall_anlegen(a(), &fall(&k)).await.unwrap();
     let ev = evidence(
         &k,
         k.evidence_id,
         &k.evidence_sha256,
         EvidenceKind::RawDiskImage,
     );
-    db.evidence_registrieren(&ev).await.unwrap();
+    db.evidence_registrieren(a(), &ev).await.unwrap();
 
     // Ohne registrierte Evidence kein Lauf.
     let mut fremd = kontext();
     fremd.case_id = k.case_id;
-    assert!(db.lauf_beginnen(&fremd, &angaben).await.is_err());
+    assert!(db.lauf_beginnen(a(), &fremd, &angaben).await.is_err());
 
-    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
     let g = db.modell_speichern(lauf, &m, None).await.unwrap();
     let ende = k.zeitpunkt + chrono::Duration::seconds(5);
-    db.lauf_abschliessen(g.lauf_id, LaufStand::Completed, ende, Some("d00d"))
+    db.lauf_abschliessen(a(), g.lauf_id, LaufStand::Completed, ende, Some("d00d"))
         .await
         .unwrap();
     let (stand, bericht, support): (String, String, String) = sqlx::query_as(
@@ -284,7 +334,7 @@ async fn lauf_finding_und_evidence_beziehung() {
     // Ein abgeschlossener Lauf lässt sich nicht noch einmal beenden und
     // nimmt nichts mehr an.
     assert!(matches!(
-        db.lauf_abschliessen(g.lauf_id, LaufStand::Failed, ende, None)
+        db.lauf_abschliessen(a(), g.lauf_id, LaufStand::Failed, ende, None)
             .await,
         Err(StoreError::LaufNichtAktiv(_))
     ));
@@ -298,19 +348,19 @@ async fn lauf_finding_und_evidence_beziehung() {
     ));
 
     // Finding mit Belegen aus diesem Fall.
-    db.finding_speichern(&finding(&k, DerivationKind::AnalystAsserted, &m))
+    db.finding_speichern(a(), &finding(&k, DerivationKind::AnalystAsserted, &m))
         .await
         .unwrap();
     // Beleg aus einem anderen Fall: abgelehnt, nichts geschrieben.
     let mut fremdes = finding(&k, DerivationKind::AnalystAsserted, &m);
     fremdes.event_refs = vec![stratum_model::EventId(uuid::Uuid::now_v7())];
     assert!(matches!(
-        db.finding_speichern(&fremdes).await,
+        db.finding_speichern(a(), &fremdes).await,
         Err(StoreError::FindingBeleg(1))
     ));
     // Vorschlag eines Sprachmodells wird nie von selbst ein Finding.
     assert!(db
-        .finding_speichern(&finding(&k, DerivationKind::AiSuggested, &m))
+        .finding_speichern(a(), &finding(&k, DerivationKind::AiSuggested, &m))
         .await
         .is_err());
     let zahlen = db.zaehlen(k.case_id.0).await.unwrap();
@@ -323,7 +373,7 @@ async fn lauf_finding_und_evidence_beziehung() {
         &k.evidence_sha256,
         EvidenceKind::E01Image,
     );
-    db.evidence_registrieren(&e01).await.unwrap();
+    db.evidence_registrieren(a(), &e01).await.unwrap();
     let (art, herkunft): (String, String) = sqlx::query_as(
         "SELECT kind, derivation FROM evidence_relation WHERE source_evidence_id = $1 \
          AND target_evidence_id = $2",
@@ -349,19 +399,19 @@ async fn lauf_finding_und_evidence_beziehung() {
         created_at: k.zeitpunkt,
         created_by: None,
     };
-    assert!(db.evidence_beziehung(&r).await.unwrap());
-    assert!(!db.evidence_beziehung(&r).await.unwrap());
+    assert!(db.evidence_beziehung(a(), &r).await.unwrap());
+    assert!(!db.evidence_beziehung(a(), &r).await.unwrap());
     // Evidence eines anderen Falls lässt sich nicht verknüpfen.
     let k2 = kontext();
-    db.fall_anlegen(&fall(&k2)).await.unwrap();
+    db.fall_anlegen(a(), &fall(&k2)).await.unwrap();
     let anderer = evidence(&k2, k2.evidence_id, &k2.evidence_sha256, EvidenceKind::Pcap);
-    db.evidence_registrieren(&anderer).await.unwrap();
+    db.evidence_registrieren(a(), &anderer).await.unwrap();
     let quer = EvidenceRelation {
         id: EvidenceRelationId::new(),
         target_evidence_id: anderer.id,
         ..r
     };
-    assert!(db.evidence_beziehung(&quer).await.is_err());
+    assert!(db.evidence_beziehung(a(), &quer).await.is_err());
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -370,7 +420,7 @@ async fn uebernommene_evidence_wird_einmal_vervollstaendigt() {
         return;
     };
     let k = kontext();
-    db.fall_anlegen(&fall(&k)).await.unwrap();
+    db.fall_anlegen(a(), &fall(&k)).await.unwrap();
     // Platzhalter wie aus Migration 0002.
     sqlx::query(
         "INSERT INTO evidence (id, case_id, kind, name, source_uri, sha256, imported_at, \
@@ -391,7 +441,7 @@ async fn uebernommene_evidence_wird_einmal_vervollstaendigt() {
         EvidenceKind::RawDiskImage,
     );
     assert!(matches!(
-        db.evidence_registrieren(&falsch).await,
+        db.evidence_registrieren(a(), &falsch).await,
         Err(StoreError::EvidenceAbweichung { .. })
     ));
     let ev = evidence(
@@ -400,7 +450,7 @@ async fn uebernommene_evidence_wird_einmal_vervollstaendigt() {
         &k.evidence_sha256,
         EvidenceKind::RawDiskImage,
     );
-    assert!(!db.evidence_registrieren(&ev).await.unwrap());
+    assert!(!db.evidence_registrieren(a(), &ev).await.unwrap());
     let (art, groesse, support): (String, i64, String) =
         sqlx::query_as("SELECT kind, size, support FROM evidence WHERE id = $1")
             .bind(k.evidence_id.0)
@@ -416,7 +466,7 @@ async fn uebernommene_evidence_wird_einmal_vervollstaendigt() {
         name: "anders".into(),
         ..ev
     };
-    db.evidence_registrieren(&anders).await.unwrap();
+    db.evidence_registrieren(a(), &anders).await.unwrap();
     let name: String = sqlx::query_scalar("SELECT name FROM evidence WHERE id = $1")
         .bind(k.evidence_id.0)
         .fetch_one(db.pool())
@@ -444,17 +494,21 @@ async fn dateikatalog() {
         started_at: k.zeitpunkt,
         configuration: &konfiguration,
         configuration_hash: None,
+        audit_details: serde_json::json!({}),
     };
-    db.fall_anlegen(&fall(&k)).await.unwrap();
-    db.evidence_registrieren(&evidence(
-        &k,
-        k.evidence_id,
-        &k.evidence_sha256,
-        EvidenceKind::RawDiskImage,
-    ))
+    db.fall_anlegen(a(), &fall(&k)).await.unwrap();
+    db.evidence_registrieren(
+        a(),
+        &evidence(
+            &k,
+            k.evidence_id,
+            &k.evidence_sha256,
+            EvidenceKind::RawDiskImage,
+        ),
+    )
     .await
     .unwrap();
-    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
     assert_eq!(db.katalog_speichern(lauf, KATALOG).await.unwrap(), 3);
     assert_eq!(db.katalog_speichern(lauf, KATALOG).await.unwrap(), 0);
 
@@ -541,17 +595,21 @@ async fn katalog_referenz() {
         started_at: k.zeitpunkt,
         configuration: &konfiguration,
         configuration_hash: None,
+        audit_details: serde_json::json!({}),
     };
-    db.fall_anlegen(&fall(&k)).await.unwrap();
-    db.evidence_registrieren(&evidence(
-        &k,
-        k.evidence_id,
-        &k.evidence_sha256,
-        EvidenceKind::RawDiskImage,
-    ))
+    db.fall_anlegen(a(), &fall(&k)).await.unwrap();
+    db.evidence_registrieren(
+        a(),
+        &evidence(
+            &k,
+            k.evidence_id,
+            &k.evidence_sha256,
+            EvidenceKind::RawDiskImage,
+        ),
+    )
     .await
     .unwrap();
-    let lauf = db.lauf_beginnen(&k, &angaben).await.unwrap();
+    let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
     let start = std::time::Instant::now();
     let mut neu = 0;
     let bloecke: Vec<String> = zeilen
@@ -617,4 +675,278 @@ async fn filetime_rundlauf() {
             .unwrap();
         assert_eq!(zurueck, iso);
     }
+}
+
+/// Aktionen der Reihe nach im Audit dieser Datenbank.
+async fn aktionen(db: &Datenbank) -> Vec<(i64, String, String)> {
+    sqlx::query_as("SELECT sequence, action, result FROM audit_event ORDER BY sequence")
+        .fetch_all(db.pool())
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn audit_kette_und_rechte() {
+    use sqlx::Executor as _;
+    let Some((db, url, name)) = frische_datenbank().await else {
+        return;
+    };
+    let k = kontext();
+    let konfiguration = serde_json::json!({});
+    let angaben = LaufAngaben {
+        started_at: k.zeitpunkt,
+        configuration: &konfiguration,
+        configuration_hash: Some("c0ffee"),
+        audit_details: serde_json::json!({"betriebssystem_benutzer": "root"}),
+    };
+    db.fall_anlegen(a(), &fall(&k)).await.unwrap();
+    let ev = evidence(
+        &k,
+        k.evidence_id,
+        &k.evidence_sha256,
+        EvidenceKind::RawDiskImage,
+    );
+    db.evidence_registrieren(a(), &ev).await.unwrap();
+    db.evidence_registrieren(a(), &ev).await.unwrap();
+    let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
+    db.lauf_abschliessen(a(), lauf, LaufStand::Completed, k.zeitpunkt, Some("d00d"))
+        .await
+        .unwrap();
+    // Abweichender Hash: Aktion scheitert, Prüfung bleibt im Audit.
+    let falsch = evidence(
+        &k,
+        k.evidence_id,
+        &"f".repeat(64),
+        EvidenceKind::RawDiskImage,
+    );
+    assert!(db.evidence_registrieren(a(), &falsch).await.is_err());
+    let erwartet = [
+        "CASE_CREATE",
+        "EVIDENCE_IMPORT",
+        "EVIDENCE_VERIFY",
+        "ANALYSIS_START",
+        "ANALYSIS_COMPLETE",
+        "REPORT_CREATE",
+        "EVIDENCE_VERIFY",
+    ];
+    let ist = aktionen(&db).await;
+    assert_eq!(
+        ist.iter().map(|z| z.1.as_str()).collect::<Vec<_>>(),
+        erwartet
+    );
+    assert_eq!(
+        ist.iter().map(|z| z.0).collect::<Vec<_>>(),
+        (1..=7).collect::<Vec<_>>()
+    );
+    assert_eq!(ist[6].2, "failure");
+    let start: (String, String) = sqlx::query_as(
+        "SELECT details->>'betriebssystem_benutzer', details->>'configuration_hash' \
+         FROM audit_event WHERE action = 'ANALYSIS_START'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(start, ("root".to_string(), "c0ffee".to_string()));
+    let von: uuid::Uuid = sqlx::query_scalar("SELECT started_by FROM analysis_run WHERE id = $1")
+        .bind(lauf.0)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(von, ActorId::cli().0);
+
+    let p = db.audit_pruefen(a()).await.unwrap();
+    assert!(p.intakt(), "{:?}", p.fehler);
+    assert_eq!(p.ereignisse, 7);
+
+    // Die Anwendung darf nichts löschen und das Audit nicht ändern.
+    for sql in [
+        "DELETE FROM case_file",
+        "DELETE FROM file",
+        "UPDATE audit_event SET result = 'success'",
+        "DELETE FROM audit_event",
+        "UPDATE audit_head SET sequence = 0",
+    ] {
+        // SQLSTATE 42501: fehlende Berechtigung (unabhängig von der Sprache
+        // der Server-Meldungen).
+        let fehler = db.pool().execute(sql).await.unwrap_err();
+        let code = fehler.as_database_error().and_then(|e| e.code());
+        assert_eq!(code.as_deref(), Some("42501"), "{sql}: {fehler}");
+    }
+    // Auch der Eigentümer kann das Audit nicht ändern, löschen oder leeren.
+    let mut o = eigentuemer(&url).await;
+    for sql in [
+        "UPDATE audit_event SET result = 'success' WHERE sequence = 7",
+        "DELETE FROM audit_event WHERE sequence = 8",
+        "TRUNCATE audit_event",
+    ] {
+        let fehler = o.execute(sql).await.unwrap_err().to_string();
+        assert!(fehler.contains("unveränderlich"), "{sql}: {fehler}");
+    }
+
+    // Mit abgeschaltetem Trigger (nur als Superuser möglich) verändert:
+    // das Nachrechnen findet es.
+    o.execute("ALTER TABLE audit_event DISABLE TRIGGER audit_kein_aendern")
+        .await
+        .unwrap();
+    o.execute(
+        "UPDATE audit_event SET payload = replace(payload, 'failure', 'success'), \
+         result = 'success' WHERE sequence = 7",
+    )
+    .await
+    .unwrap();
+    let p = db.audit_pruefen(a()).await.unwrap();
+    assert!(!p.intakt());
+    assert!(
+        p.fehler.iter().any(|f| f.contains("Nummer 7: Hash")),
+        "{:?}",
+        p.fehler
+    );
+    // Ereignisse am Ende entfernt: der Kopf der Kette verrät es.
+    o.execute("DELETE FROM audit_event WHERE sequence >= 8")
+        .await
+        .unwrap();
+    let p = db.audit_pruefen(a()).await.unwrap();
+    assert!(
+        p.fehler.iter().any(|f| f.contains("Kopf der Kette")),
+        "{:?}",
+        p.fehler
+    );
+    drop(o);
+    frische_datenbank_entfernen(db, &name).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn benutzer_rollen_anmeldung() {
+    let Some((db, _url, name)) = frische_datenbank().await else {
+        return;
+    };
+    use stratum_model::{Role, UserKind};
+    let neu = |n: &'static str, p: Option<&'static str>, r: &'static [Role]| NeuerBenutzer {
+        username: n,
+        display_name: n,
+        kind: if p.is_some() {
+            UserKind::Human
+        } else {
+            UserKind::Service
+        },
+        passwort: p,
+        rollen: r,
+    };
+    // Zu kurzes Passwort.
+    assert!(matches!(
+        db.benutzer_anlegen(a(), &neu("kurz", Some("zu-kurz"), &[Role::Analyst]))
+            .await,
+        Err(StoreError::Passwort(_))
+    ));
+    // Die Kommandozeile darf das erste Administratorkonto anlegen ...
+    let admin = db
+        .benutzer_anlegen(
+            a(),
+            &neu("admin", Some("ein langes Passwort"), &[Role::Administrator]),
+        )
+        .await
+        .unwrap();
+    // ... danach nicht mehr.
+    assert!(matches!(
+        db.benutzer_anlegen(
+            a(),
+            &neu(
+                "admin2",
+                Some("ein langes Passwort"),
+                &[Role::Administrator]
+            )
+        )
+        .await,
+        Err(StoreError::Verweigert(_))
+    ));
+    let analyst = db
+        .benutzer_anlegen(
+            admin.id,
+            &neu(
+                "analyst",
+                Some("noch ein Passwort!"),
+                &[Role::Analyst, Role::Analyst],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(analyst.roles, [Role::Analyst]);
+    // Ein Analyst verwaltet keine Konten.
+    assert!(matches!(
+        db.benutzer_anlegen(analyst.id, &neu("dienst", None, &[Role::AutomationService]))
+            .await,
+        Err(StoreError::Verweigert(_))
+    ));
+
+    let u = db.anmelden("analyst", "noch ein Passwort!").await.unwrap();
+    assert_eq!((u.id, u.roles.clone()), (analyst.id, vec![Role::Analyst]));
+    assert!(db.anmelden("analyst", "falsch").await.is_err());
+    assert!(db.anmelden("niemand", "egal egal egal").await.is_err());
+    assert!(db.anmelden("stratum-cli", "egal egal egal").await.is_err());
+
+    assert!(db
+        .rolle_setzen(admin.id, analyst.id, Role::ForensicExaminer, true)
+        .await
+        .unwrap());
+    assert!(db
+        .rolle_setzen(admin.id, analyst.id, Role::Analyst, false)
+        .await
+        .unwrap());
+    assert_eq!(
+        db.rollen(analyst.id).await.unwrap(),
+        [Role::ForensicExaminer]
+    );
+    assert!(db
+        .rolle_setzen(analyst.id, analyst.id, Role::Administrator, true)
+        .await
+        .is_err());
+
+    let ist: Vec<(String, String)> = aktionen(&db)
+        .await
+        .into_iter()
+        .map(|z| (z.1, z.2))
+        .collect();
+    let soll = [
+        ("USER_CREATE", "success"),
+        ("USER_CREATE", "denied"),
+        ("USER_CREATE", "success"),
+        ("USER_CREATE", "denied"),
+        ("LOGIN", "success"),
+        ("LOGIN", "denied"),
+        ("LOGIN", "denied"),
+        ("LOGIN", "denied"),
+        ("ROLE_GRANT", "success"),
+        ("ROLE_REVOKE", "success"),
+        ("ROLE_GRANT", "denied"),
+    ];
+    assert_eq!(
+        ist,
+        soll.map(|(x, y)| (x.to_string(), y.to_string())).to_vec()
+    );
+    // Gründe der Ablehnungen stehen nur im Audit; unbekannter Name mit dem
+    // Platzhalterkonto als Akteur.
+    let gruende: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT actor_id, details->>'grund' FROM audit_event \
+         WHERE action = 'LOGIN' AND result = 'denied' ORDER BY sequence",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        gruende,
+        [
+            (analyst.id.0, "passwort_falsch".to_string()),
+            (ActorId::unbekannt().0, "unbekannter_name".to_string()),
+            (ActorId::cli().0, "kein_passwort".to_string()),
+        ]
+    );
+    // Passwort nur als Argon2id-Hash.
+    let hash: String =
+        sqlx::query_scalar("SELECT password_hash FROM app_user WHERE username = 'admin'")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(hash.starts_with("$argon2id$"));
+    assert!(db.audit_pruefen(a()).await.unwrap().intakt());
+    frische_datenbank_entfernen(db, &name).await;
 }

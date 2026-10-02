@@ -12,19 +12,30 @@
 //! beginnen (Stand `running`), Dateikatalog und Modell speichern, nach dem
 //! Report den Lauf abschließen. Fall und Evidence bleiben registriert, auch
 //! wenn die Analyse danach scheitert.
+//!
+//! Jede fachliche Aktion nennt den handelnden Akteur und schreibt ihr
+//! Audit-Ereignis in derselben Transaktion ([`audit`]). Nach den Migrationen
+//! arbeitet die Verbindung als Rolle `stratum_app`, die nichts löschen und
+//! das Audit nicht ändern darf.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use serde_json::Value;
+pub mod audit;
+pub mod benutzer;
+
+use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
 use sqlx::types::Json;
-use sqlx::Connection as _;
+use sqlx::{Connection as _, Executor as _};
 use stratum_model::{
-    AnalysisRunId, Case, DerivationKind, Evidence, EvidenceId, EvidenceRelation,
-    EvidenceRelationId, EvidenceRelationKind, Finding,
+    ActorId, AnalysisRunId, AuditAction, AuditResult, Case, DerivationKind, Evidence, EvidenceId,
+    EvidenceRelation, EvidenceRelationId, EvidenceRelationKind, Finding,
 };
 use stratum_normalize::{Kontext, Modell};
+
+pub use audit::{AuditEintrag, AuditPruefung};
+pub use benutzer::NeuerBenutzer;
 
 /// Fehler beim Speichern.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +68,12 @@ pub enum StoreError {
     /// Zeit im Dateikatalog nicht im erwarteten Format.
     #[error("Dateikatalog: Zeit nicht lesbar: {0}")]
     KatalogZeit(String),
+    /// Aktion nicht erlaubt (fehlende Rolle, Anmeldung abgelehnt).
+    #[error("verweigert: {0}")]
+    Verweigert(String),
+    /// Passwort ungültig oder nicht verarbeitbar.
+    #[error("Passwort: {0}")]
+    Passwort(String),
     /// Wert passt nicht in die Datenbank (z. B. Größe über `i64::MAX`).
     #[error("Wert nicht speicherbar: {0}")]
     Wert(&'static str),
@@ -71,6 +88,9 @@ pub struct LaufAngaben<'a> {
     pub configuration: &'a Value,
     /// SHA-256 der Konfiguration in ihrer serialisierten Form.
     pub configuration_hash: Option<&'a str>,
+    /// Weitere Angaben für das Audit (z. B. der Benutzer des
+    /// Betriebssystems, solange die Kommandozeile ohne Anmeldung arbeitet).
+    pub audit_details: Value,
 }
 
 /// Abschlussstand eines Laufs.
@@ -90,6 +110,14 @@ impl LaufStand {
             Self::Completed => "completed",
             Self::Failed => "failed",
             Self::Cancelled => "cancelled",
+        }
+    }
+
+    fn aktion(self) -> AuditAction {
+        match self {
+            Self::Completed => AuditAction::AnalysisComplete,
+            Self::Failed => AuditAction::AnalysisFail,
+            Self::Cancelled => AuditAction::AnalysisCancel,
         }
     }
 }
@@ -139,23 +167,63 @@ impl Datenbank {
         if let Some(p) = passwort {
             optionen = optionen.password(p);
         }
-        // Erst eine einzelne Verbindung: so kommt die eigentliche Ursache
-        // (Passwort falsch, Verbindung verweigert) an, nicht nur ein
-        // Zeitablauf des Pools.
-        sqlx::Connection::close(PgConnection::connect_with(&optionen).await?).await?;
+        // Erst eine einzelne Verbindung als Eigentümer: Migrationen, und die
+        // eigentliche Ursache eines Fehlers (Passwort falsch, Verbindung
+        // verweigert) kommt an, nicht nur ein Zeitablauf des Pools.
+        let mut eigentuemer = PgConnection::connect_with(&optionen).await?;
+        sqlx::migrate!("./migrations").run(&mut eigentuemer).await?;
+        eigentuemer.close().await?;
         let pool = PgPoolOptions::new()
             .max_connections(2)
             .acquire_timeout(std::time::Duration::from_secs(10))
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    conn.execute("SET ROLE stratum_app").await?;
+                    Ok(())
+                })
+            })
             .connect_with(optionen)
             .await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
         Ok(Self { pool })
+    }
+
+    /// Schreibt ein Audit-Ereignis in eigener Transaktion (für Aktionen ohne
+    /// eigene Schreibvorgänge, etwa Lesezugriffe oder Ablehnungen).
+    pub async fn audit(&self, e: &AuditEintrag) -> Result<stratum_model::AuditEventId, StoreError> {
+        let mut conn = self.pool.acquire().await?;
+        audit::schreiben(&mut conn, e).await
+    }
+
+    /// Rechnet die Audit-Kette nach und protokolliert das als
+    /// `AUDIT_VERIFY` mit dem Ergebnis.
+    pub async fn audit_pruefen(&self, akteur: ActorId) -> Result<AuditPruefung, StoreError> {
+        let p = audit::pruefen(&self.pool).await?;
+        self.audit(&AuditEintrag {
+            akteur,
+            case_id: None,
+            aktion: AuditAction::AuditVerify,
+            objekt_typ: "audit",
+            objekt_id: None,
+            ergebnis: if p.intakt() {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+            details: json!({
+                "ereignisse": p.ereignisse,
+                "letzter_hash": p.letzter_hash,
+                "fehler": p.fehler_gesamt,
+            }),
+        })
+        .await?;
+        Ok(p)
     }
 
     /// Legt einen Fall an. Ein vorhandener Fall bleibt unverändert (Titel
     /// und Stand gehören dem Analysten). Liefert `true`, wenn er neu ist.
-    pub async fn fall_anlegen(&self, c: &Case) -> Result<bool, StoreError> {
+    pub async fn fall_anlegen(&self, akteur: ActorId, c: &Case) -> Result<bool, StoreError> {
         let j = serde_json::to_value(c)?;
+        let mut tx = self.pool.begin().await?;
         let neu = sqlx::query(
             "INSERT INTO case_file (id, case_number, title, description, status, classification, \
              case_folder, timezone, created_at, created_by, opened_at, closed_at) \
@@ -165,9 +233,25 @@ impl Datenbank {
              ON CONFLICT (id) DO NOTHING",
         )
         .bind(Json(j))
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
+        if neu == 1 {
+            audit::schreiben(
+                &mut tx,
+                &AuditEintrag {
+                    akteur,
+                    case_id: Some(c.id),
+                    aktion: AuditAction::CaseCreate,
+                    objekt_typ: "case",
+                    objekt_id: Some(c.id.to_string()),
+                    ergebnis: AuditResult::Success,
+                    details: json!({"case_number": c.case_number, "case_folder": c.case_folder}),
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
         Ok(neu == 1)
     }
 
@@ -180,10 +264,28 @@ impl Datenbank {
     /// Ausnahme: Evidence, die Migration 0002 aus früheren Läufen übernommen
     /// hat, ist nur ein Platzhalter (ohne Größe, BLAKE3, Pfad). Sie wird bei
     /// gleichem SHA-256 einmal mit den echten Angaben vervollständigt.
-    pub async fn evidence_registrieren(&self, e: &Evidence) -> Result<bool, StoreError> {
+    ///
+    /// Im Audit: `EVIDENCE_IMPORT` für neue (und vervollständigte),
+    /// `EVIDENCE_VERIFY` für vorhandene Evidence, bei abweichendem Hash mit
+    /// Ergebnis `failure`.
+    pub async fn evidence_registrieren(
+        &self,
+        akteur: ActorId,
+        e: &Evidence,
+    ) -> Result<bool, StoreError> {
         if i64::try_from(e.size).is_err() {
             return Err(StoreError::Wert("Evidence-Größe über i64::MAX"));
         }
+        let eintrag = |aktion, ergebnis, details| AuditEintrag {
+            akteur,
+            case_id: Some(e.case_id),
+            aktion,
+            objekt_typ: "evidence",
+            objekt_id: Some(e.id.to_string()),
+            ergebnis,
+            details,
+        };
+        let mut tx = self.pool.begin().await?;
         let neu: Option<bool> = sqlx::query_scalar(
             "INSERT INTO evidence (id, case_id, kind, name, role, original_name, source_uri, size, \
              sha256, blake3, acquired_at, imported_at, imported_by, acquisition_method, read_only, \
@@ -201,8 +303,26 @@ impl Datenbank {
              RETURNING (xmax = 0)",
         )
         .bind(Json(serde_json::to_value(e)?))
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        if let Some(ganz_neu) = neu {
+            audit::schreiben(
+                &mut tx,
+                &eintrag(
+                    AuditAction::EvidenceImport,
+                    AuditResult::Success,
+                    json!({
+                        "sha256": e.sha256,
+                        "blake3": e.blake3,
+                        "size": e.size,
+                        "kind": e.kind,
+                        "source_uri": e.source_uri,
+                        "vervollstaendigt": !ganz_neu,
+                    }),
+                ),
+            )
+            .await?;
+        }
         if neu == Some(true) {
             let gleiche: Vec<uuid::Uuid> = sqlx::query_scalar(
                 "SELECT id FROM evidence WHERE case_id = $1 AND sha256 = $2 AND id <> $3",
@@ -210,59 +330,74 @@ impl Datenbank {
             .bind(e.case_id.0)
             .bind(&e.sha256)
             .bind(e.id.0)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?;
             for ziel in gleiche {
-                self.evidence_beziehung(&EvidenceRelation {
-                    id: EvidenceRelationId::new(),
-                    case_id: e.case_id,
-                    source_evidence_id: e.id,
-                    target_evidence_id: EvidenceId(ziel),
-                    kind: EvidenceRelationKind::SameSource,
-                    derivation: DerivationKind::Derived,
-                    note: Some("gleicher SHA-256 der Mediendaten".into()),
-                    created_at: e.imported_at,
-                    created_by: Some(e.imported_by),
-                })
+                beziehung_schreiben(
+                    &mut tx,
+                    akteur,
+                    &EvidenceRelation {
+                        id: EvidenceRelationId::new(),
+                        case_id: e.case_id,
+                        source_evidence_id: e.id,
+                        target_evidence_id: EvidenceId(ziel),
+                        kind: EvidenceRelationKind::SameSource,
+                        derivation: DerivationKind::Derived,
+                        note: Some("gleicher SHA-256 der Mediendaten".into()),
+                        created_at: e.imported_at,
+                        created_by: Some(e.imported_by),
+                    },
+                )
                 .await?;
             }
         } else if neu.is_none() {
             let vorhanden: String = sqlx::query_scalar("SELECT sha256 FROM evidence WHERE id = $1")
                 .bind(e.id.0)
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await?;
-            if vorhanden != e.sha256 {
+            let gleich = vorhanden == e.sha256;
+            let pruefung = eintrag(
+                AuditAction::EvidenceVerify,
+                if gleich {
+                    AuditResult::Success
+                } else {
+                    AuditResult::Failure
+                },
+                json!({"registriert": vorhanden, "gelesen": e.sha256}),
+            );
+            if !gleich {
+                // Die Abweichung muss im Audit bleiben, obwohl die Aktion
+                // scheitert: eigene Transaktion.
+                tx.rollback().await?;
+                self.audit(&pruefung).await?;
                 return Err(StoreError::EvidenceAbweichung {
                     id: e.id.0,
                     vorhanden,
                     neu: e.sha256.clone(),
                 });
             }
+            audit::schreiben(&mut tx, &pruefung).await?;
         }
+        tx.commit().await?;
         Ok(neu == Some(true))
     }
 
     /// Hält eine Beziehung zwischen zwei Evidence desselben Falls fest.
     /// Liefert `true`, wenn sie neu ist.
-    pub async fn evidence_beziehung(&self, r: &EvidenceRelation) -> Result<bool, StoreError> {
-        let neu = sqlx::query(
-            "INSERT INTO evidence_relation (id, case_id, source_evidence_id, target_evidence_id, \
-             kind, derivation, note, created_at, created_by) \
-             SELECT id, case_id, source_evidence_id, target_evidence_id, kind, derivation, note, \
-             created_at, created_by \
-             FROM jsonb_populate_record(NULL::evidence_relation, $1) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(Json(serde_json::to_value(r)?))
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
-        Ok(neu == 1)
+    pub async fn evidence_beziehung(
+        &self,
+        akteur: ActorId,
+        r: &EvidenceRelation,
+    ) -> Result<bool, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        let neu = beziehung_schreiben(&mut tx, akteur, r).await?;
+        tx.commit().await?;
+        Ok(neu)
     }
 
     /// Speichert ein Finding samt Belegen in einer Transaktion. Jeder Beleg
     /// muss im selben Fall existieren, sonst wird nichts geschrieben.
-    pub async fn finding_speichern(&self, f: &Finding) -> Result<(), StoreError> {
+    pub async fn finding_speichern(&self, akteur: ActorId, f: &Finding) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO finding (id, case_id, title, description, category, status, priority, \
@@ -311,6 +446,23 @@ impl Datenbank {
                 return Err(StoreError::FindingBeleg(fehlend));
             }
         }
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                akteur,
+                case_id: Some(f.case_id),
+                aktion: AuditAction::FindingCreate,
+                objekt_typ: "finding",
+                objekt_id: Some(f.id.to_string()),
+                ergebnis: AuditResult::Success,
+                details: json!({
+                    "title": f.title,
+                    "derivation": f.derivation,
+                    "belege": f.entity_refs.len() + f.event_refs.len() + f.artifact_refs.len(),
+                }),
+            },
+        )
+        .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -320,15 +472,17 @@ impl Datenbank {
     /// [`Self::lauf_abschliessen`] beenden.
     pub async fn lauf_beginnen(
         &self,
+        akteur: ActorId,
         k: &Kontext,
         angaben: &LaufAngaben<'_>,
     ) -> Result<AnalysisRunId, StoreError> {
         let lauf = AnalysisRunId::new();
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO analysis_run (id, case_id, evidence_id, evidence_sha256, host, \
              stratum_version, started_at, statistics, notes, status, configuration, \
-             configuration_hash) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', '[]', 'running', $8, $9)",
+             configuration_hash, started_by) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, '{}', '[]', 'running', $8, $9, $10)",
         )
         .bind(lauf.0)
         .bind(k.case_id.0)
@@ -339,8 +493,31 @@ impl Datenbank {
         .bind(angaben.started_at)
         .bind(Json(angaben.configuration))
         .bind(angaben.configuration_hash)
-        .execute(&self.pool)
+        .bind(akteur.0)
+        .execute(&mut *tx)
         .await?;
+        let mut details = json!({
+            "evidence_id": k.evidence_id,
+            "stratum_version": k.stratum_version,
+            "configuration_hash": angaben.configuration_hash,
+        });
+        if let (Value::Object(d), Value::Object(mehr)) = (&mut details, &angaben.audit_details) {
+            d.extend(mehr.clone());
+        }
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                akteur,
+                case_id: Some(k.case_id),
+                aktion: AuditAction::AnalysisStart,
+                objekt_typ: "analysis_run",
+                objekt_id: Some(lauf.to_string()),
+                ergebnis: AuditResult::Success,
+                details,
+            },
+        )
+        .await?;
+        tx.commit().await?;
         Ok(lauf)
     }
 
@@ -429,15 +606,16 @@ impl Datenbank {
     /// Ein abgeschlossener Lauf macht seine Evidence zu `analyzed`.
     pub async fn lauf_abschliessen(
         &self,
+        akteur: ActorId,
         lauf: AnalysisRunId,
         stand: LaufStand,
         finished_at: chrono::DateTime<chrono::Utc>,
         report_sha256: Option<&str>,
     ) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
-        let evidence: uuid::Uuid = sqlx::query_scalar(
+        let (evidence, fall): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
             "UPDATE analysis_run SET status = $2, finished_at = $3, report_sha256 = $4 \
-             WHERE id = $1 AND status = 'running' RETURNING evidence_id",
+             WHERE id = $1 AND status = 'running' RETURNING evidence_id, case_id",
         )
         .bind(lauf.0)
         .bind(stand.als_text())
@@ -452,6 +630,39 @@ impl Datenbank {
             )
             .bind(evidence)
             .execute(&mut *tx)
+            .await?;
+        }
+        let case_id = Some(stratum_model::CaseId(fall));
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                akteur,
+                case_id,
+                aktion: stand.aktion(),
+                objekt_typ: "analysis_run",
+                objekt_id: Some(lauf.to_string()),
+                ergebnis: if stand == LaufStand::Completed {
+                    AuditResult::Success
+                } else {
+                    AuditResult::Failure
+                },
+                details: json!({"report_sha256": report_sha256}),
+            },
+        )
+        .await?;
+        if let Some(r) = report_sha256 {
+            audit::schreiben(
+                &mut tx,
+                &AuditEintrag {
+                    akteur,
+                    case_id,
+                    aktion: AuditAction::ReportCreate,
+                    objekt_typ: "report",
+                    objekt_id: Some(r.to_string()),
+                    ergebnis: AuditResult::Success,
+                    details: json!({"analysis_run_id": lauf}),
+                },
+            )
             .await?;
         }
         tx.commit().await?;
@@ -496,6 +707,48 @@ impl Datenbank {
     pub fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+/// Beziehung zwischen zwei Evidence samt Audit, in einer laufenden
+/// Transaktion.
+async fn beziehung_schreiben(
+    conn: &mut PgConnection,
+    akteur: ActorId,
+    r: &EvidenceRelation,
+) -> Result<bool, StoreError> {
+    let neu = sqlx::query(
+        "INSERT INTO evidence_relation (id, case_id, source_evidence_id, target_evidence_id, \
+         kind, derivation, note, created_at, created_by) \
+         SELECT id, case_id, source_evidence_id, target_evidence_id, kind, derivation, note, \
+         created_at, created_by \
+         FROM jsonb_populate_record(NULL::evidence_relation, $1) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(Json(serde_json::to_value(r)?))
+    .execute(&mut *conn)
+    .await?
+    .rows_affected();
+    if neu == 1 {
+        audit::schreiben(
+            conn,
+            &AuditEintrag {
+                akteur,
+                case_id: Some(r.case_id),
+                aktion: AuditAction::RelationCreate,
+                objekt_typ: "evidence_relation",
+                objekt_id: Some(r.id.to_string()),
+                ergebnis: AuditResult::Success,
+                details: json!({
+                    "source": r.source_evidence_id,
+                    "target": r.target_evidence_id,
+                    "kind": r.kind,
+                    "derivation": r.derivation,
+                }),
+            },
+        )
+        .await?;
+    }
+    Ok(neu == 1)
 }
 
 async fn einfuegen<T: serde::Serialize>(
