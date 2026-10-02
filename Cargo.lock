@@ -2453,6 +2453,7 @@ dependencies = [
  "stratum-core",
  "stratum-creds",
  "stratum-ewf",
+ "stratum-jobs",
  "stratum-lauf",
  "stratum-model",
  "stratum-normalize",
@@ -2520,6 +2521,24 @@ dependencies = [
  "sha2 0.11.0",
  "stratum-mmap",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "stratum-jobs"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "stratum-core",
+ "stratum-lauf",
+ "stratum-model",
+ "stratum-store",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]

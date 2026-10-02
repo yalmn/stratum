@@ -56,6 +56,10 @@ pub enum AuditAction {
     EvidenceImport,
     /// Evidence gegen ihren registrierten Hash geprüft.
     EvidenceVerify,
+    /// Job angelegt (in die Warteschlange gestellt).
+    JobCreate,
+    /// Jobs gelesen.
+    JobList,
     /// Analyse gestartet.
     AnalysisStart,
     /// Analyse abgeschlossen.

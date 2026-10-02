@@ -16,6 +16,7 @@ members = [
     "stratum_backend/normalize",
     "stratum_backend/store",
     "stratum_backend/lauf",
+    "stratum_backend/jobs",
     "stratum_backend/cli",
     "stratum_model",
 ]

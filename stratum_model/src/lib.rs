@@ -22,6 +22,7 @@ pub mod event;
 pub mod evidence;
 pub mod finding;
 pub mod ids;
+pub mod job;
 pub mod observation;
 pub mod provenance;
 pub mod relationship;
@@ -39,8 +40,9 @@ pub use evidence::{
 pub use finding::{Finding, FindingCategory, FindingDisposition, FindingPriority, FindingStatus};
 pub use ids::{
     ActorId, AnalysisRunId, ArtifactId, AuditEventId, CaseId, EntityId, EventId, EvidenceId,
-    EvidenceRelationId, FindingId, ObservationId, RelationshipId, RoleId, TagId,
+    EvidenceRelationId, FindingId, JobId, ObservationId, RelationshipId, RoleId, TagId,
 };
+pub use job::{Job, JobKind, JobStatus};
 pub use observation::{Observation, ObservationKind};
 pub use provenance::{
     DerivationKind, ObjectRef, ParserIdentity, ProvenanceLink, ProvenanceRef, ProvenanceRole,

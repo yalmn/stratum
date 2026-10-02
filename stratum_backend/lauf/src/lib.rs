@@ -107,6 +107,8 @@ pub trait Rueckmeldung: Sync {
     fn fortschritt(&self, phase: Phase, erledigt: u64, gesamt: u64);
     /// Eine Phase ist beendet.
     fn phase_ende(&self, _phase: Phase) {}
+    /// Der Lauf ist in der Datenbank begonnen.
+    fn lauf_begonnen(&self, _lauf: stratum_model::AnalysisRunId) {}
     /// Ob abgebrochen werden soll. Gefragt wird zwischen den Schritten und
     /// vor jedem Analyzer.
     fn abbruch_angefordert(&self) -> bool {
@@ -387,6 +389,7 @@ fn ablauf(
             ),
         };
         let s = auftrag.beginnen(ziel, k)?;
+        r.lauf_begonnen(s.lauf());
         r.meldung(&s.meldung_begonnen(k));
         *sitzung = Some(s);
     }

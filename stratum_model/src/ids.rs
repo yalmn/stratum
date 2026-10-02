@@ -116,6 +116,11 @@ id_typ!(
 );
 verwaltung!(TagId);
 id_typ!(
+    /// Job (Auftrag für einen Worker).
+    JobId
+);
+verwaltung!(JobId);
+id_typ!(
     /// Rolle (frei angelegtes Bündel von Berechtigungen).
     RoleId
 );

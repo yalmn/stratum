@@ -24,6 +24,7 @@
 pub mod audit;
 pub mod benutzer;
 pub mod faelle;
+pub mod jobs;
 
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};

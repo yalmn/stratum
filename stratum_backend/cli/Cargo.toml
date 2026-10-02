@@ -20,6 +20,7 @@ stratum-ewf.workspace = true
 stratum-normalize = { path = "../normalize" }
 stratum-store = { path = "../store" }
 stratum-lauf = { path = "../lauf" }
+stratum-jobs = { path = "../jobs" }
 stratum-model = { path = "../../stratum_model" }
 uuid = "1.26.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }

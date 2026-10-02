@@ -50,7 +50,8 @@ stratum_backend/
   normalize/ Abbildung der Funde auf das Datenmodell
   store/     PostgreSQL: Modell, Fälle, Evidence, Konten, Rollen, Audit
   lauf/      ein Analyselauf als Bibliothek (Image bis Report, Datenbank),
-             genutzt von der CLI und künftig von Jobs und Server
+             genutzt von CLI, Worker und künftig dem Server
+  jobs/      Worker: führt Jobs aus der Warteschlange in PostgreSQL aus
   cli/       Binary "stratum": Optionen, Anmeldung, Ausgabe
   fuzz/      cargo-fuzz-Targets
   begriffe/  Begriffslisten für die Keyword-Suche
@@ -699,6 +700,31 @@ name = "mia"                              # Vorgabe für --als
 ```
 
 `stratum konfig` zeigt, welche Datei und welche Werte gelten.
+
+Analysen lassen sich als Jobs in die Warteschlange stellen; ein Worker
+führt sie im Namen dessen aus, der sie eingereiht hat (Rechte werden beim
+Einreihen und beim Start geprüft):
+
+```sh
+stratum job analyse DFIR-2026-0017 merged.dd --katalog --als mia
+stratum worker                       # läuft, bis er beendet wird
+stratum job liste --fall DFIR-2026-0017 --als mia
+stratum job zeigen <JOB-ID> --als mia
+stratum job abbrechen <JOB-ID> --als mia
+```
+
+Die Warteschlange liegt in PostgreSQL (`FOR UPDATE SKIP LOCKED`), es läuft
+höchstens eine Analyse zugleich. Der Worker schreibt höchstens einmal je
+Sekunde Fortschritt (Phase, Stand je Phase, letzte Meldung) in den Job;
+das ist zugleich sein Lebenszeichen. Ein Job ohne Lebenszeichen seit fünf
+Minuten gilt als verwaist und wird beim nächsten Holen als fehlgeschlagen
+beendet. Ein Abbruch greift bei wartenden Jobs sofort, bei laufenden vor
+dem nächsten Schritt bzw. Analyzer; der Analyselauf endet dann als
+`cancelled`. Report und Seitendateien liegen in `<Ausgabe>/<Job-ID>/`
+(`[jobs] ausgabe` in `stratum.toml`, `STRATUM_JOB_AUSGABE` oder
+`--ausgabe`). Jobs nehmen keine Geheimnisse an (DPAPI- oder
+Firefox-Passwörter); solche Analysen laufen weiter direkt über die
+Kommandozeile.
 
 Weitere: `konto ablehnen`, `konto sperren`, `konto dienst` (Dienstkonto
 ohne Passwort), `rolle aendern` (ohne `--recht` bleiben die

@@ -13,6 +13,9 @@
 //!
 //! [konto]
 //! name = "admin"                            # Vorgabe für --als
+//!
+//! [jobs]
+//! ausgabe = "/var/lib/stratum/jobs"          # Reports der Jobs, je Job ein Ordner
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -29,6 +32,14 @@ pub struct Konfig {
     datenbank: Datenbank,
     #[serde(default)]
     konto: Konto,
+    #[serde(default)]
+    jobs: Jobs,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Jobs {
+    ausgabe: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -125,6 +136,19 @@ impl Geladen {
             (Some(k), true) => k.parent().unwrap_or(Path::new(".")).join(p),
             _ => p,
         })
+    }
+
+    /// Ausgabeordner der Jobs: `STRATUM_JOB_AUSGABE`, sonst die Datei
+    /// (relativ zur Konfigurationsdatei), sonst `stratum-jobs`.
+    pub fn jobs_ausgabe(&self) -> PathBuf {
+        if let Some(p) = std::env::var_os("STRATUM_JOB_AUSGABE").filter(|p| !p.is_empty()) {
+            return PathBuf::from(p);
+        }
+        match (&self.inhalt.jobs.ausgabe, &self.pfad) {
+            (Some(p), Some(k)) if p.is_relative() => k.parent().unwrap_or(Path::new(".")).join(p),
+            (Some(p), _) => p.clone(),
+            (None, _) => PathBuf::from("stratum-jobs"),
+        }
     }
 
     /// Vorgabe für `--als`: `STRATUM_KONTO`, sonst die Datei.

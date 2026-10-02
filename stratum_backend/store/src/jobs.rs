@@ -1,0 +1,368 @@
+//! Jobs: Warteschlange in PostgreSQL.
+//!
+//! Anlegen braucht `analysis.start`, Abbrechen ist dem Ersteller oder mit
+//! `analysis.cancel` erlaubt, Lesen braucht `case.view`. Holen, Fortschritt
+//! und Beenden sind Sache des Workers und laufen ohne Rechteprüfung; im
+//! Audit erscheint der Lauf selbst (ANALYSIS_START usw.) im Namen des
+//! Erstellers.
+
+use chrono::{DateTime, Utc};
+use serde_json::{json, Value};
+use sqlx::types::Json;
+use stratum_model::{
+    ActorId, AnalysisRunId, AuditAction, AuditResult, CaseId, Evidence, EvidenceId, Job, JobId,
+    JobKind, JobStatus, Permission,
+};
+
+use crate::audit::{self, AuditEintrag};
+use crate::{Datenbank, StoreError};
+
+/// Ohne Lebenszeichen so lange gilt ein laufender Job als verwaist.
+pub const VERWAIST_NACH_SEKUNDEN: i64 = 300;
+
+/// Höchstens so viele Analysen gleichzeitig über alle Worker.
+pub const GLEICHZEITIG: i64 = 1;
+
+const SPALTEN: &str = "id, case_id, kind, status, parameters, progress, created_by, \
+     created_at, started_at, finished_at, worker, cancel_requested, error, analysis_run_id, result";
+
+type Zeile = (
+    uuid::Uuid,
+    uuid::Uuid,
+    String,
+    String,
+    Json<Value>,
+    Json<Value>,
+    uuid::Uuid,
+    DateTime<Utc>,
+    Option<DateTime<Utc>>,
+    Option<DateTime<Utc>>,
+    Option<String>,
+    bool,
+    Option<String>,
+    Option<uuid::Uuid>,
+    Option<Json<Value>>,
+);
+
+fn aus_text<T: serde::de::DeserializeOwned>(t: String) -> Result<T, StoreError> {
+    Ok(serde_json::from_value(Value::String(t))?)
+}
+
+fn job_aus(z: Zeile) -> Result<Job, StoreError> {
+    Ok(Job {
+        id: JobId(z.0),
+        case_id: CaseId(z.1),
+        kind: aus_text(z.2)?,
+        status: aus_text(z.3)?,
+        parameters: z.4 .0,
+        progress: z.5 .0,
+        created_by: ActorId(z.6),
+        created_at: z.7,
+        started_at: z.8,
+        finished_at: z.9,
+        worker: z.10,
+        cancel_requested: z.11,
+        error: z.12,
+        analysis_run_id: z.13.map(AnalysisRunId),
+        result: z.14.map(|j| j.0),
+    })
+}
+
+fn status_text(s: JobStatus) -> &'static str {
+    match s {
+        JobStatus::Queued => "queued",
+        JobStatus::Running => "running",
+        JobStatus::Completed => "completed",
+        JobStatus::Failed => "failed",
+        JobStatus::Cancelled => "cancelled",
+    }
+}
+
+impl Datenbank {
+    /// Stellt eine Analyse der Evidence `evidence` (im Fall `fall`) in die
+    /// Warteschlange. `optionen` sind die Laufoptionen ohne Geheimnisse.
+    pub async fn analyse_einreihen(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        evidence: EvidenceId,
+        optionen: Value,
+    ) -> Result<JobId, StoreError> {
+        let id = JobId::new();
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion: AuditAction::JobCreate,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({"art": "analysis", "evidence_id": evidence, "optionen": optionen}),
+        };
+        self.verlangen(akteur, Permission::AnalysisStart, e.clone())
+            .await?;
+        let im_fall: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM evidence WHERE id = $1 AND case_id = $2)",
+        )
+        .bind(evidence.0)
+        .bind(fall.0)
+        .fetch_one(&self.pool)
+        .await?;
+        if !im_fall {
+            return Err(StoreError::Eingabe(format!(
+                "Evidence {evidence} gehört nicht zum Fall {fall}"
+            )));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO job (id, case_id, kind, status, parameters, created_by, created_at) \
+             VALUES ($1, $2, 'analysis', 'queued', $3, $4, now())",
+        )
+        .bind(id.0)
+        .bind(fall.0)
+        .bind(Json(json!({"evidence_id": evidence, "optionen": optionen})))
+        .bind(akteur.0)
+        .execute(&mut *tx)
+        .await?;
+        audit::schreiben(&mut tx, &e).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    /// Holt den ältesten wartenden Job und setzt ihn auf `running`, solange
+    /// nicht schon [`GLEICHZEITIG`] Jobs laufen. Vorher werden verwaiste
+    /// Jobs (ohne Lebenszeichen seit [`VERWAIST_NACH_SEKUNDEN`]) als
+    /// fehlgeschlagen beendet, ihr Analyselauf ebenso.
+    pub async fn job_holen(&self, worker: &str) -> Result<Option<Job>, StoreError> {
+        let mut tx = self.pool.begin().await?;
+        // Eine Sperre für die Dauer der Transaktion reiht gleichzeitige
+        // Worker auf, damit die Höchstzahl gilt.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext('stratum.job_holen'))")
+            .execute(&mut *tx)
+            .await?;
+        let verwaist: Vec<(uuid::Uuid, Option<uuid::Uuid>)> = sqlx::query_as(
+            "UPDATE job SET status = 'failed', finished_at = now(), \
+             error = 'Worker ohne Lebenszeichen' \
+             WHERE status = 'running' AND heartbeat_at < now() - make_interval(secs => $1) \
+             RETURNING id, analysis_run_id",
+        )
+        .bind(VERWAIST_NACH_SEKUNDEN as f64)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (_, lauf) in &verwaist {
+            if let Some(l) = lauf {
+                sqlx::query(
+                    "UPDATE analysis_run SET status = 'failed', finished_at = now() \
+                     WHERE id = $1 AND status = 'running'",
+                )
+                .bind(l)
+                .execute(&mut *tx)
+                .await?;
+            }
+        }
+        let laufend: i64 = sqlx::query_scalar("SELECT count(*) FROM job WHERE status = 'running'")
+            .fetch_one(&mut *tx)
+            .await?;
+        if laufend >= GLEICHZEITIG {
+            tx.commit().await?;
+            return Ok(None);
+        }
+        let sql = format!(
+            "UPDATE job SET status = 'running', started_at = now(), heartbeat_at = now(), \
+             worker = $1 \
+             WHERE id = (SELECT id FROM job WHERE status = 'queued' \
+               ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED) \
+             RETURNING {SPALTEN}"
+        );
+        let z: Option<Zeile> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(worker)
+            .fetch_optional(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        z.map(job_aus).transpose()
+    }
+
+    /// Schreibt Fortschritt und Lebenszeichen; liefert, ob ein Abbruch
+    /// angefordert ist.
+    pub async fn job_fortschritt(
+        &self,
+        id: JobId,
+        fortschritt: &Value,
+    ) -> Result<bool, StoreError> {
+        let abbruch: Option<bool> = sqlx::query_scalar(
+            "UPDATE job SET progress = $2, heartbeat_at = now() \
+             WHERE id = $1 AND status = 'running' RETURNING cancel_requested",
+        )
+        .bind(id.0)
+        .bind(Json(fortschritt))
+        .fetch_optional(&self.pool)
+        .await?;
+        // Nicht mehr laufend (etwa als verwaist beendet): abbrechen.
+        Ok(abbruch.unwrap_or(true))
+    }
+
+    /// Vermerkt den Analyselauf eines laufenden Jobs.
+    pub async fn job_lauf(&self, id: JobId, lauf: AnalysisRunId) -> Result<(), StoreError> {
+        sqlx::query("UPDATE job SET analysis_run_id = $2 WHERE id = $1")
+            .bind(id.0)
+            .bind(lauf.0)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Beendet einen laufenden Job.
+    pub async fn job_beenden(
+        &self,
+        id: JobId,
+        status: JobStatus,
+        fehler: Option<&str>,
+        ergebnis: Option<&Value>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE job SET status = $2, finished_at = now(), error = $3, result = $4 \
+             WHERE id = $1 AND status = 'running'",
+        )
+        .bind(id.0)
+        .bind(status_text(status))
+        .bind(fehler)
+        .bind(ergebnis.map(Json))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Bricht einen Job ab: wartend sofort, laufend auf Anforderung (der
+    /// Worker hält vor dem nächsten Analyzer an). Erlaubt dem Ersteller und
+    /// mit `analysis.cancel`.
+    pub async fn job_abbrechen(&self, akteur: ActorId, id: JobId) -> Result<JobStatus, StoreError> {
+        let job = self.job_lesen(id).await?;
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(job.case_id),
+            aktion: AuditAction::AnalysisCancel,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({"stand_vorher": job.status}),
+        };
+        if job.created_by != akteur {
+            self.verlangen(akteur, Permission::AnalysisCancel, e.clone())
+                .await?;
+        }
+        let mut tx = self.pool.begin().await?;
+        let neu: Option<String> = sqlx::query_scalar(
+            "UPDATE job SET \
+               status = CASE WHEN status = 'queued' THEN 'cancelled' ELSE status END, \
+               finished_at = CASE WHEN status = 'queued' THEN now() ELSE finished_at END, \
+               cancel_requested = true \
+             WHERE id = $1 AND status IN ('queued', 'running') RETURNING status",
+        )
+        .bind(id.0)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(neu) = neu else {
+            return Err(StoreError::Eingabe(format!(
+                "Job {id} ist schon beendet ({})",
+                status_text(job.status)
+            )));
+        };
+        audit::schreiben(&mut tx, &e).await?;
+        tx.commit().await?;
+        aus_text(neu)
+    }
+
+    /// Ein Job, mit `case.view` im Fall des Jobs; das Lesen steht im Audit.
+    pub async fn job_ansehen(&self, akteur: ActorId, id: JobId) -> Result<Job, StoreError> {
+        let job = self.job_lesen(id).await?;
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(job.case_id),
+            aktion: AuditAction::JobList,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({}),
+        };
+        self.verlangen(akteur, Permission::CaseView, e.clone())
+            .await?;
+        self.audit(&e).await?;
+        Ok(job)
+    }
+
+    /// Ein Job (ohne Audit; für den Worker und interne Prüfungen).
+    pub async fn job_lesen(&self, id: JobId) -> Result<Job, StoreError> {
+        let sql = format!("SELECT {SPALTEN} FROM job WHERE id = $1");
+        let z: Option<Zeile> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(id.0)
+            .fetch_optional(&self.pool)
+            .await?;
+        job_aus(z.ok_or_else(|| StoreError::Eingabe(format!("kein Job {id}")))?)
+    }
+
+    /// Jobs, neueste zuerst, wahlweise nur eines Falls. Braucht
+    /// `case.view`; das Lesen steht im Audit.
+    pub async fn jobs(
+        &self,
+        akteur: ActorId,
+        fall: Option<CaseId>,
+        anzahl: i64,
+    ) -> Result<Vec<Job>, StoreError> {
+        let e = AuditEintrag {
+            akteur,
+            case_id: fall,
+            aktion: AuditAction::JobList,
+            objekt_typ: "job",
+            objekt_id: None,
+            ergebnis: AuditResult::Success,
+            details: json!({}),
+        };
+        self.verlangen(akteur, Permission::CaseView, e.clone())
+            .await?;
+        let sql = format!(
+            "SELECT {SPALTEN} FROM job WHERE $1::uuid IS NULL OR case_id = $1 \
+             ORDER BY created_at DESC LIMIT $2"
+        );
+        let zeilen: Vec<Zeile> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(fall.map(|c| c.0))
+            .bind(anzahl.clamp(0, 10_000))
+            .fetch_all(&self.pool)
+            .await?;
+        self.audit(&AuditEintrag {
+            details: json!({"anzahl": zeilen.len()}),
+            ..e
+        })
+        .await?;
+        zeilen.into_iter().map(job_aus).collect()
+    }
+
+    /// Eine Evidence (ohne Audit; der Worker liest Pfad und Art).
+    pub async fn evidence_lesen(&self, id: EvidenceId) -> Result<Evidence, StoreError> {
+        let v: Option<Json<Value>> =
+            sqlx::query_scalar("SELECT to_jsonb(v) FROM evidence v WHERE id = $1")
+                .bind(id.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some(Json(mut v)) = v else {
+            return Err(StoreError::Eingabe(format!("keine Evidence {id}")));
+        };
+        if let Value::Object(o) = &mut v {
+            for (k, leer) in [
+                ("size", json!(0)),
+                ("blake3", json!("")),
+                ("imported_by", json!(ActorId::unbekannt())),
+            ] {
+                if o.get(k).is_none_or(Value::is_null) {
+                    o.insert(k.into(), leer);
+                }
+            }
+        }
+        Ok(serde_json::from_value(v)?)
+    }
+}
+
+/// Art eines Jobs als Text (für Anzeigen).
+pub fn art_text(k: JobKind) -> &'static str {
+    match k {
+        JobKind::Analysis => "analysis",
+    }
+}

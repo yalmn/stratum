@@ -36,6 +36,23 @@ pub enum Befehl {
     /// Evidence in einem Fall registrieren.
     #[command(subcommand)]
     Evidence(EvidenceBefehl),
+    /// Analysen als Jobs in die Warteschlange stellen und verfolgen.
+    #[command(subcommand)]
+    Job(JobBefehl),
+    /// Worker: führt wartende Jobs aus (läuft, bis er beendet wird).
+    Worker {
+        /// Nur einen Job ausführen (oder keinen, wenn keiner wartet) und
+        /// beenden.
+        #[arg(long)]
+        einmal: bool,
+        /// Ordner für Reports der Jobs (sonst aus stratum.toml bzw.
+        /// STRATUM_JOB_AUSGABE).
+        #[arg(long, value_name = "ORDNER")]
+        ausgabe: Option<PathBuf>,
+        /// Sekunden Pause, wenn kein Job wartet.
+        #[arg(long, default_value_t = 5)]
+        pause: u64,
+    },
     /// Katalog aller Berechtigungen ausgeben.
     Rechte,
     /// Zeigen, welche Konfiguration gilt (Datei, Datenbank, Konto; ohne
@@ -117,6 +134,70 @@ pub enum EvidenceBefehl {
         /// Art statt der Erkennung, z. B. memory_dump, log_bundle, pcap.
         #[arg(long)]
         art: Option<String>,
+        #[command(flatten)]
+        als: Als,
+    },
+}
+
+/// Unterbefehle zu Jobs.
+#[derive(Debug, Subcommand)]
+pub enum JobBefehl {
+    /// Analyse einer registrierten Evidence einreihen (braucht
+    /// analysis.start); ein Worker führt sie im Namen dieses Kontos aus.
+    Analyse {
+        /// Fallnummer.
+        fall: String,
+        /// Evidence (Name oder ID, siehe stratum fall zeigen).
+        evidence: String,
+        /// Dateikatalog zusätzlich als Datei.
+        #[arg(long)]
+        katalog: bool,
+        /// SHA-256 und Signaturtyp jeder Datei im Katalog.
+        #[arg(long)]
+        datei_hashes: bool,
+        /// MFT-Zeitachse als Datei.
+        #[arg(long)]
+        mft_timeline: bool,
+        /// USN-Journal als Datei.
+        #[arg(long)]
+        usn_journal: bool,
+        /// Das ganze Image roh nach Begriffen durchsuchen.
+        #[arg(long)]
+        raw_sweep: bool,
+        /// Die mitgelieferte Begriffsliste nicht verwenden.
+        #[arg(long)]
+        ohne_begriffe: bool,
+        /// Die bei der Evidence vermerkte bdp.info verwenden.
+        #[arg(long)]
+        bdp: bool,
+        #[command(flatten)]
+        als: Als,
+    },
+    /// Jobs, neueste zuerst (braucht case.view).
+    Liste {
+        /// Nur Jobs dieses Falls (Fallnummer).
+        #[arg(long)]
+        fall: Option<String>,
+        /// Höchstens so viele.
+        #[arg(long, default_value_t = 20)]
+        anzahl: i64,
+        #[command(flatten)]
+        als: Als,
+    },
+    /// Stand, Fortschritt und Ergebnis eines Jobs.
+    Zeigen {
+        /// Job-ID.
+        id: uuid::Uuid,
+        /// Als JSON ausgeben.
+        #[arg(long)]
+        json: bool,
+        #[command(flatten)]
+        als: Als,
+    },
+    /// Job abbrechen: wartend sofort, laufend vor dem nächsten Analyzer.
+    Abbrechen {
+        /// Job-ID.
+        id: uuid::Uuid,
         #[command(flatten)]
         als: Als,
     },
@@ -412,6 +493,7 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
                 k.db_passwort_datei().map(|p| p.display().to_string()),
             );
             zeile("Konto (--als)", k.konto());
+            zeile("Job-Ausgabe", Some(k.jobs_ausgabe().display().to_string()));
             return Ok(());
         }
         _ => {}
@@ -450,6 +532,38 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
         },
         Befehl::Konto(k) => konto(&rt, &db, k)?,
         Befehl::Fall(f) => fall(&rt, &db, f)?,
+        Befehl::Job(j) => job(&rt, &db, j)?,
+        Befehl::Worker {
+            einmal,
+            ausgabe,
+            pause,
+        } => {
+            let ausgabe = match ausgabe {
+                Some(a) => a,
+                None => crate::konfig::konfig()?.jobs_ausgabe(),
+            };
+            let w = stratum_jobs::Worker::neu(db.clone(), rt.handle().clone(), ausgabe.clone());
+            eprintln!(
+                "[*] Worker {} wartet auf Jobs (Ausgabe {})",
+                w.name(),
+                ausgabe.display()
+            );
+            loop {
+                match w.einmal()? {
+                    Some((id, stand)) => {
+                        eprintln!("[+] Job {id}: {}", text_von(&stand)?);
+                        if einmal {
+                            break;
+                        }
+                    }
+                    None if einmal => {
+                        eprintln!("[*] kein Job wartet");
+                        break;
+                    }
+                    None => std::thread::sleep(std::time::Duration::from_secs(pause.max(1))),
+                }
+            }
+        }
         Befehl::Evidence(e) => evidence(&rt, &db, e)?,
         Befehl::Rolle(r) => rolle(&rt, &db, r)?,
         Befehl::Audit(a) => match a {
@@ -864,4 +978,109 @@ fn evidence(rt: &tokio::runtime::Runtime, db: &Datenbank, e: EvidenceBefehl) -> 
     eprintln!("    SHA-256 {}", ev.sha256);
     eprintln!("    BLAKE3  {}", ev.blake3);
     Ok(())
+}
+
+fn job(rt: &tokio::runtime::Runtime, db: &Datenbank, j: JobBefehl) -> Result<()> {
+    match j {
+        JobBefehl::Analyse {
+            fall,
+            evidence,
+            katalog,
+            datei_hashes,
+            mft_timeline,
+            usn_journal,
+            raw_sweep,
+            ohne_begriffe,
+            bdp,
+            als,
+        } => {
+            let a = akteur(rt, db, &als)?;
+            let fall_id = rt
+                .block_on(db.fall_id(&fall))?
+                .with_context(|| format!("kein Fall {fall}"))?;
+            let ev = rt
+                .block_on(db.evidence_id(fall_id, &evidence))?
+                .with_context(|| format!("keine Evidence {evidence} im Fall {fall}"))?;
+            let optionen = stratum_jobs::AnalyseOptionen {
+                katalog,
+                datei_hashes,
+                mft_timeline,
+                usn_journal,
+                raw_sweep,
+                ohne_begriffe,
+                bdp,
+            };
+            let id =
+                rt.block_on(db.analyse_einreihen(a, fall_id, ev, serde_json::to_value(optionen)?))?;
+            eprintln!("[+] Job {id} eingereiht (Analyse von {evidence} im Fall {fall})");
+            println!("{id}");
+        }
+        JobBefehl::Liste { fall, anzahl, als } => {
+            let a = akteur(rt, db, &als)?;
+            let fall_id = match fall {
+                Some(n) => Some(
+                    rt.block_on(db.fall_id(&n))?
+                        .with_context(|| format!("kein Fall {n}"))?,
+                ),
+                None => None,
+            };
+            for j in rt.block_on(db.jobs(a, fall_id, anzahl))? {
+                println!(
+                    "{}  {:<9}  {}  {}",
+                    j.id,
+                    text_von(&j.status)?,
+                    j.created_at.format("%Y-%m-%d %H:%M:%S UTC"),
+                    fortschritt_kurz(&j)
+                );
+            }
+        }
+        JobBefehl::Zeigen { id, json, als } => {
+            let a = akteur(rt, db, &als)?;
+            let j = rt.block_on(db.job_ansehen(a, stratum_model::JobId(id)))?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&j)?);
+                return Ok(());
+            }
+            println!("Job         {}", j.id);
+            println!("Stand       {}", text_von(&j.status)?);
+            println!("Parameter   {}", j.parameters);
+            println!("Fortschritt {}", fortschritt_kurz(&j));
+            if let Some(w) = &j.worker {
+                println!("Worker      {w}");
+            }
+            if let Some(l) = j.analysis_run_id {
+                println!("Lauf        {l}");
+            }
+            if let Some(f) = &j.error {
+                println!("Fehler      {f}");
+            }
+            if let Some(e) = &j.result {
+                println!("Ergebnis    {e}");
+            }
+        }
+        JobBefehl::Abbrechen { id, als } => {
+            let a = akteur(rt, db, &als)?;
+            let stand = rt.block_on(db.job_abbrechen(a, stratum_model::JobId(id)))?;
+            match stand {
+                stratum_model::JobStatus::Cancelled => eprintln!("[+] Job {id} abgebrochen"),
+                _ => eprintln!("[+] Abbruch angefordert; der Job hält vor dem nächsten Schritt an"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Phase, Anteil und letzte Meldung in einer Zeile.
+fn fortschritt_kurz(j: &stratum_model::Job) -> String {
+    let p = &j.progress;
+    let phase = p["phase"].as_str().unwrap_or("");
+    let anteil = match (
+        p["phasen"][phase]["erledigt"].as_u64(),
+        p["phasen"][phase]["gesamt"].as_u64(),
+    ) {
+        (Some(e), Some(g)) if g > 0 => format!(" {}%", e.saturating_mul(100) / g),
+        _ => String::new(),
+    };
+    let meldung = p["meldung"].as_str().unwrap_or("");
+    format!("{phase}{anteil}  {meldung}").trim().to_string()
 }

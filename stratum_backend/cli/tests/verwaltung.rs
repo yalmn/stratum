@@ -328,7 +328,8 @@ fn fall_evidence_analyse_mit_konfig() {
     let (basis, _) = url.rsplit_once('/').unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let d = tmp.path();
-    let mut konfig = format!("[datenbank]\nurl = \"{basis}/{name}\"\n");
+    let mut konfig =
+        format!("[jobs]\nausgabe = \"jobs\"\n\n[datenbank]\nurl = \"{basis}/{name}\"\n");
     if let Some(p) = db_passwort() {
         std::fs::write(d.join("dbpw"), p).unwrap();
         // Relativ zur Konfigurationsdatei.
@@ -511,4 +512,31 @@ fn fall_evidence_analyse_mit_konfig() {
             "LOGIN success chef",
         ]
     );
+
+    // Job: eingereiht, vom Worker übernommen; eine Datei ohne Partitionen
+    // ist kein analysierbares Image, der Job scheitert mit Begründung.
+    let o = lauf(mitals(
+        &["job", "analyse", "F-1", "abbild.bin"],
+        &als("mia", &mia),
+    ));
+    assert!(o.status.success(), "{}", text(&o));
+    let job = String::from_utf8(o.stdout).unwrap().trim().to_string();
+    let o = mit_konfig(&["worker", "--einmal"], &k);
+    let t = text(&o);
+    assert!(
+        o.status.success() && t.contains(&format!("Job {job}: failed")),
+        "{t}"
+    );
+    let o = lauf(mitals(
+        &["job", "zeigen", &job, "--json"],
+        &als("mia", &mia),
+    ));
+    let j: serde_json::Value = serde_json::from_slice(&o.stdout).unwrap();
+    assert_eq!(j["status"], "failed");
+    assert!(j["error"]
+        .as_str()
+        .unwrap()
+        .contains("kein analysierbares Image"));
+    let o = mit_konfig(&["worker", "--einmal"], &k);
+    assert!(text(&o).contains("kein Job wartet"));
 }
