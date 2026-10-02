@@ -217,6 +217,10 @@ fn ablauf_mit_datenbank() {
         &als_chef,
     ));
     let liste = ok(&mit(&["konto", "liste"], &als_chef));
+    // Gesperrte Dienstkonten (hier „unbekannt“) nur mit --alle.
+    assert!(!liste.lines().any(|l| l.starts_with("unbekannt ")));
+    let alle = ok(&mit(&["konto", "liste", "--alle"], &als_chef));
+    assert!(alle.lines().any(|l| l.starts_with("unbekannt ")));
     let zeile = liste.lines().find(|l| l.starts_with("mia ")).unwrap();
     assert!(zeile.contains("active") && zeile.contains("Fallführung") && zeile.contains("Analyst"));
     // Mia darf jetzt das Audit lesen (audit.view aus der eigenen Rolle).
@@ -254,6 +258,8 @@ fn ablauf_mit_datenbank() {
             "ROLE_CREATE success chef",
             "LOGIN success chef",
             "ROLE_GRANT success chef",
+            "LOGIN success chef",
+            "USER_LIST success chef",
             "LOGIN success chef",
             "USER_LIST success chef",
             "LOGIN success mia",

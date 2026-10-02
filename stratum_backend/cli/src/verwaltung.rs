@@ -93,8 +93,12 @@ pub enum KontoBefehl {
         #[arg(long, value_name = "DATEI")]
         passwort_datei: Option<PathBuf>,
     },
-    /// Alle Konten mit Stand und Rollen (nur Superadmins).
+    /// Konten mit Stand und Rollen (nur Superadmins). Gesperrte
+    /// Dienstkonten (etwa aus früheren Daten übernommene) nur mit `--alle`.
     Liste {
+        /// Auch gesperrte Dienstkonten zeigen.
+        #[arg(long)]
+        alle: bool,
         #[command(flatten)]
         als: Als,
     },
@@ -392,17 +396,29 @@ fn konto(rt: &tokio::runtime::Runtime, db: &Datenbank, k: KontoBefehl) -> Result
                 "[+] Konto {name} registriert; es wartet auf Freigabe durch einen Superadmin"
             );
         }
-        KontoBefehl::Liste { als } => {
+        KontoBefehl::Liste { alle, als } => {
             let a = akteur(rt, db, &als)?;
             let rollen = rt.block_on(db.rollen())?;
-            for u in rt.block_on(db.konten(a))? {
+            let konten = rt.block_on(db.konten(a))?;
+            let (zeigen, verborgen): (Vec<_>, Vec<_>) = konten.into_iter().partition(|u| {
+                alle || !(u.kind == stratum_model::UserKind::Service
+                    && u.status == stratum_model::UserStatus::Disabled)
+            });
+            let breite = zeigen.iter().map(|u| u.username.len()).max().unwrap_or(0);
+            for u in zeigen {
                 println!(
-                    "{:<24} {:<9} {:<8} {:<11} {}",
+                    "{:<breite$}  {:<9} {:<8} {:<11} {}",
                     u.username,
                     serde_json::to_value(u.status)?.as_str().unwrap_or(""),
                     serde_json::to_value(u.kind)?.as_str().unwrap_or(""),
                     if u.superadmin { "superadmin" } else { "" },
                     rollennamen(&rollen, &u.roles)
+                );
+            }
+            if !verborgen.is_empty() {
+                eprintln!(
+                    "({} gesperrte Dienstkonten nicht gezeigt, --alle zeigt sie)",
+                    verborgen.len()
                 );
             }
         }
