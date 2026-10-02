@@ -13,3 +13,6 @@
 
 # Passwort der lokalen Datenbank (compose.yaml)
 .stratum_db_passwort
+
+# Örtliche Konfiguration (Datenbank, Konto)
+/stratum.toml
