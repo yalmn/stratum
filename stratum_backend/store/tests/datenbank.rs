@@ -352,3 +352,64 @@ async fn lauf_finding_und_evidence_beziehung() {
     };
     assert!(db.evidence_beziehung(&quer).await.is_err());
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn uebernommene_evidence_wird_einmal_vervollstaendigt() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    let k = kontext();
+    db.fall_anlegen(&fall(&k)).await.unwrap();
+    // Platzhalter wie aus Migration 0002.
+    sqlx::query(
+        "INSERT INTO evidence (id, case_id, kind, name, source_uri, sha256, imported_at, \
+         support, metadata) VALUES ($1, $2, 'other', 'übernommen', 'unbekannt', $3, now(), \
+         'analyzed', '{\"uebernommen\": \"analysis_run\"}')",
+    )
+    .bind(k.evidence_id.0)
+    .bind(k.case_id.0)
+    .bind(&k.evidence_sha256)
+    .execute(db.pool())
+    .await
+    .unwrap();
+    // Anderer Inhalt unter derselben ID: abgelehnt, Platzhalter bleibt.
+    let falsch = evidence(
+        &k,
+        k.evidence_id,
+        &"f".repeat(64),
+        EvidenceKind::RawDiskImage,
+    );
+    assert!(matches!(
+        db.evidence_registrieren(&falsch).await,
+        Err(StoreError::EvidenceAbweichung { .. })
+    ));
+    let ev = evidence(
+        &k,
+        k.evidence_id,
+        &k.evidence_sha256,
+        EvidenceKind::RawDiskImage,
+    );
+    assert!(!db.evidence_registrieren(&ev).await.unwrap());
+    let (art, groesse, support): (String, i64, String) =
+        sqlx::query_as("SELECT kind, size, support FROM evidence WHERE id = $1")
+            .bind(k.evidence_id.0)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        (art.as_str(), groesse, support.as_str()),
+        ("raw_disk_image", 85_899_345_920, "analyzed")
+    );
+    // Danach unveränderlich wie jede Evidence.
+    let anders = Evidence {
+        name: "anders".into(),
+        ..ev
+    };
+    db.evidence_registrieren(&anders).await.unwrap();
+    let name: String = sqlx::query_scalar("SELECT name FROM evidence WHERE id = $1")
+        .bind(k.evidence_id.0)
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(name, "merged.dd");
+}

@@ -170,11 +170,15 @@ impl Datenbank {
     /// nie verändert). Eine neue Evidence mit denselben Mediendaten wie eine
     /// vorhandene im Fall (etwa E01 und Rohimage) wird mit ihr als
     /// `SAME_SOURCE` verknüpft. Liefert `true`, wenn sie neu ist.
+    ///
+    /// Ausnahme: Evidence, die Migration 0002 aus früheren Läufen übernommen
+    /// hat, ist nur ein Platzhalter (ohne Größe, BLAKE3, Pfad). Sie wird bei
+    /// gleichem SHA-256 einmal mit den echten Angaben vervollständigt.
     pub async fn evidence_registrieren(&self, e: &Evidence) -> Result<bool, StoreError> {
         if i64::try_from(e.size).is_err() {
             return Err(StoreError::Wert("Evidence-Größe über i64::MAX"));
         }
-        let neu = sqlx::query(
+        let neu: Option<bool> = sqlx::query_scalar(
             "INSERT INTO evidence (id, case_id, kind, name, role, original_name, source_uri, size, \
              sha256, blake3, acquired_at, imported_at, imported_by, acquisition_method, read_only, \
              support, parent_evidence_id, metadata) \
@@ -182,13 +186,18 @@ impl Datenbank {
              blake3, acquired_at, imported_at, imported_by, acquisition_method, read_only, \
              support, parent_evidence_id, COALESCE(metadata, '{}') \
              FROM jsonb_populate_record(NULL::evidence, $1) \
-             ON CONFLICT (id) DO NOTHING",
+             ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, name = EXCLUDED.name, \
+             role = EXCLUDED.role, original_name = EXCLUDED.original_name, \
+             source_uri = EXCLUDED.source_uri, size = EXCLUDED.size, blake3 = EXCLUDED.blake3, \
+             acquired_at = EXCLUDED.acquired_at, imported_by = EXCLUDED.imported_by, \
+             acquisition_method = EXCLUDED.acquisition_method, metadata = EXCLUDED.metadata \
+             WHERE evidence.metadata ? 'uebernommen' AND evidence.sha256 = EXCLUDED.sha256 \
+             RETURNING (xmax = 0)",
         )
         .bind(Json(serde_json::to_value(e)?))
-        .execute(&self.pool)
-        .await?
-        .rows_affected();
-        if neu == 1 {
+        .fetch_optional(&self.pool)
+        .await?;
+        if neu == Some(true) {
             let gleiche: Vec<uuid::Uuid> = sqlx::query_scalar(
                 "SELECT id FROM evidence WHERE case_id = $1 AND sha256 = $2 AND id <> $3",
             )
@@ -211,7 +220,7 @@ impl Datenbank {
                 })
                 .await?;
             }
-        } else {
+        } else if neu.is_none() {
             let vorhanden: String = sqlx::query_scalar("SELECT sha256 FROM evidence WHERE id = $1")
                 .bind(e.id.0)
                 .fetch_one(&self.pool)
@@ -224,7 +233,7 @@ impl Datenbank {
                 });
             }
         }
-        Ok(neu == 1)
+        Ok(neu == Some(true))
     }
 
     /// Hält eine Beziehung zwischen zwei Evidence desselben Falls fest.
