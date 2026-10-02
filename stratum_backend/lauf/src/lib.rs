@@ -30,9 +30,7 @@ use stratum_analysis::{
     ShellBagsAnalyzer, SrumAnalyzer, Steuerung, TorAnalyzer, UsbAnalyzer, UserActivityAnalyzer,
     VssAnalyzer, WebCacheAnalyzer, ZoneIdentifierAnalyzer,
 };
-use stratum_core::{
-    hash_image_with_progress, scan_partitions, FsHint, ImageReader, PartitionScheme,
-};
+use stratum_core::{hash_image_abbrechbar, scan_partitions, FsHint, ImageReader, PartitionScheme};
 use stratum_search::TermTable;
 use stratum_store::LaufStand;
 
@@ -251,8 +249,10 @@ fn ablauf(
         let cb: stratum_core::Progress = &cb;
         // Bei E01 scheitert der Hash an einem unlesbaren Chunk; ohne
         // vollständigen Hash keine Analyse (sonst ohne Hash).
-        let h = hash_image_with_progress(&img, Some(cb))
-            .kontext(|| "Integritäts-Hash nicht berechenbar (Image beschädigt?)".into())?;
+        let abbruch = || r.abbruch_angefordert();
+        let h = hash_image_abbrechbar(&img, Some(cb), &abbruch)
+            .kontext(|| "Integritäts-Hash nicht berechenbar (Image beschädigt?)".into())?
+            .ok_or(LaufFehler::Abgebrochen)?;
         r.phase_ende(Phase::Hashing);
         r.meldung(&format!(
             "[+] Integritäts-Hashes berechnet ({} Bytes)",

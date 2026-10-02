@@ -1,0 +1,428 @@
+//! HTTP-API von stratum unter `/api/v1`.
+//!
+//! Jede Anfrage außer der Anmeldung braucht eine Sitzung: das Token aus
+//! `POST /api/v1/sitzung` im Header `Authorization: Bearer …` oder im
+//! Cookie `stratum_sitzung`. Rechte prüft der Store, der auch jede fachliche
+//! Aktion und jeden Lesezugriff ins Audit schreibt; der Server reicht nur
+//! weiter. Antworten sind JSON, Fehler `{"fehler": "…"}`.
+
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+use std::convert::Infallible;
+use std::time::Duration;
+
+use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::http::request::Parts;
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
+use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use futures_util::stream::{self, Stream};
+use serde::Deserialize;
+use serde_json::{json, Value};
+use stratum_model::{
+    Case, CaseClassification, CaseId, CaseStatus, JobId, JobStatus, Permission, User,
+};
+use stratum_store::{Datenbank, StoreError};
+
+/// Name des Sitzungs-Cookies.
+pub const COOKIE: &str = "stratum_sitzung";
+
+/// Gemeinsamer Zustand aller Anfragen.
+#[derive(Clone)]
+pub struct Zustand {
+    db: Datenbank,
+}
+
+/// Fehler einer Anfrage.
+#[derive(Debug, thiserror::Error)]
+pub enum ApiFehler {
+    /// Nicht angemeldet oder Sitzung abgelaufen.
+    #[error("nicht angemeldet")]
+    NichtAngemeldet,
+    /// Aus dem Store.
+    #[error(transparent)]
+    Store(#[from] StoreError),
+    /// Anfrage ungültig.
+    #[error("{0}")]
+    Anfrage(String),
+}
+
+impl IntoResponse for ApiFehler {
+    fn into_response(self) -> Response {
+        let status = match &self {
+            ApiFehler::NichtAngemeldet => StatusCode::UNAUTHORIZED,
+            ApiFehler::Anfrage(_) => StatusCode::BAD_REQUEST,
+            ApiFehler::Store(s) => match s {
+                StoreError::Verweigert(_) => StatusCode::FORBIDDEN,
+                StoreError::NichtGefunden(_) => StatusCode::NOT_FOUND,
+                StoreError::Eingabe(_) | StoreError::Passwort(_) => StatusCode::BAD_REQUEST,
+                _ => StatusCode::INTERNAL_SERVER_ERROR,
+            },
+        };
+        // Innere Fehler nicht im Detail nach außen geben.
+        let text = if status == StatusCode::INTERNAL_SERVER_ERROR {
+            "interner Fehler".to_string()
+        } else {
+            self.to_string()
+        };
+        (status, Json(json!({ "fehler": text }))).into_response()
+    }
+}
+
+type Antwort<T> = Result<T, ApiFehler>;
+
+/// Token aus `Authorization: Bearer …` oder dem Cookie.
+fn token(h: &HeaderMap) -> Option<String> {
+    if let Some(t) = h
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+    {
+        return Some(t.trim().to_string());
+    }
+    h.get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| {
+            let (n, w) = c.trim().split_once('=')?;
+            (n == COOKIE).then(|| w.to_string())
+        })
+}
+
+/// Angemeldetes Konto einer Anfrage.
+pub struct Angemeldet(pub User);
+
+impl FromRequestParts<Zustand> for Angemeldet {
+    type Rejection = ApiFehler;
+
+    async fn from_request_parts(parts: &mut Parts, z: &Zustand) -> Result<Self, Self::Rejection> {
+        let t = token(&parts.headers).ok_or(ApiFehler::NichtAngemeldet)?;
+        z.db.sitzung_pruefen(&t)
+            .await?
+            .map(Angemeldet)
+            .ok_or(ApiFehler::NichtAngemeldet)
+    }
+}
+
+/// Router mit allen Endpunkten.
+pub fn router(db: Datenbank) -> Router {
+    Router::new()
+        .route("/api/v1/sitzung", post(anmelden).delete(abmelden))
+        .route("/api/v1/ich", get(ich))
+        .route("/api/v1/rechte", get(rechte))
+        .route("/api/v1/faelle", get(faelle).post(fall_neu))
+        .route("/api/v1/faelle/{nummer}", get(fall_zeigen))
+        .route("/api/v1/faelle/{nummer}/analysen", post(analyse))
+        .route("/api/v1/jobs", get(jobs))
+        .route("/api/v1/jobs/{id}", get(job).delete(job_abbrechen))
+        .route("/api/v1/jobs/{id}/fortschritt", get(job_fortschritt))
+        .route("/api/v1/audit", get(audit))
+        .route("/api/v1/audit/pruefen", post(audit_pruefen))
+        .with_state(Zustand { db })
+}
+
+/// Startet den Server und läuft, bis `stopp` endet.
+pub async fn starten(
+    db: Datenbank,
+    adresse: std::net::SocketAddr,
+    stopp: impl std::future::Future<Output = ()> + Send + 'static,
+) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(adresse).await?;
+    axum::serve(listener, router(db))
+        .with_graceful_shutdown(stopp)
+        .await
+}
+
+#[derive(Deserialize)]
+struct Anmeldung {
+    name: String,
+    passwort: String,
+}
+
+async fn anmelden(
+    State(z): State<Zustand>,
+    headers: HeaderMap,
+    Json(a): Json<Anmeldung>,
+) -> Antwort<Response> {
+    let client = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(200).collect::<String>());
+    let (token, konto) =
+        z.db.sitzung_anlegen(&a.name, &a.passwort, client.as_deref())
+            .await
+            .map_err(|e| match e {
+                StoreError::Verweigert(_) => ApiFehler::NichtAngemeldet,
+                e => e.into(),
+            })?;
+    let rechte = z.db.rechte(konto.id).await?;
+    let cookie = format!(
+        "{COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/api; Max-Age={}",
+        stratum_store::sitzung::SITZUNG_STUNDEN * 3600
+    );
+    let mut r = Json(json!({ "token": token, "konto": konto, "rechte": rechte })).into_response();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        r.headers_mut().insert(header::SET_COOKIE, v);
+    }
+    Ok(r)
+}
+
+async fn abmelden(State(z): State<Zustand>, headers: HeaderMap) -> Antwort<Response> {
+    if let Some(t) = token(&headers) {
+        z.db.sitzung_beenden(&t).await?;
+    }
+    let mut r = StatusCode::NO_CONTENT.into_response();
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_static(
+            "stratum_sitzung=; HttpOnly; SameSite=Strict; Path=/api; Max-Age=0",
+        ),
+    );
+    Ok(r)
+}
+
+async fn ich(State(z): State<Zustand>, Angemeldet(u): Angemeldet) -> Antwort<Json<Value>> {
+    let rechte = z.db.rechte(u.id).await?;
+    Ok(Json(json!({ "konto": u, "rechte": rechte })))
+}
+
+async fn rechte(_: Angemeldet) -> Json<Value> {
+    Json(Value::Array(
+        Permission::ALL
+            .iter()
+            .map(|p| json!({ "name": p.name(), "beschreibung": p.description() }))
+            .collect(),
+    ))
+}
+
+async fn fall_id(z: &Zustand, nummer: &str) -> Antwort<CaseId> {
+    z.db.fall_id(nummer)
+        .await?
+        .ok_or_else(|| StoreError::NichtGefunden(format!("kein Fall {nummer}")).into())
+}
+
+async fn faelle(State(z): State<Zustand>, Angemeldet(u): Angemeldet) -> Antwort<Json<Value>> {
+    Ok(Json(
+        serde_json::to_value(z.db.faelle(u.id).await?).map_err(StoreError::from)?,
+    ))
+}
+
+#[derive(Deserialize)]
+struct NeuerFall {
+    nummer: String,
+    titel: String,
+    ordner: Option<String>,
+    beschreibung: Option<String>,
+    einstufung: Option<CaseClassification>,
+    zeitzone: Option<String>,
+}
+
+async fn fall_neu(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Json(n): Json<NeuerFall>,
+) -> Antwort<(StatusCode, Json<Case>)> {
+    if z.db.fall_id(&n.nummer).await?.is_some() {
+        return Err(ApiFehler::Anfrage(format!(
+            "Fallnummer {} ist schon vergeben",
+            n.nummer
+        )));
+    }
+    let jetzt = chrono::Utc::now();
+    let c = Case {
+        id: CaseId::new(),
+        case_number: n.nummer,
+        title: n.titel,
+        description: n.beschreibung,
+        status: CaseStatus::Active,
+        classification: n.einstufung.unwrap_or(CaseClassification::Internal),
+        created_at: jetzt,
+        created_by: u.id,
+        opened_at: Some(jetzt),
+        closed_at: None,
+        timezone: n.zeitzone,
+        case_folder: n.ordner,
+        tags: Vec::new(),
+    };
+    z.db.fall_anlegen(u.id, &c).await?;
+    Ok((StatusCode::CREATED, Json(c)))
+}
+
+async fn fall_zeigen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+) -> Antwort<Json<Value>> {
+    let id = fall_id(&z, &nummer).await?;
+    let (fall, evidence) = z.db.fall_oeffnen(u.id, id).await?;
+    Ok(Json(json!({ "fall": fall, "evidence": evidence })))
+}
+
+#[derive(Deserialize)]
+struct NeueAnalyse {
+    /// Name oder ID der Evidence im Fall.
+    evidence: String,
+    #[serde(default)]
+    optionen: stratum_jobs::AnalyseOptionen,
+}
+
+async fn analyse(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Json(a): Json<NeueAnalyse>,
+) -> Antwort<(StatusCode, Json<Value>)> {
+    let fall = fall_id(&z, &nummer).await?;
+    let ev = z.db.evidence_id(fall, &a.evidence).await?.ok_or_else(|| {
+        StoreError::NichtGefunden(format!("keine Evidence {} im Fall {nummer}", a.evidence))
+    })?;
+    let optionen = serde_json::to_value(&a.optionen).map_err(StoreError::from)?;
+    let job = z.db.analyse_einreihen(u.id, fall, ev, optionen).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "job": job }))))
+}
+
+#[derive(Deserialize)]
+struct Auswahl {
+    fall: Option<String>,
+    anzahl: Option<i64>,
+}
+
+async fn jobs(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Query(q): Query<Auswahl>,
+) -> Antwort<Json<Value>> {
+    let fall = match &q.fall {
+        Some(n) => Some(fall_id(&z, n).await?),
+        None => None,
+    };
+    let liste = z.db.jobs(u.id, fall, q.anzahl.unwrap_or(50)).await?;
+    Ok(Json(serde_json::to_value(liste).map_err(StoreError::from)?))
+}
+
+async fn job(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<Json<Value>> {
+    let j = z.db.job_ansehen(u.id, JobId(id)).await?;
+    Ok(Json(serde_json::to_value(j).map_err(StoreError::from)?))
+}
+
+async fn job_abbrechen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<Json<Value>> {
+    let stand = z.db.job_abbrechen(u.id, JobId(id)).await?;
+    Ok(Json(json!({ "status": stand })))
+}
+
+fn beendet(s: JobStatus) -> bool {
+    matches!(
+        s,
+        JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+    )
+}
+
+/// Fortschritt als Server-Sent Events: einmal je Sekunde ein Ereignis
+/// `stand` mit Stand und Fortschritt, solange sich etwas ändert; endet mit
+/// dem Job. Das Ansehen wird einmal beim Öffnen protokolliert.
+async fn job_fortschritt(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    let id = JobId(id);
+    z.db.job_ansehen(u.id, id).await?;
+    let db = z.db.clone();
+    // Zustand des Stroms: zuletzt gesendeter Inhalt und ob Schluss ist.
+    let strom = stream::unfold((None::<Value>, false, true), move |(alt, ende, erstes)| {
+        let db = db.clone();
+        async move {
+            if ende {
+                return None;
+            }
+            // Vor dem ersten Lesen nicht warten, danach je Runde eine
+            // Sekunde, damit die Schleife nie ohne Pause kreist.
+            let mut warten = !erstes;
+            loop {
+                if warten {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+                warten = true;
+                let j = match db.job_lesen(id).await {
+                    Ok(j) => j,
+                    Err(e) => {
+                        let ev = Event::default()
+                            .event("fehler")
+                            .data(json!({ "fehler": e.to_string() }).to_string());
+                        return Some((Ok(ev), (alt, true, false)));
+                    }
+                };
+                let neu = json!({
+                    "status": j.status,
+                    "progress": j.progress,
+                    "error": j.error,
+                    "result": j.result,
+                    "analysis_run_id": j.analysis_run_id,
+                });
+                let fertig = beendet(j.status);
+                if alt.as_ref() != Some(&neu) || fertig {
+                    let ev = Event::default().event("stand").data(neu.to_string());
+                    return Some((Ok(ev), (Some(neu), fertig, false)));
+                }
+                // Unverändert: weiter warten, ohne zu senden.
+            }
+        }
+    });
+    Ok(Sse::new(strom).keep_alive(KeepAlive::default()))
+}
+
+async fn audit(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Query(q): Query<Auswahl>,
+) -> Antwort<Json<Value>> {
+    let fall = match &q.fall {
+        Some(n) => Some(fall_id(&z, n).await?),
+        None => None,
+    };
+    let liste =
+        z.db.audit_liste(u.id, fall, q.anzahl.unwrap_or(100))
+            .await?;
+    Ok(Json(serde_json::to_value(liste).map_err(StoreError::from)?))
+}
+
+async fn audit_pruefen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+) -> Antwort<Json<Value>> {
+    let p = z.db.audit_pruefen(u.id).await?;
+    Ok(Json(serde_json::to_value(p).map_err(StoreError::from)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_aus_header_und_cookie() {
+        let mut h = HeaderMap::new();
+        assert_eq!(token(&h), None);
+        h.insert(
+            header::COOKIE,
+            HeaderValue::from_static("a=1; stratum_sitzung=abc; b=2"),
+        );
+        assert_eq!(token(&h).as_deref(), Some("abc"));
+        h.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_static("Bearer xyz"),
+        );
+        assert_eq!(token(&h).as_deref(), Some("xyz"));
+    }
+}

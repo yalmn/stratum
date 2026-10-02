@@ -14,8 +14,8 @@ pub mod time;
 pub use analyzer::{Analyzer, AnalyzerError, Finding};
 pub use error::ImageError;
 pub use hash::{
-    hash_bytes, hash_bytes_with_progress, hash_image, hash_image_with_progress, HashingWriter,
-    ImageHashes, Progress,
+    hash_bytes, hash_bytes_abbrechbar, hash_bytes_with_progress, hash_image, hash_image_abbrechbar,
+    hash_image_with_progress, Abbruch, HashingWriter, ImageHashes, Progress,
 };
 pub use image::{ImageCursor, ImageFormat, ImageReader};
 pub use partition::{

@@ -52,6 +52,7 @@ stratum_backend/
   lauf/      ein Analyselauf als Bibliothek (Image bis Report, Datenbank),
              genutzt von CLI, Worker und künftig dem Server
   jobs/      Worker: führt Jobs aus der Warteschlange in PostgreSQL aus
+  server/    HTTP-API (/api/v1) auf Axum
   cli/       Binary "stratum": Optionen, Anmeldung, Ausgabe
   fuzz/      cargo-fuzz-Targets
   begriffe/  Begriffslisten für die Keyword-Suche
@@ -725,6 +726,38 @@ dem nächsten Schritt bzw. Analyzer; der Analyselauf endet dann als
 `--ausgabe`). Jobs nehmen keine Geheimnisse an (DPAPI- oder
 Firefox-Passwörter); solche Analysen laufen weiter direkt über die
 Kommandozeile.
+
+### HTTP-API
+
+`stratum server` stellt die API unter `/api/v1` bereit (Axum), standardmäßig
+nur auf `127.0.0.1:8080`; eine andere Adresse verlangt `--nicht-nur-lokal`,
+da die API ohne TLS läuft. Mit `--worker` läuft ein Worker im selben
+Prozess. Strg+C beendet den Server; ein laufender Job wird dabei
+abgebrochen (auch mitten im Image-Hash) und als `cancelled` beendet.
+
+Anmeldung mit `POST /api/v1/sitzung` (`{"name", "passwort"}`); die Antwort
+enthält ein Token und setzt es als HttpOnly-Cookie `stratum_sitzung`. Jede
+weitere Anfrage braucht das Cookie oder `Authorization: Bearer <Token>`.
+Die Datenbank kennt nur den SHA-256 des Tokens; eine Sitzung endet mit
+`DELETE /api/v1/sitzung`, nach 12 Stunden oder nach einer Stunde ohne
+Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
+
+| Methode und Pfad | Zweck |
+|---|---|
+| `POST`, `DELETE /api/v1/sitzung` | anmelden, abmelden |
+| `GET /api/v1/ich` | eigenes Konto und Rechte |
+| `GET /api/v1/rechte` | Katalog der Berechtigungen |
+| `GET`, `POST /api/v1/faelle` | Fälle auflisten, anlegen |
+| `GET /api/v1/faelle/{nummer}` | Fall mit Evidence |
+| `POST /api/v1/faelle/{nummer}/analysen` | Analyse als Job (`{"evidence", "optionen"}`) |
+| `GET /api/v1/jobs?fall=` | Jobs |
+| `GET`, `DELETE /api/v1/jobs/{id}` | Job ansehen, abbrechen |
+| `GET /api/v1/jobs/{id}/fortschritt` | Fortschritt als Server-Sent Events |
+| `GET /api/v1/audit?fall=&anzahl=` | Audit lesen |
+| `POST /api/v1/audit/pruefen` | Audit-Kette nachrechnen |
+
+Fehler kommen als `{"fehler": "…"}` mit 400, 401, 403, 404 oder 500
+(innere Fehler ohne Einzelheiten).
 
 Weitere: `konto ablehnen`, `konto sperren`, `konto dienst` (Dienstkonto
 ohne Passwort), `rolle aendern` (ohne `--recht` bleiben die

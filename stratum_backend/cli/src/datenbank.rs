@@ -29,6 +29,15 @@ pub fn betriebssystem_benutzer() -> Option<String> {
 /// `stratum.toml`, Passwort aus der Datei in `STRATUM_DB_PASSWORT_DATEI` oder
 /// `stratum.toml`.
 pub fn verbinden() -> Result<(tokio::runtime::Runtime, Datenbank)> {
+    // multi_thread mit einem Worker: so treibt auch `Handle::block_on` aus
+    // dem synchronen Lauf die Verbindung (bei current_thread täte es das
+    // nur innerhalb von `Runtime::block_on`).
+    verbinden_mit(1)
+}
+
+/// Wie [`verbinden`], mit `worker` Threads der Laufzeit (der Server
+/// braucht mehr als einen).
+pub fn verbinden_mit(worker: usize) -> Result<(tokio::runtime::Runtime, Datenbank)> {
     let k = crate::konfig::konfig()?;
     let url = k.db_url().context(
         "keine Datenbank angegeben: STRATUM_DB_URL setzen oder [datenbank] url in stratum.toml",
@@ -37,17 +46,14 @@ pub fn verbinden() -> Result<(tokio::runtime::Runtime, Datenbank)> {
     let passwort = match k.db_passwort_datei() {
         Some(p) => Some(
             std::fs::read_to_string(&p)
-                .with_context(|| format!("Passwortdatei nicht lesbar: {}", p.to_string_lossy()))?
+                .with_context(|| format!("Passwortdatei nicht lesbar: {}", p.display()))?
                 .trim()
                 .to_string(),
         ),
         None => None,
     };
-    // multi_thread mit einem Worker: so treibt auch `Handle::block_on` aus
-    // dem synchronen Lauf die Verbindung (bei current_thread täte es das
-    // nur innerhalb von `Runtime::block_on`).
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
+        .worker_threads(worker.max(1))
         .enable_all()
         .build()
         .context("Laufzeit für die Datenbank nicht erstellbar")?;

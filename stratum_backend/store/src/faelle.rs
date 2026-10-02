@@ -142,7 +142,7 @@ impl Datenbank {
             .fetch_optional(&self.pool)
             .await?;
         let Some(z) = z else {
-            return Err(StoreError::Eingabe(format!("kein Fall {fall}")));
+            return Err(StoreError::NichtGefunden(format!("kein Fall {fall}")));
         };
         let c = fall_aus(z)?;
         let roh: Vec<Json<Value>> = sqlx::query_scalar(

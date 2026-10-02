@@ -271,6 +271,32 @@ impl Datenbank {
         aus_text(neu)
     }
 
+    /// Fordert für alle laufenden Jobs dieses Workers den Abbruch an (der
+    /// Worker wird beendet). Im Audit als Abbruch durch das Systemkonto.
+    pub async fn worker_jobs_abbrechen(&self, worker: &str) -> Result<u64, StoreError> {
+        let ids: Vec<(uuid::Uuid, uuid::Uuid)> = sqlx::query_as(
+            "UPDATE job SET cancel_requested = true \
+             WHERE worker = $1 AND status = 'running' AND NOT cancel_requested \
+             RETURNING id, case_id",
+        )
+        .bind(worker)
+        .fetch_all(&self.pool)
+        .await?;
+        for (id, fall) in &ids {
+            self.audit(&AuditEintrag {
+                akteur: ActorId::cli(),
+                case_id: Some(CaseId(*fall)),
+                aktion: AuditAction::AnalysisCancel,
+                objekt_typ: "job",
+                objekt_id: Some(id.to_string()),
+                ergebnis: AuditResult::Success,
+                details: json!({"grund": "Worker wird beendet", "worker": worker}),
+            })
+            .await?;
+        }
+        Ok(ids.len() as u64)
+    }
+
     /// Ein Job, mit `case.view` im Fall des Jobs; das Lesen steht im Audit.
     pub async fn job_ansehen(&self, akteur: ActorId, id: JobId) -> Result<Job, StoreError> {
         let job = self.job_lesen(id).await?;
@@ -296,7 +322,7 @@ impl Datenbank {
             .bind(id.0)
             .fetch_optional(&self.pool)
             .await?;
-        job_aus(z.ok_or_else(|| StoreError::Eingabe(format!("kein Job {id}")))?)
+        job_aus(z.ok_or_else(|| StoreError::NichtGefunden(format!("kein Job {id}")))?)
     }
 
     /// Jobs, neueste zuerst, wahlweise nur eines Falls. Braucht
@@ -343,7 +369,7 @@ impl Datenbank {
                 .fetch_optional(&self.pool)
                 .await?;
         let Some(Json(mut v)) = v else {
-            return Err(StoreError::Eingabe(format!("keine Evidence {id}")));
+            return Err(StoreError::NichtGefunden(format!("keine Evidence {id}")));
         };
         if let Value::Object(o) = &mut v {
             for (k, leer) in [

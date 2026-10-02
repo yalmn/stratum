@@ -53,6 +53,24 @@ pub enum Befehl {
         #[arg(long, default_value_t = 5)]
         pause: u64,
     },
+    /// HTTP-API (/api/v1) starten; läuft, bis er mit Strg+C beendet wird.
+    Server {
+        /// Adresse und Port.
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        adresse: std::net::SocketAddr,
+        /// Auch an andere als Loopback-Adressen binden. Die API läuft ohne
+        /// TLS; nur hinter einem Reverse-Proxy mit TLS oder in einem
+        /// abgeschotteten Netz verwenden.
+        #[arg(long)]
+        nicht_nur_lokal: bool,
+        /// Im selben Prozess einen Worker für Jobs mitlaufen lassen.
+        #[arg(long)]
+        worker: bool,
+        /// Ordner für Reports der Jobs (sonst aus stratum.toml bzw.
+        /// STRATUM_JOB_AUSGABE).
+        #[arg(long, value_name = "ORDNER")]
+        ausgabe: Option<PathBuf>,
+    },
     /// Katalog aller Berechtigungen ausgeben.
     Rechte,
     /// Zeigen, welche Konfiguration gilt (Datei, Datenbank, Konto; ohne
@@ -496,11 +514,19 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
             zeile("Job-Ausgabe", Some(k.jobs_ausgabe().display().to_string()));
             return Ok(());
         }
+        Befehl::Server {
+            adresse,
+            nicht_nur_lokal,
+            worker,
+            ausgabe,
+        } => return server(adresse, nicht_nur_lokal, worker, ausgabe),
         _ => {}
     }
     let (rt, db) = datenbank::verbinden()?;
     match b {
-        Befehl::Rechte | Befehl::Konfig => unreachable!("oben behandelt"),
+        Befehl::Rechte | Befehl::Konfig | Befehl::Server { .. } => {
+            unreachable!("oben behandelt")
+        }
         Befehl::Superadmin(s) => match s {
             SuperadminBefehl::Einrichten {
                 name,
@@ -548,21 +574,8 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
                 w.name(),
                 ausgabe.display()
             );
-            loop {
-                match w.einmal()? {
-                    Some((id, stand)) => {
-                        eprintln!("[+] Job {id}: {}", text_von(&stand)?);
-                        if einmal {
-                            break;
-                        }
-                    }
-                    None if einmal => {
-                        eprintln!("[*] kein Job wartet");
-                        break;
-                    }
-                    None => std::thread::sleep(std::time::Duration::from_secs(pause.max(1))),
-                }
-            }
+            let stopp = stopp_bei_strg_c(&rt, &db, w.name());
+            worker_schleife(&w, &stopp, einmal, pause)?;
         }
         Befehl::Evidence(e) => evidence(&rt, &db, e)?,
         Befehl::Rolle(r) => rolle(&rt, &db, r)?,
@@ -1083,4 +1096,118 @@ fn fortschritt_kurz(j: &stratum_model::Job) -> String {
     };
     let meldung = p["meldung"].as_str().unwrap_or("");
     format!("{phase}{anteil}  {meldung}").trim().to_string()
+}
+
+/// Bei Strg+C: `stopp` setzen und für die laufenden Jobs dieses Workers den
+/// Abbruch anfordern; der Job hält vor dem nächsten Schritt an und wird
+/// als abgebrochen beendet.
+fn stopp_bei_strg_c(
+    rt: &tokio::runtime::Runtime,
+    db: &Datenbank,
+    worker: &str,
+) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+    let stopp = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (s, db, name) = (stopp.clone(), db.clone(), worker.to_string());
+    rt.spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            s.store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("[*] Beenden angefordert; ein laufender Job wird abgebrochen ...");
+            if let Err(e) = db.worker_jobs_abbrechen(&name).await {
+                eprintln!("[!] Abbruch nicht angefordert: {e}");
+            }
+        }
+    });
+    stopp
+}
+
+/// Holt und erledigt Jobs, bis `stopp` gesetzt ist (oder nach einem
+/// Durchgang mit `einmal`).
+fn worker_schleife(
+    w: &stratum_jobs::Worker,
+    stopp: &std::sync::atomic::AtomicBool,
+    einmal: bool,
+    pause: u64,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    while !stopp.load(Ordering::Relaxed) {
+        match w.einmal()? {
+            Some((id, stand)) => {
+                eprintln!("[+] Job {id}: {}", text_von(&stand)?);
+                if einmal {
+                    break;
+                }
+            }
+            None if einmal => {
+                eprintln!("[*] kein Job wartet");
+                break;
+            }
+            None => {
+                // In kleinen Schritten warten, damit Strg+C rasch greift.
+                for _ in 0..pause.max(1) * 5 {
+                    if stopp.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `stratum server`.
+fn server(
+    adresse: std::net::SocketAddr,
+    nicht_nur_lokal: bool,
+    mit_worker: bool,
+    ausgabe: Option<PathBuf>,
+) -> Result<()> {
+    if !adresse.ip().is_loopback() && !nicht_nur_lokal {
+        anyhow::bail!(
+            "{adresse} ist keine Loopback-Adresse; die API läuft ohne TLS. \
+             Nur mit --nicht-nur-lokal (hinter TLS oder in einem abgeschotteten Netz)."
+        );
+    }
+    let (rt, db) = datenbank::verbinden_mit(4)?;
+    let stopp = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = if mit_worker {
+        let ausgabe = match ausgabe {
+            Some(a) => a,
+            None => crate::konfig::konfig()?.jobs_ausgabe(),
+        };
+        let w = stratum_jobs::Worker::neu(db.clone(), rt.handle().clone(), ausgabe.clone());
+        eprintln!(
+            "[*] Worker {} läuft mit (Ausgabe {})",
+            w.name(),
+            ausgabe.display()
+        );
+        let s = stopp.clone();
+        let name = w.name().to_string();
+        let faden = std::thread::spawn(move || {
+            if let Err(e) = worker_schleife(&w, &s, false, 5) {
+                eprintln!("[!] Worker beendet: {e:#}");
+            }
+        });
+        Some((name, faden))
+    } else {
+        None
+    };
+    eprintln!("[+] stratum-API auf http://{adresse}/api/v1 (Strg+C beendet)");
+    let (db2, s2) = (db.clone(), stopp.clone());
+    let name = worker.as_ref().map(|(n, _)| n.clone());
+    rt.block_on(stratum_server::starten(db, adresse, async move {
+        let _ = tokio::signal::ctrl_c().await;
+        s2.store(true, std::sync::atomic::Ordering::Relaxed);
+        eprintln!("[*] Server wird beendet ...");
+        if let Some(n) = name {
+            if let Err(e) = db2.worker_jobs_abbrechen(&n).await {
+                eprintln!("[!] Abbruch nicht angefordert: {e}");
+            }
+        }
+    }))
+    .context("Server nicht startbar")?;
+    if let Some((_, faden)) = worker {
+        let _ = faden.join();
+    }
+    Ok(())
 }

@@ -51,13 +51,28 @@ pub fn hash_image_with_progress(
     img: &ImageReader,
     progress: Option<Progress<'_>>,
 ) -> Result<ImageHashes, ImageError> {
+    let nie = || false;
+    // Ohne Abbruch gibt es immer ein Ergebnis.
+    Ok(hash_image_abbrechbar(img, progress, &nie)?.unwrap_or_else(|| unreachable!()))
+}
+
+/// Abfrage, ob ein langer Vorgang abgebrochen werden soll.
+pub type Abbruch<'a> = &'a (dyn Fn() -> bool + Sync);
+
+/// Wie [`hash_image_with_progress`], fragt aber je Block (4 MiB, bei E01
+/// 16 MiB) `abbruch` und liefert dann `None`.
+pub fn hash_image_abbrechbar(
+    img: &ImageReader,
+    progress: Option<Progress<'_>>,
+    abbruch: Abbruch<'_>,
+) -> Result<Option<ImageHashes>, ImageError> {
     if let Some(data) = img.raw_slice() {
         img.advise_sequential();
-        let hashes = hash_bytes_with_progress(data, progress);
+        let hashes = hash_bytes_abbrechbar(data, progress, abbruch);
         img.advise_random();
         return Ok(hashes);
     }
-    hash_stream(img, progress)
+    hash_stream(img, progress, abbruch)
 }
 
 /// Blockgröße beim gestreamten Hashen (E01).
@@ -69,7 +84,8 @@ const TEIL: usize = 1024 * 1024;
 fn hash_stream(
     img: &ImageReader,
     progress: Option<Progress<'_>>,
-) -> Result<ImageHashes, ImageError> {
+    abbruch: Abbruch<'_>,
+) -> Result<Option<ImageHashes>, ImageError> {
     let gespeichert = img
         .ewf()
         .map(|e| e.stored_hashes().clone())
@@ -82,6 +98,9 @@ fn hash_stream(
     let mut buf = vec![0u8; BLOCK.min(len as usize)];
     let mut pos = 0u64;
     while pos < len {
+        if abbruch() {
+            return Ok(None);
+        }
         let n = (len - pos).min(BLOCK as u64) as usize;
         let block = &mut buf[..n];
         block
@@ -104,13 +123,13 @@ fn hash_stream(
             p(pos);
         }
     }
-    Ok(ImageHashes {
+    Ok(Some(ImageHashes {
         bytes: len,
         sha256: to_hex(&sha.finalize()),
         blake3: b3.finalize().to_hex().to_string(),
         md5: md5.map(|h| to_hex(&h.finalize())),
         sha1: sha1.map(|h| to_hex(&h.finalize())),
-    })
+    }))
 }
 
 /// Berechnet SHA-256 und BLAKE3 über `data`, blockweise und parallel.
@@ -122,21 +141,42 @@ pub fn hash_bytes(data: &[u8]) -> ImageHashes {
 /// Fortschritt wird vom SHA-256-Durchlauf gemeldet, der in aller Regel der
 /// langsamere der beiden ist.
 pub fn hash_bytes_with_progress(data: &[u8], progress: Option<Progress<'_>>) -> ImageHashes {
+    let nie = || false;
+    hash_bytes_abbrechbar(data, progress, &nie).unwrap_or_else(|| unreachable!())
+}
+
+/// Wie [`hash_bytes_with_progress`], fragt aber je Block `abbruch`; dann
+/// halten beide Hash-Threads an und es gibt `None`.
+pub fn hash_bytes_abbrechbar(
+    data: &[u8],
+    progress: Option<Progress<'_>>,
+    abbruch: Abbruch<'_>,
+) -> Option<ImageHashes> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let halt = AtomicBool::new(false);
     let (sha, b3) = std::thread::scope(|s| {
+        let halt = &halt;
         let sha = s.spawn(move || {
             let mut h = Sha256::new();
             let mut done = 0u64;
             for chunk in data.chunks(CHUNK) {
+                if abbruch() {
+                    halt.store(true, Ordering::Relaxed);
+                    return None;
+                }
                 h.update(chunk);
                 if let Some(p) = progress {
                     done += chunk.len() as u64;
                     p(done);
                 }
             }
-            to_hex(&h.finalize())
+            Some(to_hex(&h.finalize()))
         });
         let mut h = blake3::Hasher::new();
         for chunk in data.chunks(CHUNK) {
+            if halt.load(Ordering::Relaxed) {
+                break;
+            }
             h.update(chunk);
         }
         let b3 = h.finalize().to_hex().to_string();
@@ -146,13 +186,13 @@ pub fn hash_bytes_with_progress(data: &[u8], progress: Option<Progress<'_>>) -> 
         (sha, b3)
     });
 
-    ImageHashes {
+    Some(ImageHashes {
         bytes: data.len() as u64,
-        sha256: sha,
+        sha256: sha?,
         blake3: b3,
         md5: None,
         sha1: None,
-    }
+    })
 }
 
 /// Schreibt durch und berechnet dabei SHA-256 und BLAKE3 über alle geschriebenen
@@ -267,5 +307,17 @@ mod tests {
         let (out, h) = w.finish().unwrap();
         assert_eq!(out, data);
         assert_eq!(h, hash_bytes(&data));
+    }
+
+    #[test]
+    fn abbruch_beim_hashen() {
+        let data = vec![7u8; 20 * 1024 * 1024];
+        let nie = || false;
+        let voll = hash_bytes_abbrechbar(&data, None, &nie).unwrap();
+        assert_eq!(voll, hash_bytes(&data));
+        // Nach dem zweiten Block abbrechen: kein Ergebnis.
+        let n = std::sync::atomic::AtomicUsize::new(0);
+        let ab = || n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) >= 2;
+        assert!(hash_bytes_abbrechbar(&data, None, &ab).is_none());
     }
 }

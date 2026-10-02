@@ -25,6 +25,7 @@ pub mod audit;
 pub mod benutzer;
 pub mod faelle;
 pub mod jobs;
+pub mod sitzung;
 
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
@@ -84,6 +85,9 @@ pub enum StoreError {
     /// Aktion nicht erlaubt (fehlende Rolle, Anmeldung abgelehnt).
     #[error("verweigert: {0}")]
     Verweigert(String),
+    /// Gesuchtes Objekt gibt es nicht.
+    #[error("{0}")]
+    NichtGefunden(String),
     /// Eingabe ungültig (z. B. Anmeldename).
     #[error("{0}")]
     Eingabe(String),
