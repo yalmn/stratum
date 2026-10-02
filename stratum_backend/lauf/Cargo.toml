@@ -1,17 +1,12 @@
 [package]
-name = "stratum-cli"
+name = "stratum-lauf"
+description = "Analyselauf von stratum als Bibliothek: Image bis Report, Datenmodell und Datenbank"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Kommandozeilen-Tool von stratum: Image analysieren, JSON-Report erzeugen"
-
-[[bin]]
-name = "stratum"
-path = "src/main.rs"
 
 [dependencies]
 stratum-core.workspace = true
-stratum-registry.workspace = true
 stratum-ntfs = { path = "../ntfs" }
 stratum-search = { path = "../search" }
 stratum-creds = { path = "../creds" }
@@ -19,20 +14,13 @@ stratum-analysis = { path = "../analysis" }
 stratum-ewf.workspace = true
 stratum-normalize = { path = "../normalize" }
 stratum-store = { path = "../store" }
-stratum-lauf = { path = "../lauf" }
 stratum-model = { path = "../../stratum_model" }
 uuid = "1.26.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }
-anyhow = "1.0.104"
-clap = { version = "4.6.7", features = ["derive"] }
-rpassword = "7.5.4"
-toml = { version = "1.1.6", default-features = false, features = ["parse", "serde"] }
 serde = { workspace = true }
 serde_json = "1.0.151"
-sha2.workspace = true
-tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread"] }
-indicatif = "0.18.6"
+thiserror.workspace = true
+tokio = { version = "1.53.1", features = ["rt"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres"] }

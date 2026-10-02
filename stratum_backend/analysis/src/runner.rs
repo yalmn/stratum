@@ -1,5 +1,6 @@
 //! Führt mehrere Analyzer parallel aus.
 
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use rayon::prelude::*;
@@ -19,6 +20,21 @@ pub struct AnalysisResult {
     pub warnings: Vec<String>,
     /// Laufstatus je Analyzer in der übergebenen Reihenfolge.
     pub analyzers: Vec<AnalyzerStatus>,
+    /// Der Lauf wurde auf Anforderung vor dem Ende abgebrochen; Funde sind
+    /// dann unvollständig.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub abgebrochen: bool,
+}
+
+/// Steuerung eines Laufs von außen: Abbruch und Fortschritt.
+///
+/// Ein Analyzer wird nicht mitten in der Arbeit unterbrochen; vor jedem
+/// noch nicht begonnenen wird gefragt, ob abgebrochen werden soll.
+pub struct Steuerung<'a> {
+    /// Liefert `true`, sobald abgebrochen werden soll.
+    pub abbruch: &'a (dyn Fn() -> bool + Sync),
+    /// Erhält fertige und gesamte Analyzer des ersten Durchgangs.
+    pub fortschritt: &'a (dyn Fn(usize, usize) + Sync),
 }
 
 /// Was ein einzelner Analyzer geliefert hat. Null Funde heißt nur, dass
@@ -44,17 +60,49 @@ pub struct AnalyzerStatus {
 /// Analyzer (z. B. die Keyword-Suche) parallelisiert seine Arbeit zusätzlich
 /// intern.
 pub fn run_all(ctx: &AnalysisContext<'_>, analyzers: &[Box<dyn Analyzer>]) -> AnalysisResult {
+    run_all_mit(
+        ctx,
+        analyzers,
+        &Steuerung {
+            abbruch: &|| false,
+            fortschritt: &|_, _| {},
+        },
+    )
+}
+
+/// Wie [`run_all`], mit Abbruch und Fortschritt.
+pub fn run_all_mit(
+    ctx: &AnalysisContext<'_>,
+    analyzers: &[Box<dyn Analyzer>],
+    steuerung: &Steuerung<'_>,
+) -> AnalysisResult {
+    let gesamt = analyzers.len();
+    let fertig = AtomicUsize::new(0);
+    let abgebrochen = AtomicBool::new(false);
     let parts: Vec<(&'static str, String, crate::Outcome, u64)> = analyzers
         .par_iter()
         .map(|a| {
+            if abgebrochen.load(Ordering::Relaxed) || (steuerung.abbruch)() {
+                abgebrochen.store(true, Ordering::Relaxed);
+                return (
+                    a.name(),
+                    a.domain().to_string(),
+                    crate::Outcome::default(),
+                    0,
+                );
+            }
             let start = Instant::now();
             let outcome = a.run(ctx);
             let ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
+            (steuerung.fortschritt)(fertig.fetch_add(1, Ordering::Relaxed) + 1, gesamt);
             (a.name(), a.domain().to_string(), outcome, ms)
         })
         .collect();
 
-    let mut out = AnalysisResult::default();
+    let mut out = AnalysisResult {
+        abgebrochen: abgebrochen.load(Ordering::Relaxed),
+        ..Default::default()
+    };
     for (name, domain, mut outcome, dauer_ms) in parts {
         out.analyzers.push(AnalyzerStatus {
             name,
@@ -77,6 +125,10 @@ pub fn run_all(ctx: &AnalysisContext<'_>, analyzers: &[Box<dyn Analyzer>]) -> An
         .filter(|(_, a)| a.dateibasiert())
         .collect();
     for (herkunft, volume_offset, sub) in ctx.snapshot_kontexte() {
+        if out.abgebrochen || (steuerung.abbruch)() {
+            out.abgebrochen = true;
+            break;
+        }
         let label = herkunft.label();
         let erstellt = match herkunft {
             Herkunft::Snapshot { erstellt, .. } => filetime_to_iso(erstellt),
@@ -207,5 +259,47 @@ mod tests {
             "2021-05-01T17:41:28.2249863Z"
         );
         assert_eq!((r.analyzers[0].funde, r.analyzers[1].funde), (2, 1));
+    }
+
+    #[test]
+    fn abbruch_und_fortschritt() {
+        let path =
+            std::env::temp_dir().join(format!("stratum-runner-abbruch-{}", std::process::id()));
+        std::fs::write(&path, [0u8; 16]).unwrap();
+        let img = stratum_core::ImageReader::open(&path).unwrap();
+        let mut ctx = AnalysisContext::new(&img, Vec::new());
+        ctx.volumes = vec![index(Herkunft::Live, &["a.txt", "b.txt"])];
+        let analyzers: Vec<Box<dyn Analyzer>> = (0..4)
+            .map(|_| Box::new(ProDatei(false)) as Box<dyn Analyzer>)
+            .collect();
+
+        // Ohne Abbruch: jeder Analyzer meldet sich einmal, bis 4 von 4.
+        let gemeldet = std::sync::Mutex::new(Vec::new());
+        let r = run_all_mit(
+            &ctx,
+            &analyzers,
+            &Steuerung {
+                abbruch: &|| false,
+                fortschritt: &|f, g| gemeldet.lock().unwrap().push((f, g)),
+            },
+        );
+        assert!(!r.abgebrochen);
+        assert_eq!(r.findings.len(), 8);
+        let mut g = gemeldet.into_inner().unwrap();
+        g.sort_unstable();
+        assert_eq!(g, [(1, 4), (2, 4), (3, 4), (4, 4)]);
+
+        // Abbruch von Anfang an: kein Analyzer läuft, keine Funde.
+        let r = run_all_mit(
+            &ctx,
+            &analyzers,
+            &Steuerung {
+                abbruch: &|| true,
+                fortschritt: &|_, _| panic!("kein Analyzer darf fertig werden"),
+            },
+        );
+        std::fs::remove_file(&path).ok();
+        assert!(r.abgebrochen);
+        assert!(r.findings.is_empty());
     }
 }

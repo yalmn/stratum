@@ -17,7 +17,7 @@ use stratum_core::time::filetime_to_iso;
 use stratum_core::{HashingWriter, ImageReader};
 use stratum_ntfs::NtfsVolume;
 
-use crate::report::Tool;
+use stratum_lauf::report::Tool;
 
 /// Welche Datei extrahiert werden soll.
 pub enum Selector<'a> {

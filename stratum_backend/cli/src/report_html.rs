@@ -4,7 +4,7 @@
 //! Image) und werden daher HTML-escaped, bevor sie in die Seite geschrieben
 //! werden.
 
-use crate::report::Report;
+use stratum_lauf::report::Report;
 
 /// Rendert den Report als vollständige HTML-Seite.
 pub fn render(report: &Report) -> String {

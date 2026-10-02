@@ -47,7 +47,11 @@ stratum_backend/
   search/    Keyword- und Muster-Suche
   creds/     lokale Windows-Konten aus SAM und SYSTEM
   analysis/  Domänen-Analyzer und gemeinsamer Kontext
-  cli/       Binary "stratum", JSON-Report
+  normalize/ Abbildung der Funde auf das Datenmodell
+  store/     PostgreSQL: Modell, Fälle, Evidence, Konten, Rollen, Audit
+  lauf/      ein Analyselauf als Bibliothek (Image bis Report, Datenbank),
+             genutzt von der CLI und künftig von Jobs und Server
+  cli/       Binary "stratum": Optionen, Anmeldung, Ausgabe
   fuzz/      cargo-fuzz-Targets
   begriffe/  Begriffslisten für die Keyword-Suche
   xsoar/     Vorlage für Cortex XSOAR

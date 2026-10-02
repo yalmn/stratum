@@ -164,7 +164,8 @@ pub struct Geschrieben {
     pub herkunftsangaben: u64,
 }
 
-/// Verbindung zur Datenbank.
+/// Verbindung zur Datenbank. Klonen teilt den Verbindungspool.
+#[derive(Clone)]
 pub struct Datenbank {
     pool: PgPool,
 }

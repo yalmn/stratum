@@ -791,12 +791,12 @@ fn evidence(rt: &tokio::runtime::Runtime, db: &Datenbank, e: EvidenceBefehl) -> 
             .with_context(|| format!("unbekannte Art {t}"))?,
         None => art_erkennen(&img),
     };
-    let pb = crate::bytes_bar(img.len(), "Hashing");
+    let pb = crate::konsole::bytes_bar(img.len(), "Hashing");
     let cb: stratum_core::Progress = &|done| pb.set_position(done);
     let h = stratum_core::hash_image_with_progress(&img, Some(cb))
         .context("Hash nicht berechenbar (Datei beschädigt?)")?;
     pb.finish_and_clear();
-    let ewf = img.ewf().map(|x| crate::ewf_report(x, Some(&h)));
+    let ewf = img.ewf().map(|x| stratum_lauf::ewf_report(x, Some(&h)));
     if let Some(i) = &ewf {
         for (n, stimmt) in [("MD5", i.md5_stimmt), ("SHA-1", i.sha1_stimmt)] {
             if stimmt == Some(false) {
@@ -820,7 +820,7 @@ fn evidence(rt: &tokio::runtime::Runtime, db: &Datenbank, e: EvidenceBefehl) -> 
         .unwrap_or_else(|| datei.display().to_string());
     let jetzt = chrono::Utc::now();
     let ev = Evidence {
-        id: crate::evidence_id_ableiten(fall_id, &h.sha256, kind),
+        id: stratum_lauf::evidence_id_ableiten(fall_id, &h.sha256, kind),
         case_id: fall_id,
         kind,
         name: name.unwrap_or_else(|| dateiname.clone()),

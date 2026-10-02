@@ -79,7 +79,7 @@ pub use prefetch::PrefetchAnalyzer;
 pub use programexec::ProgramExecutionAnalyzer;
 pub use recyclebin::RecycleBinAnalyzer;
 pub use reg::{BamAnalyzer, PersistenceAnalyzer, UsbAnalyzer, UserActivityAnalyzer};
-pub use runner::{run_all, AnalysisResult, AnalyzerStatus};
+pub use runner::{run_all, run_all_mit, AnalysisResult, AnalyzerStatus, Steuerung};
 pub use schatten::{Abbildung, Abweichung, Schatten, Status, VolumeReader};
 pub use shellbags::ShellBagsAnalyzer;
 pub use srum::SrumAnalyzer;
