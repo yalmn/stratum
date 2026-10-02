@@ -30,6 +30,8 @@ pub enum AuditAction {
     UserReject,
     /// Konto gesperrt.
     UserDisable,
+    /// Kontenliste gelesen.
+    UserList,
     /// Superadmin-Recht vergeben oder entzogen.
     SuperadminSet,
     /// Rolle angelegt.
@@ -100,6 +102,8 @@ pub enum AuditAction {
     AiResponse,
     /// Connector genutzt.
     ConnectorUse,
+    /// Audit gelesen.
+    AuditView,
     /// Audit-Kette nachgerechnet.
     AuditVerify,
 }

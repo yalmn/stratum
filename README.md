@@ -641,6 +641,31 @@ Die Kommandozeile arbeitet bis auf Weiteres ohne Anmeldung als
 steht als Benutzer des Betriebssystems im Audit. Fehlt einem Konto eine
 Berechtigung, wird die Aktion abgelehnt und als `denied` protokolliert.
 
+Bedienung über Unterbefehle (die bisherige Form `stratum IMAGE …` bleibt
+unverändert). Verwaltende Befehle laufen als angemeldetes Konto (`--als
+NAME`); Passwörter werden verdeckt abgefragt oder mit `--passwort-datei`
+bzw. `--als-passwort-datei` aus einer Datei gelesen, nie als Argument:
+
+```sh
+stratum superadmin einrichten chef --anzeigename "Vorname Name"
+stratum konto registrieren mia --anzeigename "Mia M."
+stratum konto liste --als chef
+stratum konto freigeben mia --rolle Analyst --als chef
+stratum rolle anlegen Fallführung --recht case.create --recht case.view --als chef
+stratum konto rollen mia --rolle Analyst --rolle Fallführung --als chef
+stratum superadmin ernennen mia --als chef
+stratum rolle liste
+stratum rechte
+stratum audit liste --anzahl 50 --als mia
+stratum audit pruefen
+```
+
+Weitere: `konto ablehnen`, `konto sperren`, `konto dienst` (Dienstkonto
+ohne Passwort), `rolle aendern` (ohne `--recht` bleiben die
+Berechtigungen, mit `--recht` gelten genau die angegebenen), `rolle
+loeschen`, `superadmin entziehen`. Die Datenbank kommt wie bei `--db` aus
+`STRATUM_DB_URL` und `STRATUM_DB_PASSWORT_DATEI`.
+
 Das Audit (`audit_event`) hält fest, wer was getan hat: Fall angelegt,
 Evidence registriert oder gegen ihren Hash geprüft (eine Abweichung als
 `failure`), Analyse begonnen und beendet, Report erstellt, Konten,

@@ -162,6 +162,42 @@ type Zeile = (
     String,
 );
 
+/// Liest die letzten Ereignisse als Modellobjekte.
+pub(crate) async fn liste(
+    pool: &PgPool,
+    case_id: Option<CaseId>,
+    anzahl: i64,
+) -> Result<Vec<stratum_model::AuditEvent>, StoreError> {
+    let zeilen: Vec<Zeile> = sqlx::query_as(
+        "SELECT sequence, id, actor_id, case_id, occurred_at, action, object_type, \
+         object_id, result, details, payload, previous_hash, hash FROM audit_event \
+         WHERE $1::uuid IS NULL OR case_id = $1 ORDER BY sequence DESC LIMIT $2",
+    )
+    .bind(case_id.map(|c| c.0))
+    .bind(anzahl.clamp(0, 100_000))
+    .fetch_all(pool)
+    .await?;
+    zeilen
+        .into_iter()
+        .map(|z| {
+            Ok(stratum_model::AuditEvent {
+                id: AuditEventId(z.1),
+                sequence: z.0 as u64,
+                actor_id: ActorId(z.2),
+                case_id: z.3.map(CaseId),
+                timestamp: z.4,
+                action: serde_json::from_value(Value::String(z.5))?,
+                object_type: z.6,
+                object_id: z.7,
+                result: serde_json::from_value(Value::String(z.8))?,
+                details: z.9 .0,
+                previous_hash: Some(z.11),
+                hash: z.12,
+            })
+        })
+        .collect()
+}
+
 /// Rechnet die ganze Kette nach: lückenlose Nummern, Vorgänger-Hash, Hash
 /// über den gespeicherten Inhalt, Spalten gleich Inhalt, Kopf gleich letztem
 /// Ereignis. Liest in Blöcken, nie die ganze Tabelle auf einmal.

@@ -53,7 +53,16 @@ pub fn verbinden() -> Result<(tokio::runtime::Runtime, Datenbank)> {
 /// als JSON aus. Fehler in der Kette führen zu einem Fehler-Exitcode.
 pub fn audit_pruefen() -> Result<()> {
     let (rt, db) = verbinden()?;
-    let p = rt.block_on(db.audit_pruefen(cli_akteur()))?;
+    audit_pruefen_mit(&rt, &db, cli_akteur())
+}
+
+/// Wie [`audit_pruefen`], mit gegebener Verbindung und handelndem Konto.
+pub fn audit_pruefen_mit(
+    rt: &tokio::runtime::Runtime,
+    db: &Datenbank,
+    akteur: ActorId,
+) -> Result<()> {
+    let p = rt.block_on(db.audit_pruefen(akteur))?;
     println!("{}", serde_json::to_string_pretty(&p)?);
     if !p.intakt() {
         anyhow::bail!(

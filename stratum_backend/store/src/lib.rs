@@ -35,6 +35,16 @@ use stratum_model::{
 use stratum_normalize::{Kontext, Modell};
 
 pub use audit::{AuditEintrag, AuditPruefung};
+
+/// Ein Audit-Ereignis mit dem Anmeldenamen des Akteurs, zum Anzeigen.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditZeile {
+    /// Ereignis.
+    #[serde(flatten)]
+    pub event: stratum_model::AuditEvent,
+    /// Anmeldename des Akteurs.
+    pub akteur: String,
+}
 pub use benutzer::PASSWORT_MINDESTLAENGE;
 
 /// Fehler beim Speichern.
@@ -192,6 +202,48 @@ impl Datenbank {
     pub async fn audit(&self, e: &AuditEintrag) -> Result<stratum_model::AuditEventId, StoreError> {
         let mut conn = self.pool.acquire().await?;
         audit::schreiben(&mut conn, e).await
+    }
+
+    /// Die letzten `anzahl` Audit-Ereignisse (neueste zuerst), wahlweise nur
+    /// eines Falls. Braucht `audit.view`; das Lesen steht selbst im Audit.
+    pub async fn audit_liste(
+        &self,
+        akteur: ActorId,
+        case_id: Option<stratum_model::CaseId>,
+        anzahl: i64,
+    ) -> Result<Vec<AuditZeile>, StoreError> {
+        let e = AuditEintrag {
+            akteur,
+            case_id,
+            aktion: AuditAction::AuditView,
+            objekt_typ: "audit",
+            objekt_id: None,
+            ergebnis: AuditResult::Success,
+            details: json!({"anzahl": anzahl}),
+        };
+        self.verlangen(akteur, Permission::AuditView, e.clone())
+            .await?;
+        let liste = audit::liste(&self.pool, case_id, anzahl).await?;
+        let mut ids: Vec<uuid::Uuid> = liste.iter().map(|e| e.actor_id.0).collect();
+        ids.sort_unstable();
+        ids.dedup();
+        let namen: std::collections::HashMap<uuid::Uuid, String> =
+            sqlx::query_as::<_, (uuid::Uuid, String)>(
+                "SELECT id, username FROM app_user WHERE id = ANY($1)",
+            )
+            .bind(&ids)
+            .fetch_all(&self.pool)
+            .await?
+            .into_iter()
+            .collect();
+        self.audit(&e).await?;
+        Ok(liste
+            .into_iter()
+            .map(|event| AuditZeile {
+                akteur: namen.get(&event.actor_id.0).cloned().unwrap_or_default(),
+                event,
+            })
+            .collect())
     }
 
     /// Rechnet die Audit-Kette nach und protokolliert das als

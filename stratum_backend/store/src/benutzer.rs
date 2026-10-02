@@ -128,6 +128,36 @@ impl Datenbank {
         }))
     }
 
+    /// Alle Konten mit Rollen, nach Anmeldename. Nur für Superadmins; der
+    /// Lesezugriff steht im Audit.
+    pub async fn konten(&self, akteur: ActorId) -> Result<Vec<User>, StoreError> {
+        let e = eintrag(
+            akteur,
+            AuditAction::UserList,
+            "user",
+            "*",
+            AuditResult::Success,
+            json!({}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        let namen: Vec<String> =
+            sqlx::query_scalar("SELECT username FROM app_user ORDER BY username")
+                .fetch_all(&self.pool)
+                .await?;
+        let mut out = Vec::with_capacity(namen.len());
+        for n in namen {
+            if let Some(u) = self.benutzer(&n).await? {
+                out.push(u);
+            }
+        }
+        self.audit(&AuditEintrag {
+            details: json!({"anzahl": out.len()}),
+            ..e
+        })
+        .await?;
+        Ok(out)
+    }
+
     /// Alle Rollen mit ihren Berechtigungen, nach Name.
     pub async fn rollen(&self) -> Result<Vec<Role>, StoreError> {
         let zeilen: Vec<(uuid::Uuid, String, Option<String>, Vec<String>)> = sqlx::query_as(

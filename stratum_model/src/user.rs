@@ -142,6 +142,37 @@ impl Permission {
         }
     }
 
+    /// Kurze Beschreibung für Listen und Oberflächen.
+    pub fn description(self) -> &'static str {
+        match self {
+            Permission::CaseCreate => "Fall anlegen",
+            Permission::CaseView => "Fälle sehen",
+            Permission::CaseEdit => "Fall bearbeiten (Titel, Stand, Einstufung)",
+            Permission::CaseClose => "Fall schließen",
+            Permission::EvidenceImport => "Evidence registrieren",
+            Permission::EvidenceView => "Evidence sehen",
+            Permission::AnalysisStart => "Analyse starten",
+            Permission::AnalysisCancel => "Analyse abbrechen",
+            Permission::FileView => "Dateien und Ergebnisse ansehen",
+            Permission::FileExtract => "Dateien extrahieren und herunterladen",
+            Permission::SearchRun => "Suchen",
+            Permission::CredentialViewSensitive => {
+                "Sensible Zugangsdaten (Passwörter, Hashes, Schlüssel) im Klartext sehen"
+            }
+            Permission::FindingCreate => "Findings anlegen",
+            Permission::FindingEdit => "Findings bearbeiten und bewerten",
+            Permission::RelationEdit => "Beziehungen anlegen und entfernen",
+            Permission::ReportCreate => "Reports erstellen",
+            Permission::ReportExport => "Reports exportieren",
+            Permission::AuditView => "Audit lesen",
+            Permission::AuditVerify => "Audit-Kette nachrechnen",
+            Permission::TiManage => "Threat Intelligence verwalten",
+            Permission::PlaybookRun => "Playbooks ausführen",
+            Permission::AiQuery => "Sprachmodell befragen",
+            Permission::ConnectorUse => "Connectoren nutzen",
+        }
+    }
+
     /// Umkehrung von [`Self::name`].
     pub fn from_name(s: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|p| p.name() == s)

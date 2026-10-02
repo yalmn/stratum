@@ -12,6 +12,7 @@ mod extract;
 mod liveness;
 mod report;
 mod report_html;
+mod verwaltung;
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -52,10 +53,17 @@ use report::{
         ")"
     ),
     about,
+    // `stratum IMAGE …` wie bisher, oder ein Unterbefehl (`stratum konto …`).
+    args_conflicts_with_subcommands = true,
+    subcommand_negates_reqs = true,
     // Der Dateikatalog geht in eine Datei, in die Datenbank oder in beide.
     group = clap::ArgGroup::new("katalog_ziel").args(["catalog", "db"]).multiple(true)
 )]
 struct Cli {
+    /// Verwaltung von Konten, Rollen und Audit.
+    #[command(subcommand)]
+    befehl: Option<verwaltung::Befehl>,
+
     /// Pfad zum Image (Roh-Image wie merged.dd oder E01). Mit `--fund` der
     /// Pfad zum JSON-Report. Entfällt bei `--audit-pruefen`.
     #[arg(required_unless_present = "audit_pruefen")]
@@ -253,6 +261,9 @@ const DEFAULT_KEYWORDS: &str = include_str!("../../begriffe/strafverfolgung.toml
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let gestartet = chrono::Utc::now();
+    if let Some(b) = cli.befehl {
+        return verwaltung::ausfuehren(b);
+    }
 
     if cli.audit_pruefen {
         return datenbank::audit_pruefen();
