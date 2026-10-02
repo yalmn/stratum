@@ -660,6 +660,42 @@ stratum audit liste --anzahl 50 --als mia
 stratum audit pruefen
 ```
 
+Fälle und Evidence:
+
+```sh
+stratum fall neu DFIR-2026-0017 --titel "Webserver-Einbruch" --ordner /faelle/0017 --als chef
+stratum evidence hinzu DFIR-2026-0017 /faelle/0017/merged.dd --rolle Webserver --als mia
+stratum evidence hinzu DFIR-2026-0017 /faelle/0017/mitschnitt.pcapng --rolle Gateway --als mia
+stratum fall zeigen DFIR-2026-0017 --als mia
+stratum fall liste --als mia
+stratum /faelle/0017/merged.dd --db --fall DFIR-2026-0017 --als mia -o report.json
+```
+
+`evidence hinzu` hasht die Datei (SHA-256, BLAKE3, bei E01 Abgleich mit
+MD5/SHA-1 der Akquise) und erkennt die Art am Format: E01, Rohimage (mit
+Partitionstabelle oder Volume), pcap und pcapng; sonst `other`, mit
+`--art` (z. B. `memory_dump`, `log_bundle`) zu setzen. Nicht unterstützte
+Arten werden registriert und gehasht (`unsupported_format`). Eine
+`bdp.info` daneben steht in den Metadaten. Eine Analyse mit `--fall` und
+`--als` läuft als dieses Konto; Anmeldung, Fall und `analysis.start` werden
+vor dem Image-Hash geprüft, eine schon registrierte Evidence mit gleichem
+SHA-256 wird wiederverwendet. `--db` geht auch ohne `--modell`.
+
+Statt der Umgebungsvariablen genügt eine `stratum.toml` (gesucht in
+`STRATUM_KONFIG`, `./stratum.toml`, `~/.config/stratum/stratum.toml`,
+`/etc/stratum/stratum.toml`; Umgebungsvariablen gehen vor):
+
+```toml
+[datenbank]
+url = "postgres://stratum@127.0.0.1:5432/stratum"
+passwort_datei = ".stratum_db_passwort"   # relativ zur Konfigurationsdatei
+
+[konto]
+name = "mia"                              # Vorgabe für --als
+```
+
+`stratum konfig` zeigt, welche Datei und welche Werte gelten.
+
 Weitere: `konto ablehnen`, `konto sperren`, `konto dienst` (Dienstkonto
 ohne Passwort), `rolle aendern` (ohne `--recht` bleiben die
 Berechtigungen, mit `--recht` gelten genau die angegebenen), `rolle

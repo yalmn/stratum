@@ -23,6 +23,7 @@
 
 pub mod audit;
 pub mod benutzer;
+pub mod faelle;
 
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};
@@ -35,6 +36,7 @@ use stratum_model::{
 use stratum_normalize::{Kontext, Modell};
 
 pub use audit::{AuditEintrag, AuditPruefung};
+pub use faelle::FallZeile;
 
 /// Ein Audit-Ereignis mit dem Anmeldenamen des Akteurs, zum Anzeigen.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -368,16 +370,25 @@ impl Datenbank {
             ergebnis,
             details,
         };
-        self.verlangen(
-            akteur,
-            Permission::EvidenceImport,
-            eintrag(
-                AuditAction::EvidenceImport,
-                AuditResult::Denied,
-                json!({"sha256": e.sha256}),
-            ),
-        )
-        .await?;
+        // Registrieren braucht evidence.import; eine schon registrierte
+        // Evidence nur gegen ihren Hash zu prüfen, ist Teil der Analyse.
+        let vorhanden: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM evidence WHERE id = $1)")
+                .bind(e.id.0)
+                .fetch_one(&self.pool)
+                .await?;
+        if !vorhanden {
+            self.verlangen(
+                akteur,
+                Permission::EvidenceImport,
+                eintrag(
+                    AuditAction::EvidenceImport,
+                    AuditResult::Denied,
+                    json!({"sha256": e.sha256}),
+                ),
+            )
+            .await?;
+        }
         let mut tx = self.pool.begin().await?;
         let neu: Option<bool> = sqlx::query_scalar(
             "INSERT INTO evidence (id, case_id, kind, name, role, original_name, source_uri, size, \

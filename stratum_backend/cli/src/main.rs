@@ -9,6 +9,7 @@ mod abruf;
 mod bdp;
 mod datenbank;
 mod extract;
+mod konfig;
 mod liveness;
 mod report;
 mod report_html;
@@ -57,7 +58,8 @@ use report::{
     args_conflicts_with_subcommands = true,
     subcommand_negates_reqs = true,
     // Der Dateikatalog geht in eine Datei, in die Datenbank oder in beide.
-    group = clap::ArgGroup::new("katalog_ziel").args(["catalog", "db"]).multiple(true)
+    group = clap::ArgGroup::new("katalog_ziel").args(["catalog", "db"]).multiple(true),
+    group = clap::ArgGroup::new("modell_ziel").args(["modell", "db"]).multiple(true)
 )]
 struct Cli {
     /// Verwaltung von Konten, Rollen und Audit.
@@ -149,18 +151,40 @@ struct Cli {
     #[arg(long, value_name = "DATEI")]
     modell: Option<PathBuf>,
 
-    /// Das Datenmodell zusätzlich in PostgreSQL schreiben, mit Fall,
-    /// Evidence und Analyselauf. Die Verbindung kommt aus `STRATUM_DB_URL`,
-    /// das Passwort aus der Datei in `STRATUM_DB_PASSWORT_DATEI` (nicht von
-    /// der Kommandozeile, damit es nicht in der Prozessliste steht). Das
-    /// Schema wird beim ersten Mal angelegt. Braucht die Image-Hashes.
-    #[arg(long, requires = "modell", conflicts_with = "no_hash")]
+    /// Funde, Datenmodell und Dateikatalog in PostgreSQL schreiben, mit
+    /// Fall, Evidence und Analyselauf (`--modell` ist dafür nicht nötig).
+    /// Verbindung aus `STRATUM_DB_URL` oder `stratum.toml`, Passwort aus der
+    /// Datei in `STRATUM_DB_PASSWORT_DATEI` oder `stratum.toml`, nie von der
+    /// Kommandozeile. Das Schema wird beim ersten Mal angelegt. Braucht die
+    /// Image-Hashes.
+    #[arg(long, conflicts_with = "no_hash")]
     db: bool,
+
+    /// Fall (Fallnummer, angelegt mit `stratum fall neu`), in den der Lauf
+    /// mit `--db` geht. Ohne Angabe wird ein Fall `CLI-<ID>` aus dem
+    /// Image-Hash abgeleitet.
+    #[arg(
+        long,
+        value_name = "NUMMER",
+        requires = "db",
+        conflicts_with = "fall_id"
+    )]
+    fall: Option<String>,
+
+    /// Mit `--db` als dieses Konto analysieren (Passwort wird verdeckt
+    /// abgefragt). Ohne Angabe das Konto aus `stratum.toml`, sonst das
+    /// Systemkonto `stratum-cli`.
+    #[arg(long, value_name = "NAME", requires = "db")]
+    als: Option<String>,
+
+    /// Passwort für `--als` aus dieser Datei statt der Abfrage.
+    #[arg(long, value_name = "DATEI", requires = "als")]
+    als_passwort_datei: Option<PathBuf>,
 
     /// Fall-ID (UUID) für das Datenmodell. Ohne Angabe wird sie aus dem
     /// Image-Hash abgeleitet, sodass Läufe über dasselbe Image dieselben IDs
     /// ergeben.
-    #[arg(long, value_name = "UUID", requires = "modell")]
+    #[arg(long, value_name = "UUID", requires = "modell_ziel")]
     fall_id: Option<String>,
 
     /// Dateikatalog aller Dateien und Verzeichnisse mit Metadaten als JSON Lines
@@ -275,6 +299,18 @@ fn main() -> Result<()> {
         return abruf::fund(image, id);
     }
 
+    // Mit --db zuerst verbinden, anmelden und den Fall prüfen: Fehler fallen
+    // so vor dem langen Image-Hash auf.
+    let mut vorbereitet = if cli.db {
+        Some(datenbank::Vorbereitet::herstellen(
+            cli.als.as_deref(),
+            cli.als_passwort_datei.as_deref(),
+            cli.fall.as_deref(),
+        )?)
+    } else {
+        None
+    };
+
     let img = ImageReader::open(image)
         .with_context(|| format!("Image nicht lesbar: {}", image.display()))?;
 
@@ -346,7 +382,10 @@ fn main() -> Result<()> {
         Some(s) => {
             Some(uuid::Uuid::parse_str(s).with_context(|| format!("--fall-id: keine UUID: {s}"))?)
         }
-        None => None,
+        None => vorbereitet
+            .as_ref()
+            .and_then(datenbank::Vorbereitet::fall)
+            .map(|c| c.0),
     };
     let mft_timeline_file = match &cli.mft_timeline {
         Some(p) => Some((
@@ -472,7 +511,7 @@ fn main() -> Result<()> {
         (Some(analyzer), Some(info))
     };
 
-    let mut kontext = if cli.modell.is_some() {
+    let mut kontext = if cli.modell.is_some() || cli.db {
         Some(kontext_bilden(&img, hashes.as_ref(), fall_id, &ctx))
     } else {
         None
@@ -480,7 +519,7 @@ fn main() -> Result<()> {
 
     // Fall, Evidence und Lauf vor der Analyse registrieren; Katalog und
     // Modell gehören dann zu diesem Lauf.
-    let mut sitzung = match (cli.db, &hashes, &kontext) {
+    let mut sitzung = match (cli.db, &hashes, &mut kontext) {
         (true, Some(h), Some((k, _))) => {
             let mut namen: Vec<&str> = analyzers.iter().map(|a| a.name()).collect();
             if keyword_analyzer.is_some() {
@@ -521,7 +560,8 @@ fn main() -> Result<()> {
                     &namen,
                 ),
             };
-            Some(auftrag.beginnen(k)?)
+            let v = vorbereitet.take().context("Datenbankverbindung fehlt")?;
+            Some(auftrag.beginnen(v, k)?)
         }
         _ => None,
     };
@@ -739,13 +779,13 @@ fn main() -> Result<()> {
 
     stratum_analysis::assign_ids(&mut analysis.findings);
     let timeline = stratum_analysis::build_timeline(&analysis.findings);
-    let modell = match (modell_file, kontext.take()) {
-        (Some((path, file)), Some(k)) => {
-            let info = modell_schreiben((&path, file), k, &analysis.findings, sitzung.as_ref())?;
+    let modell = match kontext.take() {
+        Some(k) => {
+            let info = modell_schreiben(modell_file, k, &analysis.findings, sitzung.as_ref())?;
             warnings.extend(info.hinweise.iter().map(|h| format!("Modell: {h}")));
             Some(info)
         }
-        _ => None,
+        None => None,
     };
     eprintln!("[+] Zeitstrahl mit {} Ereignissen", timeline.len());
 
@@ -989,6 +1029,33 @@ fn ewf_report(
     }
 }
 
+/// Evidence-ID aus Fall, SHA-256 und Art, damit dieselbe Datei im selben
+/// Fall immer dieselbe ID bekommt (bei `evidence hinzu` wie bei `--db`). E01
+/// und Rohimage derselben Mediendaten sind getrennte Evidence; das Rohimage
+/// behält die Ableitung von früher.
+fn evidence_id_ableiten(
+    fall: stratum_model::CaseId,
+    sha256: &str,
+    art: stratum_model::EvidenceKind,
+) -> stratum_model::EvidenceId {
+    use stratum_model::{ids::derived_uuid, EvidenceKind};
+    let teile: Vec<&[u8]> = match art {
+        EvidenceKind::RawDiskImage => vec![fall.0.as_bytes(), sha256.as_bytes()],
+        EvidenceKind::E01Image => vec![fall.0.as_bytes(), sha256.as_bytes(), b"e01"],
+        andere => {
+            let name = serde_json::to_value(andere)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            return stratum_model::EvidenceId(derived_uuid(
+                "cli-evidence",
+                &[fall.0.as_bytes(), sha256.as_bytes(), name.as_bytes()],
+            ));
+        }
+    };
+    stratum_model::EvidenceId(derived_uuid("cli-evidence", &teile))
+}
+
 /// Kontext für das Datenmodell: Fall- und Evidence-ID, Hash, Rechnername.
 /// Dazu Hinweise für den Report.
 fn kontext_bilden(
@@ -997,7 +1064,7 @@ fn kontext_bilden(
     fall_id: Option<uuid::Uuid>,
     ctx: &AnalysisContext<'_>,
 ) -> (stratum_normalize::Kontext, Vec<String>) {
-    use stratum_model::{ids::derived_uuid, CaseId, EvidenceId};
+    use stratum_model::{ids::derived_uuid, CaseId};
     let mut hinweise = Vec::new();
     let evidence_key = match hashes {
         Some(h) => h.sha256.clone(),
@@ -1011,18 +1078,14 @@ fn kontext_bilden(
     };
     let case_id =
         CaseId(fall_id.unwrap_or_else(|| derived_uuid("cli-fall", &[evidence_key.as_bytes()])));
-    // E01 und Rohimage derselben Mediendaten sind getrennte Evidence; das
-    // Rohimage behält die Ableitung von früher.
-    let evidence_id = EvidenceId(match img.format() {
-        stratum_core::ImageFormat::Raw => derived_uuid(
-            "cli-evidence",
-            &[case_id.0.as_bytes(), evidence_key.as_bytes()],
-        ),
-        stratum_core::ImageFormat::Ewf => derived_uuid(
-            "cli-evidence",
-            &[case_id.0.as_bytes(), evidence_key.as_bytes(), b"e01"],
-        ),
-    });
+    let evidence_id = evidence_id_ableiten(
+        case_id,
+        &evidence_key,
+        match img.format() {
+            stratum_core::ImageFormat::Raw => stratum_model::EvidenceKind::RawDiskImage,
+            stratum_core::ImageFormat::Ewf => stratum_model::EvidenceKind::E01Image,
+        },
+    );
     let tool = Tool::default();
     let k = stratum_normalize::Kontext {
         case_id,
@@ -1042,7 +1105,7 @@ fn kontext_bilden(
 /// Bildet die Funde auf das Datenmodell ab und schreibt es als JSON, mit
 /// `--db` zusätzlich in den laufenden Analyselauf.
 fn modell_schreiben(
-    (path, file): (&std::path::Path, std::fs::File),
+    datei: Option<(PathBuf, std::fs::File)>,
     (mut k, mut hinweise): (stratum_normalize::Kontext, Vec<String>),
     funde: &[stratum_analysis::RawFinding],
     db: Option<&datenbank::Sitzung>,
@@ -1051,29 +1114,38 @@ fn modell_schreiben(
     k.zeitpunkt = chrono::Utc::now();
     eprintln!("[*] Bilde Funde auf das Datenmodell ab ...");
     let mut m = stratum_normalize::normalisieren(funde, &k);
-    let mut w = std::io::BufWriter::new(stratum_core::HashingWriter::new(file));
-    serde_json::to_writer(&mut w, &m)
-        .with_context(|| format!("Modell nicht schreibbar: {}", path.display()))?;
-    let (_, datei_hashes) = w
-        .into_inner()
-        .map_err(|e| e.into_error())
-        .and_then(|h| h.finish())
-        .with_context(|| format!("Modell nicht abschließbar: {}", path.display()))?;
+    let datei_hashes = match &datei {
+        Some((path, file)) => {
+            let mut w = std::io::BufWriter::new(stratum_core::HashingWriter::new(file));
+            serde_json::to_writer(&mut w, &m)
+                .with_context(|| format!("Modell nicht schreibbar: {}", path.display()))?;
+            let (_, h) = w
+                .into_inner()
+                .map_err(|e| e.into_error())
+                .and_then(|h| h.finish())
+                .with_context(|| format!("Modell nicht abschließbar: {}", path.display()))?;
+            Some(h)
+        }
+        None => None,
+    };
     let datenbank = match db {
-        Some(s) => Some(s.modell(&m, &datei_hashes.sha256)?),
+        Some(s) => Some(s.modell(&m, datei_hashes.as_ref().map(|h| h.sha256.as_str()))?),
         None => None,
     };
     hinweise.append(&mut m.hinweise);
     eprintln!(
-        "[+] Modell: {} Ereignisse, {} Entitäten, {} Beziehungen in {}",
+        "[+] Modell: {} Ereignisse, {} Entitäten, {} Beziehungen{}",
         m.events.len(),
         m.entities.len(),
         m.relationships.len(),
-        path.display()
+        datei
+            .as_ref()
+            .map(|(p, _)| format!(" in {}", p.display()))
+            .unwrap_or_default()
     );
     let info = report::ModellInfo {
-        pfad: path.display().to_string(),
-        format: "json",
+        pfad: datei.as_ref().map(|(p, _)| p.display().to_string()),
+        format: datei.as_ref().map(|_| "json"),
         hashes: datei_hashes,
         fall_id: k.case_id.to_string(),
         evidence_id: k.evidence_id.to_string(),

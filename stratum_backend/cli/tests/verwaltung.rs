@@ -84,6 +84,33 @@ fn sql(url: &str, befehl: String) {
     });
 }
 
+/// Eigene Testdatenbank; wird beim Verlassen gelöscht, auch wenn der Test
+/// scheitert.
+struct Wegwerf {
+    url: String,
+    name: String,
+}
+
+impl Wegwerf {
+    fn neu(url: &str) -> Self {
+        let name = format!("stratum_test_{}", uuid::Uuid::now_v7().simple());
+        sql(url, format!("CREATE DATABASE {name}"));
+        Self {
+            url: url.to_string(),
+            name,
+        }
+    }
+}
+
+impl Drop for Wegwerf {
+    fn drop(&mut self) {
+        sql(
+            &self.url,
+            format!("DROP DATABASE {} WITH (FORCE)", self.name),
+        );
+    }
+}
+
 fn tokio_rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -105,10 +132,9 @@ fn ablauf_mit_datenbank() {
             std::env::set_current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
         }
     }
-    let name = format!("stratum_test_{}", uuid::Uuid::now_v7().simple());
-    sql(&url, format!("CREATE DATABASE {name}"));
+    let wegwerf = Wegwerf::neu(&url);
     let (basis, _) = url.rsplit_once('/').unwrap();
-    let neu = format!("{basis}/{name}");
+    let neu = format!("{basis}/{}", wegwerf.name);
     let tmp = tempfile::tempdir().unwrap();
     let chef = tmp.path().join("chef");
     let mia = tmp.path().join("mia");
@@ -276,5 +302,213 @@ fn ablauf_mit_datenbank() {
     assert!(pruefung.contains("\"fehler_gesamt\": 0"), "{pruefung}");
     let o = stratum(&["--audit-pruefen"], Some(&neu));
     assert!(o.status.success(), "{}", text(&o));
-    sql(&url, format!("DROP DATABASE {name} WITH (FORCE)"));
+}
+
+/// stratum nur mit Konfigurationsdatei, ohne Umgebungsvariablen der
+/// Datenbank.
+fn mit_konfig(args: &[&str], konfig: &Path) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_stratum"))
+        .args(args)
+        .env_remove("STRATUM_DB_URL")
+        .env_remove("STRATUM_DB_PASSWORT_DATEI")
+        .env_remove("STRATUM_KONTO")
+        .env("STRATUM_KONFIG", konfig)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn fall_evidence_analyse_mit_konfig() {
+    let Ok(url) = std::env::var("STRATUM_DB_URL") else {
+        eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
+        return;
+    };
+    let wegwerf = Wegwerf::neu(&url);
+    let name = &wegwerf.name;
+    let (basis, _) = url.rsplit_once('/').unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let d = tmp.path();
+    let mut konfig = format!("[datenbank]\nurl = \"{basis}/{name}\"\n");
+    if let Some(p) = db_passwort() {
+        std::fs::write(d.join("dbpw"), p).unwrap();
+        // Relativ zur Konfigurationsdatei.
+        konfig.push_str("passwort_datei = \"dbpw\"\n");
+    }
+    let k = d.join("stratum.toml");
+    std::fs::write(&k, konfig).unwrap();
+    for (n, p) in [
+        ("chef", "chef-passwort-123"),
+        ("mia", "mia-passwort-456"),
+        ("tom", "tom-passwort-789"),
+    ] {
+        std::fs::write(d.join(n), p).unwrap();
+    }
+    // Kein Image mit Partitionen: wird als „other“ registriert.
+    let bild = d.join("abbild.bin");
+    std::fs::write(&bild, vec![0u8; 1 << 20]).unwrap();
+    let pf = |n: &str| d.join(n).display().to_string();
+    let (chef, mia, tom, bild_s, bericht) = (
+        pf("chef"),
+        pf("mia"),
+        pf("tom"),
+        pf("abbild.bin"),
+        pf("r.json"),
+    );
+    let ok = |args: &[&str]| {
+        let o = mit_konfig(args, &k);
+        assert!(o.status.success(), "{args:?}: {}", text(&o));
+        text(&o)
+    };
+    let als = |n: &'static str, p: &str| -> Vec<String> {
+        vec![
+            "--als".into(),
+            n.into(),
+            "--als-passwort-datei".into(),
+            p.into(),
+        ]
+    };
+    let mitals = |a: &[&str], b: &[String]| -> Vec<String> {
+        a.iter()
+            .map(|s| s.to_string())
+            .chain(b.iter().cloned())
+            .collect()
+    };
+    let lauf = |v: Vec<String>| {
+        let r: Vec<&str> = v.iter().map(String::as_str).collect();
+        mit_konfig(&r, &k)
+    };
+
+    assert!(ok(&["konfig"]).contains(&format!("{basis}/{name}")));
+    ok(&[
+        "superadmin",
+        "einrichten",
+        "chef",
+        "--anzeigename",
+        "Chef",
+        "--passwort-datei",
+        &chef,
+    ]);
+    ok(&[
+        "konto",
+        "registrieren",
+        "mia",
+        "--anzeigename",
+        "Mia",
+        "--passwort-datei",
+        &mia,
+    ]);
+    ok(&[
+        "konto",
+        "registrieren",
+        "tom",
+        "--anzeigename",
+        "Tom",
+        "--passwort-datei",
+        &tom,
+    ]);
+    let o = lauf(mitals(
+        &["konto", "freigeben", "mia", "--rolle", "Forensic Examiner"],
+        &als("chef", &chef),
+    ));
+    assert!(o.status.success(), "{}", text(&o));
+    let o = lauf(mitals(
+        &["konto", "freigeben", "tom", "--rolle", "Analyst"],
+        &als("chef", &chef),
+    ));
+    assert!(o.status.success(), "{}", text(&o));
+    let o = lauf(mitals(
+        &[
+            "fall",
+            "neu",
+            "F-1",
+            "--titel",
+            "Test",
+            "--ordner",
+            d.to_str().unwrap(),
+        ],
+        &als("chef", &chef),
+    ));
+    assert!(o.status.success(), "{}", text(&o));
+    // Ohne case.create kein Fall.
+    let o = lauf(mitals(
+        &["fall", "neu", "F-2", "--titel", "x"],
+        &als("mia", &mia),
+    ));
+    assert!(
+        !o.status.success() && text(&o).contains("case.create"),
+        "{}",
+        text(&o)
+    );
+
+    let o = lauf(mitals(
+        &["evidence", "hinzu", "F-1", &bild_s, "--rolle", "Test"],
+        &als("mia", &mia),
+    ));
+    let t = text(&o);
+    assert!(o.status.success(), "{t}");
+    assert!(t.contains("(other, unsupported_format)"), "{t}");
+    let id = t
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("ID"))
+        .unwrap()
+        .trim()
+        .to_string();
+
+    // Ohne analysis.start: abgelehnt, bevor das Image gehasht wird.
+    let o = lauf(mitals(
+        &[&bild_s, "--db", "--fall", "F-1", "-o", &bericht],
+        &als("tom", &tom),
+    ));
+    let t = text(&o);
+    assert!(!o.status.success() && t.contains("analysis.start"), "{t}");
+    assert!(!t.contains("Integritäts-Hashes"), "{t}");
+    assert!(!Path::new(&bericht).exists());
+
+    // Mit Recht: der Lauf nutzt die registrierte Evidence weiter.
+    let o = lauf(mitals(
+        &[&bild_s, "--db", "--fall", "F-1", "-o", &bericht],
+        &als("mia", &mia),
+    ));
+    assert!(o.status.success(), "{}", text(&o));
+    let r: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&bericht).unwrap()).unwrap();
+    assert_eq!(r["modell"]["evidence_id"], id.as_str());
+    assert!(r["modell"].get("pfad").is_none());
+    let o = lauf(mitals(&["fall", "zeigen", "F-1"], &als("mia", &mia)));
+    let t = text(&o);
+    assert!(t.contains("Evidence    1") && t.contains(&id), "{t}");
+
+    let o = lauf(mitals(
+        &["audit", "liste", "--anzahl", "10", "--json"],
+        &als("chef", &chef),
+    ));
+    assert!(o.status.success(), "{}", text(&o));
+    let ereignisse: Vec<serde_json::Value> = serde_json::from_slice(&o.stdout).unwrap();
+    let kurz: Vec<String> = ereignisse
+        .iter()
+        .rev()
+        .map(|e| {
+            format!(
+                "{} {} {}",
+                e["action"].as_str().unwrap(),
+                e["result"].as_str().unwrap(),
+                e["akteur"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        kurz,
+        [
+            "LOGIN success tom",
+            "ANALYSIS_START denied tom",
+            "LOGIN success mia",
+            "EVIDENCE_VERIFY success mia",
+            "ANALYSIS_START success mia",
+            "ANALYSIS_COMPLETE success mia",
+            "REPORT_CREATE success mia",
+            "LOGIN success mia",
+            "CASE_OPEN success mia",
+            "LOGIN success chef",
+        ]
+    );
 }

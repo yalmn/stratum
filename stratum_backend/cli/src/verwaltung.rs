@@ -6,11 +6,14 @@
 //! `stratum-cli`, das nur den ersten Superadmin einrichten darf. Ob eine
 //! Aktion erlaubt ist, entscheidet der Store; Ablehnungen stehen im Audit.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
-use stratum_model::{ActorId, Permission, Role, RoleId};
+use stratum_model::{
+    ActorId, Case, CaseClassification, CaseId, CaseStatus, Evidence, EvidenceKind, EvidenceSupport,
+    Permission, Role, RoleId,
+};
 use stratum_store::Datenbank;
 
 use crate::datenbank;
@@ -27,8 +30,17 @@ pub enum Befehl {
     /// Rollen anlegen, ändern, löschen und auflisten.
     #[command(subcommand)]
     Rolle(RolleBefehl),
+    /// Fälle anlegen, auflisten und ansehen.
+    #[command(subcommand)]
+    Fall(FallBefehl),
+    /// Evidence in einem Fall registrieren.
+    #[command(subcommand)]
+    Evidence(EvidenceBefehl),
     /// Katalog aller Berechtigungen ausgeben.
     Rechte,
+    /// Zeigen, welche Konfiguration gilt (Datei, Datenbank, Konto; ohne
+    /// Passwörter).
+    Konfig,
     /// Audit lesen und nachrechnen.
     #[command(subcommand)]
     Audit(AuditBefehl),
@@ -43,6 +55,71 @@ pub struct Als {
     /// Passwort des handelnden Kontos aus dieser Datei statt der Abfrage.
     #[arg(long, value_name = "DATEI", requires = "als")]
     als_passwort_datei: Option<PathBuf>,
+}
+
+/// Unterbefehle zu Fällen.
+#[derive(Debug, Subcommand)]
+pub enum FallBefehl {
+    /// Fall anlegen (braucht case.create).
+    Neu {
+        /// Fallnummer, z. B. DFIR-2026-0017 (eindeutig).
+        nummer: String,
+        /// Titel.
+        #[arg(long)]
+        titel: String,
+        /// Fallordner auf dem Server, in dem die Evidence liegt.
+        #[arg(long, value_name = "ORDNER")]
+        ordner: Option<PathBuf>,
+        /// Beschreibung.
+        #[arg(long)]
+        beschreibung: Option<String>,
+        /// Einstufung: open, internal, confidential, strictly_confidential.
+        #[arg(long, default_value = "internal")]
+        einstufung: String,
+        /// Zeitzone für die Anzeige (z. B. Europe/Berlin); Analysezeiten
+        /// bleiben UTC.
+        #[arg(long)]
+        zeitzone: Option<String>,
+        #[command(flatten)]
+        als: Als,
+    },
+    /// Alle Fälle (braucht case.view).
+    Liste {
+        #[command(flatten)]
+        als: Als,
+    },
+    /// Fall mit seiner Evidence (braucht case.view und evidence.view).
+    Zeigen {
+        /// Fallnummer.
+        nummer: String,
+        #[command(flatten)]
+        als: Als,
+    },
+}
+
+/// Unterbefehle zu Evidence.
+#[derive(Debug, Subcommand)]
+pub enum EvidenceBefehl {
+    /// Datei im Fall registrieren und hashen (braucht evidence.import). Die
+    /// Art wird am Format erkannt; nicht unterstützte Arten werden trotzdem
+    /// registriert und gehasht.
+    Hinzu {
+        /// Fallnummer.
+        fall: String,
+        /// Datei (Image, Mitschnitt, Speicherabbild …); nur lesend geöffnet.
+        datei: PathBuf,
+        /// Anzeigename (Standard: Dateiname).
+        #[arg(long)]
+        name: Option<String>,
+        /// System oder Rolle, zu der die Evidence gehört (z. B. Webserver).
+        #[arg(long)]
+        rolle: Option<String>,
+        /// Art statt der Erkennung, z. B. memory_dump, log_bundle, pcap.
+        #[arg(long)]
+        art: Option<String>,
+        #[command(flatten)]
+        als: Als,
+    },
 }
 
 /// Unterbefehle zu Superadmins.
@@ -237,18 +314,38 @@ fn passwort(datei: Option<&PathBuf>, frage: &str, wiederholen: bool) -> Result<S
     Ok(p)
 }
 
-/// Meldet das handelnde Konto an; ohne `--als` das Systemkonto.
-fn akteur(rt: &tokio::runtime::Runtime, db: &Datenbank, als: &Als) -> Result<ActorId> {
-    let Some(name) = &als.als else {
-        return Ok(ActorId::cli());
+/// Meldet `als` an; ohne Angabe das Konto aus `stratum.toml` bzw.
+/// `STRATUM_KONTO`, sonst handelt das Systemkonto `stratum-cli`.
+pub fn anmelden(
+    rt: &tokio::runtime::Runtime,
+    db: &Datenbank,
+    als: Option<&str>,
+    passwort_datei: Option<&Path>,
+) -> Result<ActorId> {
+    let name = match als {
+        Some(n) => n.to_string(),
+        None => match crate::konfig::konfig()?.konto() {
+            Some(n) => n,
+            None => return Ok(ActorId::cli()),
+        },
     };
     let p = passwort(
-        als.als_passwort_datei.as_ref(),
+        passwort_datei.map(Path::to_path_buf).as_ref(),
         &format!("Passwort für {name}: "),
         false,
     )?;
-    let u = rt.block_on(db.anmelden(name, &p))?;
+    let u = rt.block_on(db.anmelden(&name, &p))?;
     Ok(u.id)
+}
+
+/// Meldet das handelnde Konto an (siehe [`anmelden`]).
+fn akteur(rt: &tokio::runtime::Runtime, db: &Datenbank, als: &Als) -> Result<ActorId> {
+    anmelden(
+        rt,
+        db,
+        als.als.as_deref(),
+        als.als_passwort_datei.as_deref(),
+    )
 }
 
 fn konto_id(rt: &tokio::runtime::Runtime, db: &Datenbank, name: &str) -> Result<ActorId> {
@@ -296,15 +393,32 @@ fn rollennamen(rollen: &[Role], ids: &[RoleId]) -> String {
 
 /// Führt einen Unterbefehl aus.
 pub fn ausfuehren(b: Befehl) -> Result<()> {
-    if let Befehl::Rechte = b {
-        for p in Permission::ALL {
-            println!("{:<27} {}", p.name(), p.description());
+    match b {
+        Befehl::Rechte => {
+            for p in Permission::ALL {
+                println!("{:<27} {}", p.name(), p.description());
+            }
+            return Ok(());
         }
-        return Ok(());
+        Befehl::Konfig => {
+            let k = crate::konfig::konfig()?;
+            let zeile = |n: &str, w: Option<String>| {
+                println!("{n:<16}{}", w.unwrap_or_else(|| "(nicht gesetzt)".into()));
+            };
+            zeile("Datei", k.pfad().map(|p| p.display().to_string()));
+            zeile("Datenbank", k.db_url());
+            zeile(
+                "Passwortdatei",
+                k.db_passwort_datei().map(|p| p.display().to_string()),
+            );
+            zeile("Konto (--als)", k.konto());
+            return Ok(());
+        }
+        _ => {}
     }
     let (rt, db) = datenbank::verbinden()?;
     match b {
-        Befehl::Rechte => unreachable!("oben behandelt"),
+        Befehl::Rechte | Befehl::Konfig => unreachable!("oben behandelt"),
         Befehl::Superadmin(s) => match s {
             SuperadminBefehl::Einrichten {
                 name,
@@ -313,7 +427,12 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
                 als,
             } => {
                 stratum_store::anmeldename_pruefen(&name)?;
-                let a = akteur(&rt, &db, &als)?;
+                // Ohne --als handelt hier immer das Systemkonto (erste
+                // Einrichtung), auch wenn stratum.toml ein Konto vorgibt.
+                let a = match &als.als {
+                    Some(_) => akteur(&rt, &db, &als)?,
+                    None => ActorId::cli(),
+                };
                 let p = passwort(
                     passwort_datei.as_ref(),
                     &format!("Neues Passwort für {name}: "),
@@ -330,6 +449,8 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
             }
         },
         Befehl::Konto(k) => konto(&rt, &db, k)?,
+        Befehl::Fall(f) => fall(&rt, &db, f)?,
+        Befehl::Evidence(e) => evidence(&rt, &db, e)?,
         Befehl::Rolle(r) => rolle(&rt, &db, r)?,
         Befehl::Audit(a) => match a {
             AuditBefehl::Pruefen { als } => {
@@ -516,5 +637,231 @@ fn rolle(rt: &tokio::runtime::Runtime, db: &Datenbank, r: RolleBefehl) -> Result
             eprintln!("[+] Rolle {name} gelöscht");
         }
     }
+    Ok(())
+}
+
+fn fall(rt: &tokio::runtime::Runtime, db: &Datenbank, f: FallBefehl) -> Result<()> {
+    match f {
+        FallBefehl::Neu {
+            nummer,
+            titel,
+            ordner,
+            beschreibung,
+            einstufung,
+            zeitzone,
+            als,
+        } => {
+            let a = akteur(rt, db, &als)?;
+            let classification: CaseClassification =
+                serde_json::from_value(serde_json::Value::String(einstufung.clone())).with_context(
+                    || format!("Einstufung {einstufung}: open, internal, confidential oder strictly_confidential"),
+                )?;
+            let ordner = match ordner {
+                Some(o) => Some(
+                    std::fs::canonicalize(&o)
+                        .with_context(|| format!("Fallordner nicht vorhanden: {}", o.display()))?
+                        .display()
+                        .to_string(),
+                ),
+                None => None,
+            };
+            let jetzt = chrono::Utc::now();
+            let c = Case {
+                id: CaseId::new(),
+                case_number: nummer.clone(),
+                title: titel,
+                description: beschreibung,
+                status: CaseStatus::Active,
+                classification,
+                created_at: jetzt,
+                created_by: a,
+                opened_at: Some(jetzt),
+                closed_at: None,
+                timezone: zeitzone,
+                case_folder: ordner,
+                tags: Vec::new(),
+            };
+            if rt.block_on(db.fall_id(&nummer))?.is_some() {
+                anyhow::bail!("Fallnummer {nummer} ist schon vergeben");
+            }
+            rt.block_on(db.fall_anlegen(a, &c))?;
+            eprintln!("[+] Fall {nummer} angelegt ({})", c.id);
+        }
+        FallBefehl::Liste { als } => {
+            let a = akteur(rt, db, &als)?;
+            let faelle = rt.block_on(db.faelle(a))?;
+            let breite = faelle
+                .iter()
+                .map(|f| f.fall.case_number.len())
+                .max()
+                .unwrap_or(0);
+            for f in faelle {
+                println!(
+                    "{:<breite$}  {:<9} {:>3} Evidence  {}",
+                    f.fall.case_number,
+                    text_von(&f.fall.status)?,
+                    f.evidence,
+                    f.fall.title
+                );
+            }
+        }
+        FallBefehl::Zeigen { nummer, als } => {
+            let a = akteur(rt, db, &als)?;
+            let id = rt
+                .block_on(db.fall_id(&nummer))?
+                .with_context(|| format!("kein Fall {nummer}"))?;
+            let (c, evidence) = rt.block_on(db.fall_oeffnen(a, id))?;
+            println!("Fall        {} ({})", c.case_number, c.id);
+            println!("Titel       {}", c.title);
+            println!("Stand       {}", text_von(&c.status)?);
+            println!("Einstufung  {}", text_von(&c.classification)?);
+            if let Some(o) = &c.case_folder {
+                println!("Fallordner  {o}");
+            }
+            println!("Evidence    {}", evidence.len());
+            for e in evidence {
+                println!(
+                    "  {}  {:<15} {:<18} {}{}",
+                    e.id,
+                    text_von(&e.kind)?,
+                    text_von(&e.support)?,
+                    e.name,
+                    e.role.map(|r| format!(" ({r})")).unwrap_or_default()
+                );
+                println!("      {}  SHA-256 {}", e.source_uri, e.sha256);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Name einer Aufzählung, wie serde ihn schreibt.
+fn text_von<T: serde::Serialize>(v: &T) -> Result<String> {
+    Ok(serde_json::to_value(v)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string())
+}
+
+/// Erkennt die Art am Format. Nur Formate mit belegter Kennung; alles
+/// andere ist `other` und kann mit `--art` gesetzt werden.
+fn art_erkennen(img: &stratum_core::ImageReader) -> EvidenceKind {
+    if img.format() == stratum_core::ImageFormat::Ewf {
+        return EvidenceKind::E01Image;
+    }
+    let kopf = img
+        .read_at(0, 4)
+        .map(|k| k.into_owned())
+        .unwrap_or_default();
+    // pcap: Magic 0xa1b2c3d4 (Mikro-) bzw. 0xa1b23c4d (Nanosekunden) in
+    // der Byte-Reihenfolge des Schreibers (pcap-savefile(5)); pcapng: Section
+    // Header Block 0x0A0D0D0A (IETF draft-ietf-opsawg-pcapng).
+    match kopf.as_slice() {
+        [0xd4, 0xc3, 0xb2, 0xa1]
+        | [0xa1, 0xb2, 0xc3, 0xd4]
+        | [0x4d, 0x3c, 0xb2, 0xa1]
+        | [0xa1, 0xb2, 0x3c, 0x4d]
+        | [0x0a, 0x0d, 0x0d, 0x0a] => return EvidenceKind::Pcap,
+        _ => {}
+    }
+    match stratum_core::scan_partitions(img).scheme {
+        stratum_core::PartitionScheme::None => EvidenceKind::Other,
+        _ => EvidenceKind::RawDiskImage,
+    }
+}
+
+fn evidence(rt: &tokio::runtime::Runtime, db: &Datenbank, e: EvidenceBefehl) -> Result<()> {
+    let EvidenceBefehl::Hinzu {
+        fall,
+        datei,
+        name,
+        rolle,
+        art,
+        als,
+    } = e;
+    // Anmelden und Fall prüfen vor dem langen Hash.
+    let a = akteur(rt, db, &als)?;
+    let fall_id = rt
+        .block_on(db.fall_id(&fall))?
+        .with_context(|| format!("kein Fall {fall}"))?;
+    let img = stratum_core::ImageReader::open(&datei)
+        .with_context(|| format!("Datei nicht lesbar: {}", datei.display()))?;
+    let kind = match &art {
+        Some(t) => serde_json::from_value(serde_json::Value::String(t.clone()))
+            .with_context(|| format!("unbekannte Art {t}"))?,
+        None => art_erkennen(&img),
+    };
+    let pb = crate::bytes_bar(img.len(), "Hashing");
+    let cb: stratum_core::Progress = &|done| pb.set_position(done);
+    let h = stratum_core::hash_image_with_progress(&img, Some(cb))
+        .context("Hash nicht berechenbar (Datei beschädigt?)")?;
+    pb.finish_and_clear();
+    let ewf = img.ewf().map(|x| crate::ewf_report(x, Some(&h)));
+    if let Some(i) = &ewf {
+        for (n, stimmt) in [("MD5", i.md5_stimmt), ("SHA-1", i.sha1_stimmt)] {
+            if stimmt == Some(false) {
+                anyhow::bail!("Akquise-{n} des E01 stimmt nicht mit den Mediendaten überein");
+            }
+        }
+    }
+    // bdp.info von ForensiCUnlock neben einem Image gehört dazu.
+    let bdp = datei
+        .parent()
+        .map(|d| d.join("bdp.info"))
+        .filter(|p| p.is_file())
+        .and_then(|p| std::fs::canonicalize(p).ok());
+    let support = match kind {
+        EvidenceKind::RawDiskImage | EvidenceKind::E01Image => EvidenceSupport::Recognized,
+        _ => EvidenceSupport::UnsupportedFormat,
+    };
+    let dateiname = datei
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| datei.display().to_string());
+    let jetzt = chrono::Utc::now();
+    let ev = Evidence {
+        id: crate::evidence_id_ableiten(fall_id, &h.sha256, kind),
+        case_id: fall_id,
+        kind,
+        name: name.unwrap_or_else(|| dateiname.clone()),
+        role: rolle,
+        original_name: Some(dateiname),
+        source_uri: std::fs::canonicalize(&datei)?.display().to_string(),
+        size: img.len(),
+        sha256: h.sha256.clone(),
+        blake3: h.blake3.clone(),
+        acquired_at: img
+            .ewf()
+            .and_then(|x| x.info().acquired_unix())
+            .and_then(|u| chrono::DateTime::from_timestamp(u, 0)),
+        imported_at: jetzt,
+        imported_by: a,
+        acquisition_method: None,
+        read_only: true,
+        support,
+        parent_evidence_id: None,
+        metadata: serde_json::json!({
+            "md5": h.md5,
+            "sha1": h.sha1,
+            "ewf": ewf,
+            "bdp_info": bdp.map(|p| p.display().to_string()),
+            "art_erkannt": art.is_none(),
+        }),
+    };
+    let neu = rt.block_on(db.evidence_registrieren(a, &ev))?;
+    eprintln!(
+        "[+] Evidence {} {} ({}, {}) im Fall {fall}",
+        ev.name,
+        if neu {
+            "registriert"
+        } else {
+            "war schon registriert, Hash bestätigt"
+        },
+        text_von(&ev.kind)?,
+        text_von(&ev.support)?
+    );
+    eprintln!("    ID      {}", ev.id);
+    eprintln!("    SHA-256 {}", ev.sha256);
+    eprintln!("    BLAKE3  {}", ev.blake3);
     Ok(())
 }

@@ -55,12 +55,15 @@ pub struct Report {
 /// Verweis auf das normalisierte Datenmodell mit Hashes und Zählern.
 #[derive(Debug, Serialize)]
 pub struct ModellInfo {
-    /// Pfad der Modelldatei.
-    pub pfad: String,
+    /// Pfad der Modelldatei (nur mit `--modell`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pfad: Option<String>,
     /// Dateiformat.
-    pub format: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub format: Option<&'static str>,
     /// SHA-256 und BLAKE3 über die geschriebene Datei.
-    pub hashes: ImageHashes,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hashes: Option<ImageHashes>,
     /// Fall-ID der abgeleiteten IDs.
     pub fall_id: String,
     /// Evidence-ID.

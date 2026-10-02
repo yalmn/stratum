@@ -46,6 +46,8 @@ pub enum AuditAction {
     RoleRevoke,
     /// Fall angelegt.
     CaseCreate,
+    /// Fallliste gelesen.
+    CaseList,
     /// Fall geöffnet.
     CaseOpen,
     /// Fall geschlossen.

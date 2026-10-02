@@ -2461,6 +2461,7 @@ dependencies = [
  "stratum-store",
  "tempfile",
  "tokio",
+ "toml",
  "uuid",
 ]
 

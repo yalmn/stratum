@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 use stratum_model::{
-    ActorId, Case, CaseClassification, CaseStatus, Evidence, EvidenceKind, EvidenceSupport,
+    ActorId, Case, CaseClassification, CaseId, CaseStatus, Evidence, EvidenceKind, EvidenceSupport,
 };
 use stratum_store::{Datenbank, Geschrieben, LaufAngaben, LaufStand};
 
@@ -20,19 +20,22 @@ pub fn cli_akteur() -> ActorId {
 }
 
 /// Benutzer des Betriebssystems (bei `sudo` der aufrufende).
-fn betriebssystem_benutzer() -> Option<String> {
+pub fn betriebssystem_benutzer() -> Option<String> {
     ["SUDO_USER", "USER", "LOGNAME"]
         .iter()
         .find_map(|v| std::env::var(v).ok().filter(|s| !s.is_empty()))
 }
 
-/// Verbindet mit der Datenbank aus `STRATUM_DB_URL`, Passwort aus der Datei
-/// in `STRATUM_DB_PASSWORT_DATEI`.
+/// Verbindet mit der Datenbank: URL aus `STRATUM_DB_URL` oder
+/// `stratum.toml`, Passwort aus der Datei in `STRATUM_DB_PASSWORT_DATEI` oder
+/// `stratum.toml`.
 pub fn verbinden() -> Result<(tokio::runtime::Runtime, Datenbank)> {
-    let url = std::env::var("STRATUM_DB_URL")
-        .context("Umgebungsvariable STRATUM_DB_URL ist nicht gesetzt")?;
+    let k = crate::konfig::konfig()?;
+    let url = k.db_url().context(
+        "keine Datenbank angegeben: STRATUM_DB_URL setzen oder [datenbank] url in stratum.toml",
+    )?;
     // Passwort aus einer Datei (dieselbe, die Docker als Secret nutzt).
-    let passwort = match std::env::var_os("STRATUM_DB_PASSWORT_DATEI") {
+    let passwort = match k.db_passwort_datei() {
         Some(p) => Some(
             std::fs::read_to_string(&p)
                 .with_context(|| format!("Passwortdatei nicht lesbar: {}", p.to_string_lossy()))?
@@ -98,10 +101,66 @@ pub struct Auftrag {
     pub konfiguration: Value,
 }
 
+/// Verbindung, angemeldetes Konto und gewählter Fall, vor der Analyse
+/// hergestellt: ein falsches Passwort oder ein unbekannter Fall fällt so vor
+/// dem langen Image-Hash auf.
+pub struct Vorbereitet {
+    rt: tokio::runtime::Runtime,
+    db: Datenbank,
+    akteur: ActorId,
+    fall: Option<CaseId>,
+}
+
+impl Vorbereitet {
+    /// Verbindet, meldet `als` an (sonst das Konto aus `stratum.toml`, sonst
+    /// das Systemkonto) und löst die Fallnummer auf.
+    pub fn herstellen(
+        als: Option<&str>,
+        als_passwort_datei: Option<&std::path::Path>,
+        fall_nummer: Option<&str>,
+    ) -> Result<Self> {
+        let (rt, db) = verbinden().context("--db")?;
+        let akteur = crate::verwaltung::anmelden(&rt, &db, als, als_passwort_datei)?;
+        let fall = match fall_nummer {
+            Some(n) => Some(rt.block_on(db.fall_id(n))?.with_context(|| {
+                format!("kein Fall {n} (anlegen mit: stratum fall neu {n} --titel …)")
+            })?),
+            None => None,
+        };
+        // Ohne analysis.start gar nicht erst hashen; die Ablehnung steht im
+        // Audit wie bei jeder anderen Aktion.
+        rt.block_on(db.verlangen(
+            akteur,
+            stratum_model::Permission::AnalysisStart,
+            stratum_store::AuditEintrag {
+                akteur,
+                case_id: fall,
+                aktion: stratum_model::AuditAction::AnalysisStart,
+                objekt_typ: "analysis_run",
+                objekt_id: None,
+                ergebnis: stratum_model::AuditResult::Denied,
+                details: json!({"vorabpruefung": true}),
+            },
+        ))?;
+        Ok(Self {
+            rt,
+            db,
+            akteur,
+            fall,
+        })
+    }
+
+    /// Fall aus `--fall`, falls angegeben.
+    pub fn fall(&self) -> Option<CaseId> {
+        self.fall
+    }
+}
+
 /// Offene Verbindung mit dem laufenden Analyselauf.
 pub struct Sitzung {
     rt: tokio::runtime::Runtime,
     db: Datenbank,
+    akteur: ActorId,
     lauf: stratum_model::AnalysisRunId,
     fall_neu: bool,
     evidence_neu: bool,
@@ -109,11 +168,36 @@ pub struct Sitzung {
 }
 
 impl Auftrag {
-    /// Verbindet, registriert Fall und Evidence und beginnt den Lauf.
-    pub fn beginnen(&self, k: &stratum_normalize::Kontext) -> Result<Sitzung> {
-        let (rt, db) = verbinden().context("--db")?;
-        let fall = self.fall(k);
-        let evidence = self.evidence(k);
+    /// Registriert Fall (falls nicht per `--fall` gewählt) und Evidence und
+    /// beginnt den Lauf als das angemeldete Konto.
+    pub fn beginnen(&self, v: Vorbereitet, k: &mut stratum_normalize::Kontext) -> Result<Sitzung> {
+        let Vorbereitet {
+            rt,
+            db,
+            akteur: a,
+            fall: gewaehlt,
+        } = v;
+        // Im gewählten Fall schon registrierte Evidence mit diesem Hash
+        // weiterverwenden (auch wenn sie mit --art anders eingestuft wurde);
+        // bei E01 und Rohimage derselben Mediendaten die passende Art.
+        if gewaehlt.is_some() {
+            let vorhanden = rt.block_on(db.evidence_nach_hash(k.case_id, &self.hashes.sha256))?;
+            let passend = |art: EvidenceKind| match self.format {
+                stratum_core::ImageFormat::Ewf => art == EvidenceKind::E01Image,
+                stratum_core::ImageFormat::Raw => art != EvidenceKind::E01Image,
+            };
+            if let Some((id, _)) = vorhanden
+                .iter()
+                .find(|(_, art)| *art == EvidenceKind::RawDiskImage && passend(*art))
+                .or_else(|| vorhanden.iter().find(|(_, art)| passend(*art)))
+            {
+                k.evidence_id = *id;
+            }
+        }
+        let mut fall = self.fall(k);
+        fall.created_by = a;
+        let mut evidence = self.evidence(k);
+        evidence.imported_by = a;
         let konfig_hash =
             stratum_core::hash_bytes(&serde_json::to_vec(&self.konfiguration)?).sha256;
         let angaben = LaufAngaben {
@@ -122,9 +206,13 @@ impl Auftrag {
             configuration_hash: Some(&konfig_hash),
             audit_details: json!({"betriebssystem_benutzer": betriebssystem_benutzer()}),
         };
-        let a = cli_akteur();
         let (lauf, fall_neu, evidence_neu) = rt.block_on(async {
-            let fall_neu = db.fall_anlegen(a, &fall).await?;
+            // Ein gewählter Fall besteht schon; anlegen hieße case.create
+            // verlangen, das ein Analyst nicht braucht.
+            let fall_neu = match gewaehlt {
+                Some(_) => false,
+                None => db.fall_anlegen(a, &fall).await?,
+            };
             let evidence_neu = db.evidence_registrieren(a, &evidence).await?;
             let lauf = db.lauf_beginnen(a, k, &angaben).await?;
             Ok::<_, stratum_store::StoreError>((lauf, fall_neu, evidence_neu))
@@ -137,6 +225,7 @@ impl Auftrag {
         Ok(Sitzung {
             rt,
             db,
+            akteur: a,
             lauf,
             fall_neu,
             evidence_neu,
@@ -213,12 +302,12 @@ impl Sitzung {
     pub fn modell(
         &self,
         m: &stratum_normalize::Modell,
-        modell_sha256: &str,
+        modell_sha256: Option<&str>,
     ) -> Result<Geschrieben> {
         eprintln!("[*] Schreibe Modell in die Datenbank ...");
-        let mut g =
-            self.rt
-                .block_on(self.db.modell_speichern(self.lauf, m, Some(modell_sha256)))?;
+        let mut g = self
+            .rt
+            .block_on(self.db.modell_speichern(self.lauf, m, modell_sha256))?;
         g.fall_neu = self.fall_neu;
         g.evidence_neu = self.evidence_neu;
         g.dateien = self.dateien;
@@ -248,7 +337,7 @@ impl Sitzung {
         };
         self.rt
             .block_on(self.db.lauf_abschliessen(
-                cli_akteur(),
+                self.akteur,
                 self.lauf,
                 stand,
                 chrono::Utc::now(),

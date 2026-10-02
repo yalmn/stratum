@@ -254,8 +254,9 @@ impl Datenbank {
     }
 
     /// Prüft eine Berechtigung; ohne sie wird `abgelehnt` (mit Ergebnis
-    /// `denied` und der fehlenden Berechtigung) protokolliert.
-    pub(crate) async fn verlangen(
+    /// `denied` und der fehlenden Berechtigung) protokolliert. Auch für
+    /// Vorabprüfungen, bevor eine lange Arbeit beginnt.
+    pub async fn verlangen(
         &self,
         akteur: ActorId,
         p: Permission,
