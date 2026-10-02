@@ -7,6 +7,7 @@
 
 mod abruf;
 mod bdp;
+mod datenbank;
 mod extract;
 mod liveness;
 mod report;
@@ -131,12 +132,12 @@ struct Cli {
     #[arg(long, value_name = "DATEI")]
     modell: Option<PathBuf>,
 
-    /// Das Datenmodell zusätzlich in PostgreSQL schreiben. Die Verbindung
-    /// kommt aus `STRATUM_DB_URL`, das Passwort aus der Datei in
-    /// `STRATUM_DB_PASSWORT_DATEI` (nicht von der Kommandozeile, damit es
-    /// nicht in der Prozessliste steht). Das Schema wird beim ersten Mal
-    /// angelegt.
-    #[arg(long, requires = "modell")]
+    /// Das Datenmodell zusätzlich in PostgreSQL schreiben, mit Fall,
+    /// Evidence und Analyselauf. Die Verbindung kommt aus `STRATUM_DB_URL`,
+    /// das Passwort aus der Datei in `STRATUM_DB_PASSWORT_DATEI` (nicht von
+    /// der Kommandozeile, damit es nicht in der Prozessliste steht). Das
+    /// Schema wird beim ersten Mal angelegt. Braucht die Image-Hashes.
+    #[arg(long, requires = "modell", conflicts_with = "no_hash")]
     db: bool,
 
     /// Fall-ID (UUID) für das Datenmodell. Ohne Angabe wird sie aus dem
@@ -241,6 +242,7 @@ const DEFAULT_KEYWORDS: &str = include_str!("../../begriffe/strafverfolgung.toml
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let gestartet = chrono::Utc::now();
 
     if let Some(id) = &cli.fund {
         return abruf::fund(&cli.image, id);
@@ -628,17 +630,57 @@ fn main() -> Result<()> {
 
     stratum_analysis::assign_ids(&mut analysis.findings);
     let timeline = stratum_analysis::build_timeline(&analysis.findings);
+    let auftrag = match (cli.db, &hashes) {
+        (true, Some(h)) => Some(datenbank::Auftrag {
+            gestartet,
+            image: img.path().to_path_buf(),
+            format: img.format(),
+            groesse: img.len(),
+            hashes: h.clone(),
+            akquisezeit: img
+                .ewf()
+                .and_then(|e| e.info().acquired_unix())
+                .and_then(|u| chrono::DateTime::from_timestamp(u, 0)),
+            metadaten: serde_json::json!({
+                "md5": h.md5,
+                "sha1": h.sha1,
+                "ewf": ewf_info,
+                "bdp_info": cli.bdp.as_ref().map(|p| p.display().to_string()),
+            }),
+            konfiguration: datenbank::konfiguration(
+                &[
+                    ("begriffe", serde_json::json!(keywords)),
+                    ("raw_sweep", cli.raw_sweep.into()),
+                    ("check_onion", cli.check_onion.into()),
+                    (
+                        "bdp_info",
+                        serde_json::json!(cli.bdp.as_ref().map(|p| p.display().to_string())),
+                    ),
+                    ("dpapi", serde_json::json!(dpapi_art(&cli))),
+                    ("firefox_passwort", cli.firefox_password.is_some().into()),
+                    ("katalog", cli.catalog.is_some().into()),
+                    ("datei_hashes", cli.datei_hashes.into()),
+                    ("mft_timeline", cli.mft_timeline.is_some().into()),
+                    ("usn_journal", cli.usn_journal.is_some().into()),
+                ],
+                &analyzers,
+            ),
+        }),
+        _ => None,
+    };
+    let mut sitzung = None;
     let modell = match modell_file {
         Some((path, file)) => {
-            let info = modell_schreiben(
+            let (info, s) = modell_schreiben(
                 (&path, file),
                 &img,
                 hashes.as_ref(),
                 fall_id,
                 &ctx,
                 &analysis.findings,
-                cli.db,
+                auftrag.as_ref(),
             )?;
+            sitzung = s;
             warnings.extend(info.hinweise.iter().map(|h| format!("Modell: {h}")));
             Some(info)
         }
@@ -677,14 +719,39 @@ fn main() -> Result<()> {
         warnings,
     };
 
-    if let Some(path) = &cli.html {
-        let html = report_html::render(&out);
-        std::fs::write(path, html)
-            .with_context(|| format!("HTML-Report nicht schreibbar: {}", path.display()))?;
-        eprintln!("[+] HTML-Report geschrieben: {}", path.display());
+    let ergebnis = (|| {
+        if let Some(path) = &cli.html {
+            let html = report_html::render(&out);
+            std::fs::write(path, html)
+                .with_context(|| format!("HTML-Report nicht schreibbar: {}", path.display()))?;
+            eprintln!("[+] HTML-Report geschrieben: {}", path.display());
+        }
+        write_report(&out, cli.out.as_deref())
+    })();
+    // Der Lauf in der Datenbank endet mit dem Report: abgeschlossen mit
+    // dessen Hash, sonst als fehlgeschlagen.
+    if let Some(s) = sitzung {
+        let abschluss = s.abschliessen(ergebnis.as_ref().ok().map(String::as_str));
+        if ergebnis.is_ok() {
+            abschluss?;
+        } else if let Err(e) = abschluss {
+            eprintln!("[!] {e:#}");
+        }
     }
+    ergebnis.map(|_| ())
+}
 
-    write_report(&out, cli.out.as_deref())
+/// Art der DPAPI-Eingabe für die Laufkonfiguration, ohne den Wert.
+fn dpapi_art(cli: &Cli) -> Option<&'static str> {
+    if cli.dpapi_password.is_some() {
+        Some("passwort")
+    } else if cli.dpapi_sha1.is_some() {
+        Some("sha1")
+    } else if cli.dpapi_masterkey.is_some() {
+        Some("masterkey")
+    } else {
+        None
+    }
 }
 
 /// Fortschrittsbalken in Bytes. Zeichnet auf stderr und blendet sich aus, wenn
@@ -780,15 +847,16 @@ fn build_keyword_analyzer(
     Ok((KeywordAnalyzer::from_table(&table), info))
 }
 
-fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<()> {
+/// Schreibt den Report und liefert seinen SHA-256.
+fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<String> {
     let json = serde_json::to_string_pretty(report).context("Report nicht serialisierbar")?;
+    let hashes = stratum_core::hash_bytes(json.as_bytes());
     match out {
         Some(path) => {
             std::fs::write(path, &json)
                 .with_context(|| format!("Report nicht schreibbar: {}", path.display()))?;
             eprintln!("Report geschrieben: {}", path.display());
             // Fuer die Beweiskette: Pruefsummen des Reports als Beisatz schreiben.
-            let hashes = stratum_core::hash_bytes(json.as_bytes());
             let sidecar = with_extension(path, "sha256");
             let content = format!("sha256  {}\nblake3  {}\n", hashes.sha256, hashes.blake3);
             std::fs::write(&sidecar, content).with_context(|| {
@@ -803,7 +871,7 @@ fn write_report(report: &Report, out: Option<&std::path::Path>) -> Result<()> {
             stdout.write_all(b"\n")?;
         }
     }
-    Ok(())
+    Ok(hashes.sha256)
 }
 
 /// Haengt eine Endung an den Report-Pfad an (report.json -> report.json.sha256).
@@ -868,8 +936,8 @@ fn modell_schreiben(
     fall_id: Option<uuid::Uuid>,
     ctx: &AnalysisContext<'_>,
     funde: &[stratum_analysis::RawFinding],
-    db: bool,
-) -> Result<report::ModellInfo> {
+    db: Option<&datenbank::Auftrag>,
+) -> Result<(report::ModellInfo, Option<datenbank::Sitzung>)> {
     use stratum_model::{ids::derived_uuid, CaseId, EvidenceId};
     let mut hinweise = Vec::new();
     let evidence_key = match hashes {
@@ -884,10 +952,18 @@ fn modell_schreiben(
     };
     let case_id =
         CaseId(fall_id.unwrap_or_else(|| derived_uuid("cli-fall", &[evidence_key.as_bytes()])));
-    let evidence_id = EvidenceId(derived_uuid(
-        "cli-evidence",
-        &[case_id.0.as_bytes(), evidence_key.as_bytes()],
-    ));
+    // E01 und Rohimage derselben Mediendaten sind getrennte Evidence; das
+    // Rohimage behält die Ableitung von früher.
+    let evidence_id = EvidenceId(match img.format() {
+        stratum_core::ImageFormat::Raw => derived_uuid(
+            "cli-evidence",
+            &[case_id.0.as_bytes(), evidence_key.as_bytes()],
+        ),
+        stratum_core::ImageFormat::Ewf => derived_uuid(
+            "cli-evidence",
+            &[case_id.0.as_bytes(), evidence_key.as_bytes(), b"e01"],
+        ),
+    });
     let tool = Tool::default();
     let k = stratum_normalize::Kontext {
         case_id,
@@ -911,10 +987,12 @@ fn modell_schreiben(
         .map_err(|e| e.into_error())
         .and_then(|h| h.finish())
         .with_context(|| format!("Modell nicht abschließbar: {}", path.display()))?;
-    let datenbank = if db {
-        Some(in_datenbank(&k, &m, &datei_hashes.sha256)?)
-    } else {
-        None
+    let (sitzung, datenbank) = match db {
+        Some(a) => {
+            let (s, g) = a.ausfuehren(&k, &m, &datei_hashes.sha256)?;
+            (Some(s), Some(g))
+        }
+        None => (None, None),
     };
     hinweise.append(&mut m.hinweise);
     eprintln!(
@@ -924,7 +1002,7 @@ fn modell_schreiben(
         m.relationships.len(),
         path.display()
     );
-    Ok(report::ModellInfo {
+    let info = report::ModellInfo {
         pfad: path.display().to_string(),
         format: "json",
         hashes: datei_hashes,
@@ -939,42 +1017,8 @@ fn modell_schreiben(
         statistik: std::mem::take(&mut m.statistik),
         hinweise,
         datenbank,
-    })
-}
-
-/// Schreibt das Modell in PostgreSQL (`STRATUM_DB_URL`). Asynchron nur
-/// hier, in einer eigenen Laufzeit; die Analyse bleibt synchron.
-fn in_datenbank(
-    k: &stratum_normalize::Kontext,
-    m: &stratum_normalize::Modell,
-    modell_sha256: &str,
-) -> Result<stratum_store::Geschrieben> {
-    let url = std::env::var("STRATUM_DB_URL")
-        .context("--db: Umgebungsvariable STRATUM_DB_URL ist nicht gesetzt")?;
-    eprintln!("[*] Schreibe Modell in die Datenbank ...");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .context("Laufzeit für die Datenbank nicht erstellbar")?;
-    // Passwort aus einer Datei (dieselbe, die Docker als Secret nutzt).
-    let passwort = match std::env::var_os("STRATUM_DB_PASSWORT_DATEI") {
-        Some(p) => Some(
-            std::fs::read_to_string(&p)
-                .with_context(|| format!("Passwortdatei nicht lesbar: {}", p.to_string_lossy()))?
-                .trim()
-                .to_string(),
-        ),
-        None => None,
     };
-    let g = rt.block_on(async {
-        let db = stratum_store::Datenbank::verbinden_mit(&url, passwort.as_deref()).await?;
-        db.modell_speichern(k, m, Some(modell_sha256)).await
-    })?;
-    eprintln!(
-        "[+] Datenbank: Lauf {}, neu {} Artefakte, {} Ereignisse, {} Entitäten",
-        g.lauf_id, g.artefakte, g.ereignisse, g.entitaeten
-    );
-    Ok(g)
+    Ok((info, sitzung))
 }
 
 #[cfg(test)]

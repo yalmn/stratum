@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{
-    AnalysisRunId, ArtifactId, EntityId, EventId, EvidenceId, FindingId, ObservationId,
+    AnalysisRunId, ArtifactId, CaseId, EntityId, EventId, EvidenceId, FindingId, ObservationId,
     RelationshipId,
 };
 
@@ -171,6 +171,12 @@ pub enum SourceLocator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
 pub enum ObjectRef {
+    /// Fall.
+    Case(CaseId),
+    /// Evidence.
+    Evidence(EvidenceId),
+    /// Analyselauf.
+    AnalysisRun(AnalysisRunId),
     /// Artefakt.
     Artifact(ArtifactId),
     /// Observation.

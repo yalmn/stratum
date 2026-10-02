@@ -63,6 +63,8 @@ pub struct Case {
     pub closed_at: Option<DateTime<Utc>>,
     /// Zeitzone für die Anzeige (Analysezeiten bleiben UTC).
     pub timezone: Option<String>,
+    /// Fallordner auf dem Server, in dem die Evidence-Dateien liegen.
+    pub case_folder: Option<String>,
     /// Schlagworte.
     pub tags: Vec<TagId>,
 }

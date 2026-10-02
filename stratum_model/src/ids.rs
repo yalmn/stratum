@@ -101,6 +101,11 @@ id_typ!(
     TagId
 );
 verwaltung!(TagId);
+id_typ!(
+    /// Beziehung zwischen zwei Evidence-Objekten.
+    EvidenceRelationId
+);
+verwaltung!(EvidenceRelationId);
 
 id_typ!(
     /// Forensisches Objekt in einer Evidence (abgeleitet).

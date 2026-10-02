@@ -30,11 +30,13 @@ pub use artifact::{Artifact, ArtifactKind};
 pub use case::{Case, CaseClassification, CaseStatus};
 pub use entity::{canonical, Entity, EntityKind};
 pub use event::{Event, EventKind, EventParticipant, ParticipantRole};
-pub use evidence::{Evidence, EvidenceKind};
+pub use evidence::{
+    Evidence, EvidenceKind, EvidenceRelation, EvidenceRelationKind, EvidenceSupport,
+};
 pub use finding::{Finding, FindingCategory, FindingDisposition, FindingPriority, FindingStatus};
 pub use ids::{
-    ActorId, AnalysisRunId, ArtifactId, CaseId, EntityId, EventId, EvidenceId, FindingId,
-    ObservationId, RelationshipId, TagId,
+    ActorId, AnalysisRunId, ArtifactId, CaseId, EntityId, EventId, EvidenceId, EvidenceRelationId,
+    FindingId, ObservationId, RelationshipId, TagId,
 };
 pub use observation::{Observation, ObservationKind};
 pub use provenance::{

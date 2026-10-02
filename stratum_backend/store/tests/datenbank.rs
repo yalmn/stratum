@@ -3,9 +3,13 @@
 //! Datei in `STRATUM_DB_PASSWORT_DATEI`.
 
 use stratum_analysis::RawFinding;
-use stratum_model::{CaseId, EvidenceId};
+use stratum_model::{
+    ActorId, Case, CaseClassification, CaseId, DerivationKind, Evidence, EvidenceId, EvidenceKind,
+    EvidenceRelation, EvidenceRelationId, EvidenceRelationKind, EvidenceSupport, Finding,
+    FindingCategory, FindingDisposition, FindingId, FindingPriority, FindingStatus,
+};
 use stratum_normalize::{normalisieren, Kontext};
-use stratum_store::Datenbank;
+use stratum_store::{Datenbank, LaufAngaben, LaufStand, StoreError};
 
 fn url() -> Option<String> {
     std::env::var("STRATUM_DB_URL").ok()
@@ -16,7 +20,7 @@ fn kontext() -> Kontext {
         // Eigener Fall je Testlauf, damit Läufe sich nicht berühren.
         case_id: CaseId(uuid::Uuid::now_v7()),
         evidence_id: EvidenceId(uuid::Uuid::now_v7()),
-        evidence_sha256: "test".into(),
+        evidence_sha256: "a".repeat(64),
         host: Some("TESTRECHNER".into()),
         stratum_version: "test".into(),
         zeitpunkt: chrono::DateTime::from_timestamp(0, 0).unwrap(),
@@ -56,11 +60,71 @@ fn funde() -> Vec<RawFinding> {
     vec![a, b]
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn modell_schreiben_und_wiederholen() {
+fn fall(k: &Kontext) -> Case {
+    Case {
+        id: k.case_id,
+        case_number: format!("TEST-{}", k.case_id),
+        title: "Test".into(),
+        description: None,
+        status: stratum_model::CaseStatus::Active,
+        classification: CaseClassification::Internal,
+        created_at: k.zeitpunkt,
+        created_by: ActorId::new(),
+        opened_at: None,
+        closed_at: None,
+        timezone: None,
+        case_folder: Some("/faelle/test".into()),
+        tags: Vec::new(),
+    }
+}
+
+fn evidence(k: &Kontext, id: EvidenceId, sha256: &str, kind: EvidenceKind) -> Evidence {
+    Evidence {
+        id,
+        case_id: k.case_id,
+        kind,
+        name: "merged.dd".into(),
+        role: Some("Arbeitsplatz".into()),
+        original_name: None,
+        source_uri: "/faelle/test/merged.dd".into(),
+        size: 85_899_345_920,
+        sha256: sha256.into(),
+        blake3: "b".repeat(64),
+        acquired_at: None,
+        imported_at: k.zeitpunkt,
+        imported_by: ActorId::new(),
+        acquisition_method: None,
+        read_only: true,
+        support: EvidenceSupport::Recognized,
+        parent_evidence_id: None,
+        metadata: serde_json::json!({"bdp_info": "bdp.info"}),
+    }
+}
+
+fn finding(k: &Kontext, derivation: DerivationKind, m: &stratum_normalize::Modell) -> Finding {
+    Finding {
+        id: FindingId::new(),
+        case_id: k.case_id,
+        title: "Anmeldung".into(),
+        description: None,
+        category: FindingCategory::UserActivity,
+        status: FindingStatus::New,
+        priority: FindingPriority::Low,
+        disposition: FindingDisposition::Unknown,
+        derivation,
+        entity_refs: Vec::new(),
+        event_refs: vec![m.events[0].id],
+        artifact_refs: vec![m.artifacts[0].id],
+        created_at: k.zeitpunkt,
+        created_by: ActorId::new(),
+        updated_at: k.zeitpunkt,
+    }
+}
+
+async fn verbinden() -> Option<Datenbank> {
     let Some(url) = url() else {
         eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
-        return;
+        return None;
     };
     // cargo test läuft im Ordner des Crates; ein relativer Pfad ist wie bei
     // stratum selbst vom Projektverzeichnis aus gemeint.
@@ -78,13 +142,51 @@ async fn modell_schreiben_und_wiederholen() {
             .trim()
             .to_string()
     });
-    let db = Datenbank::verbinden_mit(&url, passwort.as_deref())
-        .await
-        .expect("Verbindung");
+    Some(
+        Datenbank::verbinden_mit(&url, passwort.as_deref())
+            .await
+            .expect("Verbindung"),
+    )
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn modell_schreiben_und_wiederholen() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
     let k = kontext();
     let m = normalisieren(&funde(), &k);
+    let konfiguration = serde_json::json!({"keywords": false});
+    let angaben = LaufAngaben {
+        started_at: k.zeitpunkt,
+        configuration: &konfiguration,
+        configuration_hash: Some("c0ffee"),
+        model_sha256: Some("abc"),
+    };
 
-    let erst = db.modell_speichern(&k, &m, Some("abc")).await.unwrap();
+    assert!(db.fall_anlegen(&fall(&k)).await.unwrap());
+    assert!(!db.fall_anlegen(&fall(&k)).await.unwrap());
+    let ev = evidence(
+        &k,
+        k.evidence_id,
+        &k.evidence_sha256,
+        EvidenceKind::RawDiskImage,
+    );
+    assert!(db.evidence_registrieren(&ev).await.unwrap());
+    assert!(!db.evidence_registrieren(&ev).await.unwrap());
+    // Gleiche ID mit anderem Inhalt: abgelehnt, nichts verändert.
+    let falsch = evidence(
+        &k,
+        k.evidence_id,
+        &"f".repeat(64),
+        EvidenceKind::RawDiskImage,
+    );
+    assert!(matches!(
+        db.evidence_registrieren(&falsch).await,
+        Err(StoreError::EvidenceAbweichung { .. })
+    ));
+
+    let erst = db.modell_speichern(&k, &m, &angaben).await.unwrap();
     assert_eq!(erst.artefakte, m.artifacts.len() as u64);
     assert_eq!(erst.ereignisse, m.events.len() as u64);
     assert_eq!(erst.beteiligungen, m.participants.len() as u64);
@@ -92,7 +194,7 @@ async fn modell_schreiben_und_wiederholen() {
     assert_eq!(erst.herkunftsangaben, m.provenance.len() as u64);
 
     // Zweiter Lauf: dieselben IDs, nichts kommt doppelt hinzu.
-    let zweit = db.modell_speichern(&k, &m, Some("abc")).await.unwrap();
+    let zweit = db.modell_speichern(&k, &m, &angaben).await.unwrap();
     assert_eq!(zweit.artefakte, 0);
     assert_eq!(zweit.ereignisse, 0);
     assert_eq!(zweit.beteiligungen, 0);
@@ -131,4 +233,122 @@ async fn modell_schreiben_und_wiederholen() {
     .unwrap();
     assert_eq!(utc.to_rfc3339(), "2026-04-18T09:44:44.668011+00:00");
     assert_eq!(original, "134209790846680107");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn lauf_finding_und_evidence_beziehung() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    let k = kontext();
+    let m = normalisieren(&funde(), &k);
+    let konfiguration = serde_json::json!({});
+    let angaben = LaufAngaben {
+        started_at: k.zeitpunkt,
+        configuration: &konfiguration,
+        configuration_hash: None,
+        model_sha256: None,
+    };
+    db.fall_anlegen(&fall(&k)).await.unwrap();
+    let ev = evidence(
+        &k,
+        k.evidence_id,
+        &k.evidence_sha256,
+        EvidenceKind::RawDiskImage,
+    );
+    db.evidence_registrieren(&ev).await.unwrap();
+
+    // Ohne registrierte Evidence kein Lauf.
+    let mut fremd = kontext();
+    fremd.case_id = k.case_id;
+    assert!(db.modell_speichern(&fremd, &m, &angaben).await.is_err());
+
+    let g = db.modell_speichern(&k, &m, &angaben).await.unwrap();
+    let ende = k.zeitpunkt + chrono::Duration::seconds(5);
+    db.lauf_abschliessen(g.lauf_id, LaufStand::Completed, ende, Some("d00d"))
+        .await
+        .unwrap();
+    let (stand, bericht, support): (String, String, String) = sqlx::query_as(
+        "SELECT r.status, r.report_sha256, e.support FROM analysis_run r \
+         JOIN evidence e ON e.id = r.evidence_id WHERE r.id = $1",
+    )
+    .bind(g.lauf_id.0)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        (stand.as_str(), bericht.as_str(), support.as_str()),
+        ("completed", "d00d", "analyzed")
+    );
+    // Ein abgeschlossener Lauf lässt sich nicht noch einmal beenden.
+    assert!(db
+        .lauf_abschliessen(g.lauf_id, LaufStand::Failed, ende, None)
+        .await
+        .is_err());
+
+    // Finding mit Belegen aus diesem Fall.
+    db.finding_speichern(&finding(&k, DerivationKind::AnalystAsserted, &m))
+        .await
+        .unwrap();
+    // Beleg aus einem anderen Fall: abgelehnt, nichts geschrieben.
+    let mut fremdes = finding(&k, DerivationKind::AnalystAsserted, &m);
+    fremdes.event_refs = vec![stratum_model::EventId(uuid::Uuid::now_v7())];
+    assert!(matches!(
+        db.finding_speichern(&fremdes).await,
+        Err(StoreError::FindingBeleg(1))
+    ));
+    // Vorschlag eines Sprachmodells wird nie von selbst ein Finding.
+    assert!(db
+        .finding_speichern(&finding(&k, DerivationKind::AiSuggested, &m))
+        .await
+        .is_err());
+    let zahlen = db.zaehlen(k.case_id.0).await.unwrap();
+    assert!(zahlen.contains(&("finding".to_string(), 1)));
+
+    // E01 mit denselben Mediendaten: von selbst als gleiche Quelle verknüpft.
+    let e01 = evidence(
+        &k,
+        EvidenceId::new(),
+        &k.evidence_sha256,
+        EvidenceKind::E01Image,
+    );
+    db.evidence_registrieren(&e01).await.unwrap();
+    let (art, herkunft): (String, String) = sqlx::query_as(
+        "SELECT kind, derivation FROM evidence_relation WHERE source_evidence_id = $1 \
+         AND target_evidence_id = $2",
+    )
+    .bind(e01.id.0)
+    .bind(k.evidence_id.0)
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        (art.as_str(), herkunft.as_str()),
+        ("SAME_SOURCE", "derived")
+    );
+    // Zusätzlich vom Analysten: das Rohimage ist aus dem E01 entpackt.
+    let r = EvidenceRelation {
+        id: EvidenceRelationId::new(),
+        case_id: k.case_id,
+        source_evidence_id: k.evidence_id,
+        target_evidence_id: e01.id,
+        kind: EvidenceRelationKind::DerivedFrom,
+        derivation: DerivationKind::AnalystAsserted,
+        note: Some("mit ewfexport entpackt".into()),
+        created_at: k.zeitpunkt,
+        created_by: None,
+    };
+    assert!(db.evidence_beziehung(&r).await.unwrap());
+    assert!(!db.evidence_beziehung(&r).await.unwrap());
+    // Evidence eines anderen Falls lässt sich nicht verknüpfen.
+    let k2 = kontext();
+    db.fall_anlegen(&fall(&k2)).await.unwrap();
+    let anderer = evidence(&k2, k2.evidence_id, &k2.evidence_sha256, EvidenceKind::Pcap);
+    db.evidence_registrieren(&anderer).await.unwrap();
+    let quer = EvidenceRelation {
+        id: EvidenceRelationId::new(),
+        target_evidence_id: anderer.id,
+        ..r
+    };
+    assert!(db.evidence_beziehung(&quer).await.is_err());
 }

@@ -578,6 +578,33 @@ Mikrosekunde gerundet; die verlustfreie Zeit mit Originalwert steht in
 `occurred_at`. Am Testimage (rund 8.400 Artefakte, 7.600 Ereignisse) dauert
 das Schreiben etwa 4 Sekunden und belegt 33 MB.
 
+Zu jedem Lauf legt stratum den Fall (`case_file`) und die Evidence an,
+falls es sie noch nicht gibt. Ein Fall hat beliebig viele Evidence-Objekte
+verschiedener Art (Images, später Speicherabbilder, Mitschnitte, Logs) mit
+Größe, SHA-256, BLAKE3, Akquiseangaben und dem Stand der Auswertbarkeit
+(`recognized`, `analyzed`, `unsupported_format`, `key_missing`). Ohne
+eigene Angaben heißt der Fall `CLI-<Fall-ID>`, der Ordner des Images gilt
+als Fallordner; Titel und Stand eines vorhandenen Falls ändert stratum
+nicht. Eine Evidence wird nie verändert: kommt unter derselben ID ein
+anderer SHA-256, bricht der Lauf ab. E01 und Rohimage derselben
+Mediendaten sind zwei Evidence im selben Fall und werden von selbst als
+`SAME_SOURCE` verknüpft; weitere Beziehungen (`DERIVED_FROM`,
+`BELONGS_TO`, `PART_OF`) stehen in `evidence_relation`.
+
+Der Analyselauf (`analysis_run`) trägt Beginn, Ende, Stand, die
+Konfiguration des Laufs samt SHA-256 (Analyzer, Begriffslisten, Optionen;
+Passwörter und Schlüssel nur als Art, nie mit Wert) und den SHA-256 des
+Reports. Er beginnt als `running` und wird erst nach dem Schreiben des
+Reports `completed`; scheitert der Report, endet er als `failed`. `--db`
+geht nur mit Image-Hash, also nicht zusammen mit `--no-hash`.
+
+Findings (`finding`, `finding_ref`) sind fachliche Bewertungen mit Belegen
+aus Entitäten, Ereignissen und Artefakten desselben Falls. Ein Vorschlag
+eines Sprachmodells (`ai_suggested`) kann kein Finding sein; das prüft die
+Datenbank selbst. Ergebnisse späterer Korrelationsregeln landen als
+Beziehung oder Ereignis mit `derivation = 'correlated'`, die Regel steht in
+der Herkunft.
+
 ## E01-Images
 
 stratum liest Expert-Witness-Images (EWF-E01, von EnCase 1 bis 7, FTK Imager,

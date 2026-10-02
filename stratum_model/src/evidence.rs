@@ -4,7 +4,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
-use crate::ids::{ActorId, CaseId, EvidenceId};
+use crate::ids::{ActorId, CaseId, EvidenceId, EvidenceRelationId};
+use crate::provenance::DerivationKind;
 
 /// Art eines Beweisobjekts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -44,6 +45,22 @@ pub enum EvidenceKind {
     Other,
 }
 
+/// Wie weit stratum ein Beweisobjekt auswerten kann. Erkennung, erfolgreiche
+/// Auswertung und fehlende Schlüssel werden getrennt ausgewiesen; nicht
+/// unterstützte Arten werden trotzdem registriert und gehasht.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceSupport {
+    /// Registriert und gehasht, noch nicht ausgewertet.
+    Recognized,
+    /// Mindestens ein Analyselauf ist abgeschlossen.
+    Analyzed,
+    /// Format wird (noch) nicht unterstützt.
+    UnsupportedFormat,
+    /// Format bekannt, aber verschlüsselt und ohne Schlüssel.
+    KeyMissing,
+}
+
 /// Ein Beweisobjekt in einem Fall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Evidence {
@@ -55,6 +72,8 @@ pub struct Evidence {
     pub kind: EvidenceKind,
     /// Anzeigename.
     pub name: String,
+    /// System oder Rolle, zu der die Evidence gehört (z. B. „Webserver“).
+    pub role: Option<String>,
     /// Ursprünglicher Dateiname.
     pub original_name: Option<String>,
     /// Ablageort (Pfad oder URI).
@@ -75,8 +94,49 @@ pub struct Evidence {
     pub acquisition_method: Option<String>,
     /// Nur lesend eingebunden (immer `true` bei stratum).
     pub read_only: bool,
+    /// Stand der Auswertbarkeit.
+    pub support: EvidenceSupport,
     /// Übergeordnete Evidence (z. B. bei extrahierten Dateien).
     pub parent_evidence_id: Option<EvidenceId>,
     /// Weitere Angaben (z. B. Akquisedaten und Akquise-Hashes eines E01).
     pub metadata: JsonValue,
+}
+
+/// Art der Beziehung zwischen zwei Beweisobjekten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EvidenceRelationKind {
+    /// Quelle ist aus dem Ziel entstanden (z. B. Rohimage aus einem E01,
+    /// entschlüsseltes Image aus dem verschlüsselten).
+    DerivedFrom,
+    /// Beide stammen vom selben Datenträger oder Gerät.
+    SameSource,
+    /// Quelle gehört zum Ziel (z. B. USB-Image zum Rechner).
+    BelongsTo,
+    /// Quelle ist ein Teil des Ziels (z. B. ein Segment).
+    PartOf,
+}
+
+/// Beziehung zwischen zwei Beweisobjekten desselben Falls.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceRelation {
+    /// ID (UUIDv7).
+    pub id: EvidenceRelationId,
+    /// Fall.
+    pub case_id: CaseId,
+    /// Quelle.
+    pub source_evidence_id: EvidenceId,
+    /// Ziel.
+    pub target_evidence_id: EvidenceId,
+    /// Art.
+    pub kind: EvidenceRelationKind,
+    /// Wie die Beziehung entstanden ist (von stratum erkannt oder vom
+    /// Analysten gesetzt).
+    pub derivation: DerivationKind,
+    /// Begründung oder Notiz.
+    pub note: Option<String>,
+    /// Angelegt am.
+    pub created_at: DateTime<Utc>,
+    /// Angelegt von, falls ein Analyst sie gesetzt hat.
+    pub created_by: Option<ActorId>,
 }
