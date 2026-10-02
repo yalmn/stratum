@@ -5,13 +5,42 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-fn stratum(args: &[&str], db: Option<&str>) -> Output {
+/// stratum in einer abgeschirmten Umgebung: festes Arbeitsverzeichnis ohne
+/// stratum.toml, HOME ohne Konfiguration, Datenbank nur wie angegeben.
+/// Tests laufen parallel in einem Prozess; das Arbeitsverzeichnis des
+/// Prozesses wird deshalb nie geändert.
+fn abgeschirmt(args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_stratum"));
-    c.args(args);
-    match db {
-        Some(url) => c.env("STRATUM_DB_URL", url),
-        None => c.env_remove("STRATUM_DB_URL"),
-    };
+    c.args(args)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .env("HOME", std::env::temp_dir().join("stratum-test-ohne-home"))
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("STRATUM_KONFIG")
+        .env_remove("STRATUM_KONTO")
+        .env_remove("STRATUM_DB_URL")
+        .env_remove("STRATUM_DB_PASSWORT_DATEI");
+    c
+}
+
+/// Passwortdatei der Datenbank als absoluter Pfad (relative Angaben gelten
+/// wie bei stratum vom Projektverzeichnis aus).
+fn db_passwort_pfad() -> Option<std::path::PathBuf> {
+    let p = std::path::PathBuf::from(std::env::var_os("STRATUM_DB_PASSWORT_DATEI")?);
+    Some(if p.is_relative() {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(p)
+    } else {
+        p
+    })
+}
+
+fn stratum(args: &[&str], db: Option<&str>) -> Output {
+    let mut c = abgeschirmt(args);
+    if let Some(url) = db {
+        c.env("STRATUM_DB_URL", url);
+        if let Some(p) = db_passwort_pfad() {
+            c.env("STRATUM_DB_PASSWORT_DATEI", p);
+        }
+    }
     c.output().unwrap()
 }
 
@@ -55,12 +84,7 @@ fn mit<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<&'a str> {
 /// Passwort der Datenbank aus `STRATUM_DB_PASSWORT_DATEI`, relative Pfade
 /// vom Projektverzeichnis aus (wie bei stratum selbst).
 fn db_passwort() -> Option<String> {
-    let p = std::path::PathBuf::from(std::env::var_os("STRATUM_DB_PASSWORT_DATEI")?);
-    let p = if p.is_relative() {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(p)
-    } else {
-        p
-    };
+    let p = db_passwort_pfad()?;
     Some(
         std::fs::read_to_string(&p)
             .unwrap_or_else(|e| panic!("Passwortdatei {} nicht lesbar: {e}", p.display()))
@@ -124,14 +148,6 @@ fn ablauf_mit_datenbank() {
         eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
         return;
     };
-    // Die Passwortdatei für die Datenbank kommt wie bei stratum selbst aus
-    // der Umgebung; relative Pfade gelten vom Projektverzeichnis aus.
-    if let Some(p) = std::env::var_os("STRATUM_DB_PASSWORT_DATEI") {
-        let p = std::path::PathBuf::from(p);
-        if p.is_relative() {
-            std::env::set_current_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
-        }
-    }
     let wegwerf = Wegwerf::neu(&url);
     let (basis, _) = url.rsplit_once('/').unwrap();
     let neu = format!("{basis}/{}", wegwerf.name);
@@ -324,11 +340,7 @@ fn ablauf_mit_datenbank() {
 /// stratum nur mit Konfigurationsdatei, ohne Umgebungsvariablen der
 /// Datenbank.
 fn mit_konfig(args: &[&str], konfig: &Path) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_stratum"))
-        .args(args)
-        .env_remove("STRATUM_DB_URL")
-        .env_remove("STRATUM_DB_PASSWORT_DATEI")
-        .env_remove("STRATUM_KONTO")
+    abgeschirmt(args)
         .env("STRATUM_KONFIG", konfig)
         .output()
         .unwrap()
