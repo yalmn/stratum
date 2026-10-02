@@ -20,11 +20,27 @@ pub enum AuditAction {
     Login,
     /// Abmeldung.
     Logout,
-    /// Benutzer angelegt.
+    /// Konto selbst registriert (wartet auf Freigabe).
+    UserRegister,
+    /// Konto angelegt (durch einen Superadmin oder bei der Einrichtung).
     UserCreate,
-    /// Rolle vergeben.
+    /// Registrierung freigegeben.
+    UserApprove,
+    /// Registrierung abgelehnt.
+    UserReject,
+    /// Konto gesperrt.
+    UserDisable,
+    /// Superadmin-Recht vergeben oder entzogen.
+    SuperadminSet,
+    /// Rolle angelegt.
+    RoleCreate,
+    /// Rolle geändert (Name, Beschreibung, Berechtigungen).
+    RoleModify,
+    /// Rolle gelöscht.
+    RoleDelete,
+    /// Rolle an ein Konto vergeben.
     RoleGrant,
-    /// Rolle entzogen.
+    /// Rolle einem Konto entzogen.
     RoleRevoke,
     /// Fall angelegt.
     CaseCreate,

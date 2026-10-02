@@ -1,14 +1,22 @@
-//! Benutzerkonten, Rollen und Anmeldung.
+//! Konten, frei definierbare Rollen, Berechtigungen und Anmeldung.
 //!
-//! Passwörter werden mit Argon2id (Standardparameter von `argon2`, zufälliges
-//! Salz) im PHC-Format gespeichert. Jede Änderung an Konten und Rollen und
-//! jede Anmeldung, auch eine abgelehnte, steht im Audit.
+//! Ablauf: Menschen registrieren sich selbst (`pending`), ein Superadmin
+//! gibt das Konto frei und vergibt Rollen. Rollen sind Bündel aus dem festen
+//! Katalog [`Permission`]; Superadmins legen sie an und ändern sie.
+//! Superadmins dürfen alles; es bleibt immer mindestens einer aktiv. Den
+//! ersten richtet das Systemkonto der Kommandozeile ein.
+//!
+//! Passwörter: Argon2id (Standardparameter von `argon2`, zufälliges Salz)
+//! im PHC-Format. Jede Änderung an Konten und Rollen und jede Anmeldung, auch
+//! eine abgelehnte, steht im Audit.
 
 use argon2::password_hash::PasswordHasher;
 use argon2::{Argon2, PasswordVerifier};
 use chrono::Utc;
-use serde_json::json;
-use stratum_model::{ActorId, AuditAction, AuditResult, Role, User, UserKind};
+use serde_json::{json, Value};
+use stratum_model::{
+    ActorId, AuditAction, AuditResult, Permission, Role, RoleId, User, UserKind, UserStatus,
+};
 
 use crate::audit::{self, AuditEintrag};
 use crate::{Datenbank, StoreError};
@@ -16,330 +24,801 @@ use crate::{Datenbank, StoreError};
 /// Mindestlänge eines Passworts.
 pub const PASSWORT_MINDESTLAENGE: usize = 12;
 
-/// Angaben für ein neues Konto.
-#[derive(Debug, Clone)]
-pub struct NeuerBenutzer<'a> {
-    /// Anmeldename (klein, `a-z 0-9 . _ -`, höchstens 64 Zeichen).
-    pub username: &'a str,
-    /// Anzeigename.
-    pub display_name: &'a str,
-    /// Art.
-    pub kind: UserKind,
-    /// Passwort, nur bei Menschen.
-    pub passwort: Option<&'a str>,
-    /// Rollen.
-    pub rollen: &'a [Role],
-}
-
 /// Gültiger PHC-Hash für ein nie vergebenes Passwort. Bei unbekanntem Namen
 /// wird dagegen geprüft, damit die Antwortzeit nicht verrät, ob es ein Konto
 /// gibt.
 const ATTRAPPE: &str =
     "$argon2id$v=19$m=19456,t=2,p=1$c3RyYXR1bWF0dHJhcHBl$x3k3jmy3XsMPQ0V1XX+Fq/qxHZwzLMd4P6mP0n1eBJ0";
 
-/// Zeile aus `app_user`: id, username, display_name, kind, active,
-/// created_at, created_by.
+/// Zeile aus `app_user`: id, username, display_name, kind, status,
+/// superadmin, created_at.
 type Kontozeile = (
     uuid::Uuid,
     String,
     String,
     String,
+    String,
     bool,
     chrono::DateTime<Utc>,
-    Option<uuid::Uuid>,
 );
 
-fn rollentext(r: Role) -> Result<String, StoreError> {
-    match serde_json::to_value(r)? {
-        serde_json::Value::String(s) => Ok(s),
-        _ => Err(StoreError::Wert("Rolle ohne Textform")),
+fn aus_text<T: serde::de::DeserializeOwned>(t: String) -> Result<T, StoreError> {
+    Ok(serde_json::from_value(Value::String(t))?)
+}
+
+fn als_text<T: serde::Serialize>(v: &T) -> Result<String, StoreError> {
+    match serde_json::to_value(v)? {
+        Value::String(s) => Ok(s),
+        _ => Err(StoreError::Wert("Aufzählung ohne Textform")),
+    }
+}
+
+fn passwort_hash(p: &str) -> Result<String, StoreError> {
+    if p.chars().count() < PASSWORT_MINDESTLAENGE {
+        return Err(StoreError::Passwort(format!(
+            "mindestens {PASSWORT_MINDESTLAENGE} Zeichen"
+        )));
+    }
+    Ok(Argon2::default()
+        .hash_password(p.as_bytes())
+        .map_err(|e| StoreError::Passwort(e.to_string()))?
+        .to_string())
+}
+
+fn rechte_namen(rechte: &[Permission]) -> Vec<&'static str> {
+    let mut n: Vec<_> = rechte.iter().map(|p| p.name()).collect();
+    n.sort_unstable();
+    n.dedup();
+    n
+}
+
+fn vergeben(e: &sqlx::Error, was: &str) -> Option<StoreError> {
+    match e.as_database_error().and_then(|d| d.code()) {
+        Some(c) if c == "23505" => Some(StoreError::Verweigert(format!("{was} vergeben"))),
+        _ => None,
+    }
+}
+
+fn eintrag(
+    akteur: ActorId,
+    aktion: AuditAction,
+    objekt_typ: &'static str,
+    objekt_id: impl ToString,
+    ergebnis: AuditResult,
+    details: Value,
+) -> AuditEintrag {
+    AuditEintrag {
+        akteur,
+        case_id: None,
+        aktion,
+        objekt_typ,
+        objekt_id: Some(objekt_id.to_string()),
+        ergebnis,
+        details,
     }
 }
 
 impl Datenbank {
-    /// Rollen eines Kontos.
-    pub async fn rollen(&self, user: ActorId) -> Result<Vec<Role>, StoreError> {
-        let texte: Vec<String> =
-            sqlx::query_scalar("SELECT role FROM user_role WHERE user_id = $1 ORDER BY role")
-                .bind(user.0)
-                .fetch_all(&self.pool)
-                .await?;
-        texte
-            .into_iter()
-            .map(|t| Ok(serde_json::from_value(serde_json::Value::String(t))?))
-            .collect()
-    }
-
     /// Konto nach Anmeldename, mit Rollen.
     pub async fn benutzer(&self, username: &str) -> Result<Option<User>, StoreError> {
         let zeile: Option<Kontozeile> = sqlx::query_as(
-            "SELECT id, username, display_name, kind, active, created_at, created_by \
-                 FROM app_user WHERE username = $1",
+            "SELECT id, username, display_name, kind, status, superadmin, created_at \
+             FROM app_user WHERE username = $1",
         )
         .bind(username)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((id, username, display_name, kind, active, created_at, created_by)) = zeile else {
+        let Some((id, username, display_name, kind, status, superadmin, created_at)) = zeile else {
             return Ok(None);
         };
+        let rollen: Vec<uuid::Uuid> =
+            sqlx::query_scalar("SELECT role_id FROM user_role WHERE user_id = $1 ORDER BY role_id")
+                .bind(id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(Some(User {
             id: ActorId(id),
             username,
             display_name,
-            kind: serde_json::from_value(serde_json::Value::String(kind))?,
-            active,
+            kind: aus_text(kind)?,
+            status: aus_text(status)?,
+            superadmin,
             created_at,
-            created_by: created_by.map(ActorId),
-            roles: self.rollen(ActorId(id)).await?,
+            roles: rollen.into_iter().map(RoleId).collect(),
         }))
     }
 
-    /// Ob `akteur` Konten und Rollen verwalten darf: aktiv und
-    /// Administrator. Solange es kein aktives menschliches
-    /// Administratorkonto gibt, darf das Systemkonto der Kommandozeile das
-    /// erste anlegen.
-    async fn darf_verwalten(&self, akteur: ActorId) -> Result<bool, StoreError> {
-        let admin: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM user_role r JOIN app_user u ON u.id = r.user_id \
-             WHERE r.user_id = $1 AND r.role = 'administrator' AND u.active)",
+    /// Alle Rollen mit ihren Berechtigungen, nach Name.
+    pub async fn rollen(&self) -> Result<Vec<Role>, StoreError> {
+        let zeilen: Vec<(uuid::Uuid, String, Option<String>, Vec<String>)> = sqlx::query_as(
+            "SELECT r.id, r.name, r.description, \
+             COALESCE(array_agg(p.permission ORDER BY p.permission) \
+               FILTER (WHERE p.permission IS NOT NULL), '{}') \
+             FROM app_role r LEFT JOIN role_permission p ON p.role_id = r.id \
+             GROUP BY r.id ORDER BY r.name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(zeilen
+            .into_iter()
+            .map(|(id, name, description, rechte)| Role {
+                id: RoleId(id),
+                name,
+                description,
+                permissions: rechte
+                    .iter()
+                    .filter_map(|r| Permission::from_name(r))
+                    .collect(),
+            })
+            .collect())
+    }
+
+    /// Wirksame Berechtigungen eines Kontos: keine, wenn es nicht aktiv ist;
+    /// alle für Superadmins; sonst die Vereinigung seiner Rollen.
+    pub async fn rechte(&self, akteur: ActorId) -> Result<Vec<Permission>, StoreError> {
+        let zeile: Option<(String, bool)> =
+            sqlx::query_as("SELECT status, superadmin FROM app_user WHERE id = $1")
+                .bind(akteur.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        match zeile {
+            Some((s, _)) if s != "active" => Ok(Vec::new()),
+            Some((_, true)) => Ok(Permission::ALL.to_vec()),
+            Some(_) => {
+                let namen: Vec<String> = sqlx::query_scalar(
+                    "SELECT DISTINCT p.permission FROM user_role u \
+                     JOIN role_permission p ON p.role_id = u.role_id \
+                     WHERE u.user_id = $1 ORDER BY 1",
+                )
+                .bind(akteur.0)
+                .fetch_all(&self.pool)
+                .await?;
+                Ok(namen
+                    .iter()
+                    .filter_map(|n| Permission::from_name(n))
+                    .collect())
+            }
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Ob `akteur` die Berechtigung hat.
+    pub async fn berechtigt(&self, akteur: ActorId, p: Permission) -> Result<bool, StoreError> {
+        let ja: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM app_user u WHERE u.id = $1 AND u.status = 'active' \
+             AND (u.superadmin OR EXISTS (SELECT 1 FROM user_role r \
+               JOIN role_permission p ON p.role_id = r.role_id \
+               WHERE r.user_id = u.id AND p.permission = $2)))",
         )
         .bind(akteur.0)
+        .bind(p.name())
         .fetch_one(&self.pool)
         .await?;
-        if admin {
-            return Ok(true);
-        }
-        if akteur != ActorId::cli() {
-            return Ok(false);
-        }
-        let gibt_admin: bool = sqlx::query_scalar(
-            "SELECT EXISTS (SELECT 1 FROM user_role r JOIN app_user u ON u.id = r.user_id \
-             WHERE r.role = 'administrator' AND u.active AND u.kind = 'human')",
-        )
-        .fetch_one(&self.pool)
-        .await?;
-        Ok(!gibt_admin)
+        Ok(ja)
     }
 
-    /// Protokolliert eine Ablehnung in eigener Transaktion und liefert den
-    /// passenden Fehler.
-    async fn verweigert(&self, e: AuditEintrag, grund: &str) -> StoreError {
-        if let Err(f) = self.audit(&e).await {
-            return f;
-        }
-        StoreError::Verweigert(grund.to_string())
-    }
-
-    /// Legt ein Konto mit Rollen an.
-    pub async fn benutzer_anlegen(
+    /// Prüft eine Berechtigung; ohne sie wird `abgelehnt` (mit Ergebnis
+    /// `denied` und der fehlenden Berechtigung) protokolliert.
+    pub(crate) async fn verlangen(
         &self,
         akteur: ActorId,
-        n: &NeuerBenutzer<'_>,
-    ) -> Result<User, StoreError> {
-        let mut rollen: Vec<Role> = n.rollen.to_vec();
-        rollen.sort();
-        rollen.dedup();
-        let rollen_text: Vec<String> = rollen
-            .iter()
-            .map(|r| rollentext(*r))
-            .collect::<Result<_, _>>()?;
-        let eintrag = |ergebnis, details| AuditEintrag {
-            akteur,
-            case_id: None,
-            aktion: AuditAction::UserCreate,
-            objekt_typ: "user",
-            objekt_id: Some(n.username.to_string()),
-            ergebnis,
-            details,
-        };
-        if !self.darf_verwalten(akteur).await? {
-            return Err(self
-                .verweigert(
-                    eintrag(AuditResult::Denied, json!({"rollen": rollen_text})),
-                    "nur Administratoren verwalten Konten",
-                )
-                .await);
+        p: Permission,
+        mut abgelehnt: AuditEintrag,
+    ) -> Result<(), StoreError> {
+        if self.berechtigt(akteur, p).await? {
+            return Ok(());
         }
-        let hash = match (n.kind, n.passwort) {
-            (UserKind::Human, Some(p)) if p.chars().count() >= PASSWORT_MINDESTLAENGE => Some(
-                Argon2::default()
-                    .hash_password(p.as_bytes())
-                    .map_err(|e| StoreError::Passwort(e.to_string()))?
-                    .to_string(),
-            ),
-            (UserKind::Human, _) => {
-                return Err(StoreError::Passwort(format!(
-                    "Konto für Menschen braucht ein Passwort mit mindestens \
-                     {PASSWORT_MINDESTLAENGE} Zeichen"
-                )))
+        abgelehnt.ergebnis = AuditResult::Denied;
+        match &mut abgelehnt.details {
+            Value::Object(d) => {
+                d.insert("fehlende_berechtigung".into(), p.name().into());
             }
-            (UserKind::Service, None) => None,
-            (UserKind::Service, Some(_)) => {
-                return Err(StoreError::Passwort(
-                    "Dienstkonten haben kein Passwort".into(),
-                ))
-            }
-        };
-        let user = User {
-            id: ActorId::new(),
-            username: n.username.to_string(),
-            display_name: n.display_name.to_string(),
-            kind: n.kind,
-            active: true,
-            created_at: Utc::now(),
-            created_by: Some(akteur),
-            roles: rollen.clone(),
-        };
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(
-            "INSERT INTO app_user (id, username, display_name, kind, password_hash, active, \
-             created_at, created_by) VALUES ($1, $2, $3, $4, $5, true, $6, $7)",
+            d => *d = json!({"fehlende_berechtigung": p.name()}),
+        }
+        self.audit(&abgelehnt).await?;
+        Err(StoreError::Verweigert(format!(
+            "Berechtigung {} fehlt",
+            p.name()
+        )))
+    }
+
+    async fn ist_superadmin(&self, akteur: ActorId) -> Result<bool, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM app_user WHERE id = $1 AND superadmin \
+             AND status = 'active')",
         )
-        .bind(user.id.0)
-        .bind(&user.username)
-        .bind(&user.display_name)
-        .bind(if n.kind == UserKind::Human {
-            "human"
-        } else {
-            "service"
+        .bind(akteur.0)
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Nur Superadmins verwalten Konten und Rollen; sonst Ablehnung mit
+    /// Audit.
+    async fn nur_superadmin(&self, akteur: ActorId, e: &AuditEintrag) -> Result<(), StoreError> {
+        if self.ist_superadmin(akteur).await? {
+            return Ok(());
+        }
+        self.audit(&AuditEintrag {
+            ergebnis: AuditResult::Denied,
+            ..e.clone()
         })
-        .bind(hash)
-        .bind(user.created_at)
-        .bind(akteur.0)
-        .execute(&mut *tx)
         .await?;
-        sqlx::query(
-            "INSERT INTO user_role (user_id, role, granted_at, granted_by) \
-             SELECT $1, r, $2, $3 FROM unnest($4::text[]) AS r",
+        Err(StoreError::Verweigert(
+            "nur Superadmins verwalten Konten und Rollen".into(),
+        ))
+    }
+
+    async fn aktive_superadmins(&self) -> Result<i64, StoreError> {
+        Ok(sqlx::query_scalar(
+            "SELECT count(*) FROM app_user WHERE superadmin AND status = 'active'",
         )
-        .bind(user.id.0)
-        .bind(user.created_at)
-        .bind(akteur.0)
-        .bind(&rollen_text)
-        .execute(&mut *tx)
-        .await?;
+        .fetch_one(&self.pool)
+        .await?)
+    }
+
+    /// Richtet einen Superadmin ein. Erlaubt einem aktiven Superadmin, und
+    /// dem Systemkonto der Kommandozeile nur, solange es keinen aktiven
+    /// Superadmin gibt (erste Einrichtung).
+    pub async fn superadmin_einrichten(
+        &self,
+        akteur: ActorId,
+        username: &str,
+        display_name: &str,
+        passwort: &str,
+    ) -> Result<User, StoreError> {
+        let e = eintrag(
+            akteur,
+            AuditAction::UserCreate,
+            "user",
+            username,
+            AuditResult::Success,
+            json!({"superadmin": true}),
+        );
+        let erste = akteur == ActorId::cli() && self.aktive_superadmins().await? == 0;
+        if !erste {
+            self.nur_superadmin(akteur, &e).await?;
+        }
+        let u = User {
+            id: ActorId::new(),
+            username: username.into(),
+            display_name: display_name.into(),
+            kind: UserKind::Human,
+            status: UserStatus::Active,
+            superadmin: true,
+            created_at: Utc::now(),
+            roles: Vec::new(),
+        };
+        let hash = passwort_hash(passwort)?;
+        let mut tx = self.pool.begin().await?;
+        konto_einfuegen(&mut tx, &u, Some(hash), Some(akteur)).await?;
         audit::schreiben(
             &mut tx,
             &AuditEintrag {
-                objekt_id: Some(user.id.to_string()),
-                ..eintrag(
-                    AuditResult::Success,
-                    json!({"username": user.username, "art": n.kind, "rollen": rollen_text}),
-                )
+                objekt_id: Some(u.id.to_string()),
+                details: json!({"username": username, "superadmin": true,
+                                "erste_einrichtung": erste}),
+                ..e
             },
         )
         .await?;
         tx.commit().await?;
-        Ok(user)
+        Ok(u)
     }
 
-    /// Vergibt (`vergeben = true`) oder entzieht eine Rolle.
-    pub async fn rolle_setzen(
+    /// Registriert ein Konto für einen Menschen. Es bleibt ohne Rechte und
+    /// ohne Anmeldung (`pending`), bis ein Superadmin es freigibt.
+    pub async fn registrieren(
+        &self,
+        username: &str,
+        display_name: &str,
+        passwort: &str,
+    ) -> Result<User, StoreError> {
+        let hash = passwort_hash(passwort)?;
+        let u = User {
+            id: ActorId::new(),
+            username: username.into(),
+            display_name: display_name.into(),
+            kind: UserKind::Human,
+            status: UserStatus::Pending,
+            superadmin: false,
+            created_at: Utc::now(),
+            roles: Vec::new(),
+        };
+        let mut tx = self.pool.begin().await?;
+        if let Err(f) = konto_einfuegen(&mut tx, &u, Some(hash), None).await {
+            tx.rollback().await?;
+            self.audit(&eintrag(
+                ActorId::unbekannt(),
+                AuditAction::UserRegister,
+                "user",
+                username,
+                AuditResult::Denied,
+                json!({"grund": f.to_string()}),
+            ))
+            .await?;
+            return Err(f);
+        }
+        audit::schreiben(
+            &mut tx,
+            &eintrag(
+                u.id,
+                AuditAction::UserRegister,
+                "user",
+                u.id,
+                AuditResult::Success,
+                json!({"username": username, "display_name": display_name}),
+            ),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(u)
+    }
+
+    /// Legt ein Dienstkonto (ohne Passwort) mit Rollen an.
+    pub async fn dienstkonto_anlegen(
+        &self,
+        akteur: ActorId,
+        username: &str,
+        display_name: &str,
+        rollen: &[RoleId],
+    ) -> Result<User, StoreError> {
+        let e = eintrag(
+            akteur,
+            AuditAction::UserCreate,
+            "user",
+            username,
+            AuditResult::Success,
+            json!({"art": "service", "rollen": rollen}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        let u = User {
+            id: ActorId::new(),
+            username: username.into(),
+            display_name: display_name.into(),
+            kind: UserKind::Service,
+            status: UserStatus::Active,
+            superadmin: false,
+            created_at: Utc::now(),
+            roles: rollen.to_vec(),
+        };
+        let mut tx = self.pool.begin().await?;
+        konto_einfuegen(&mut tx, &u, None, Some(akteur)).await?;
+        rollen_schreiben(&mut tx, u.id, rollen, akteur).await?;
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                objekt_id: Some(u.id.to_string()),
+                ..e
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(u)
+    }
+
+    /// Ändert den Stand eines Kontos (Freigabe, Ablehnung, Sperre).
+    async fn stand_setzen(
         &self,
         akteur: ActorId,
         user: ActorId,
-        rolle: Role,
-        vergeben: bool,
-    ) -> Result<bool, StoreError> {
-        let eintrag = |ergebnis| AuditEintrag {
+        aktion: AuditAction,
+        von: &[&str],
+        nach: UserStatus,
+        rollen: Option<&[RoleId]>,
+    ) -> Result<(), StoreError> {
+        let e = eintrag(
             akteur,
-            case_id: None,
-            aktion: if vergeben {
-                AuditAction::RoleGrant
-            } else {
-                AuditAction::RoleRevoke
-            },
-            objekt_typ: "user",
-            objekt_id: Some(user.to_string()),
-            ergebnis,
-            details: json!({"rolle": rolle}),
-        };
-        if !self.darf_verwalten(akteur).await? {
-            return Err(self
-                .verweigert(
-                    eintrag(AuditResult::Denied),
-                    "nur Administratoren verwalten Rollen",
-                )
-                .await);
+            aktion,
+            "user",
+            user,
+            AuditResult::Success,
+            json!({"rollen": rollen}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        if nach == UserStatus::Disabled
+            && self.ist_superadmin(user).await?
+            && self.aktive_superadmins().await? <= 1
+        {
+            return Err(StoreError::Verweigert(
+                "der letzte aktive Superadmin kann nicht gesperrt werden".into(),
+            ));
         }
         let mut tx = self.pool.begin().await?;
-        let geaendert = if vergeben {
-            sqlx::query(
-                "INSERT INTO user_role (user_id, role, granted_at, granted_by) \
-                 VALUES ($1, $2, now(), $3) ON CONFLICT DO NOTHING",
-            )
-            .bind(user.0)
-            .bind(rollentext(rolle)?)
-            .bind(akteur.0)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected()
-        } else {
-            // DELETE ist der Anwendung nicht erlaubt; ein Entzug läuft über
-            // die Funktion mit den Rechten des Eigentümers (Migration 0004).
-            sqlx::query_scalar::<_, i64>("SELECT rolle_entziehen($1, $2)")
-                .bind(user.0)
-                .bind(rollentext(rolle)?)
-                .fetch_one(&mut *tx)
-                .await? as u64
-        };
-        if geaendert > 0 {
-            audit::schreiben(&mut tx, &eintrag(AuditResult::Success)).await?;
+        let geaendert = sqlx::query(
+            "UPDATE app_user SET status = $2, decided_at = now(), decided_by = $3 \
+             WHERE id = $1 AND status = ANY($4)",
+        )
+        .bind(user.0)
+        .bind(als_text(&nach)?)
+        .bind(akteur.0)
+        .bind(von)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if geaendert != 1 {
+            return Err(StoreError::Verweigert(format!(
+                "Konto nicht im Stand {}",
+                von.join(" oder ")
+            )));
         }
+        if let Some(r) = rollen {
+            rollen_schreiben(&mut tx, user, r, akteur).await?;
+        }
+        audit::schreiben(&mut tx, &e).await?;
         tx.commit().await?;
-        Ok(geaendert > 0)
+        Ok(())
     }
 
-    /// Meldet ein Konto an. Abgelehnt werden unbekannte Namen, deaktivierte
-    /// Konten, Dienstkonten und falsche Passwörter, jeweils mit Audit, ohne
-    /// nach außen zu verraten, welcher Grund vorlag.
+    /// Gibt ein registriertes (oder gesperrtes) Konto frei und setzt seine
+    /// Rollen.
+    pub async fn freigeben(
+        &self,
+        akteur: ActorId,
+        user: ActorId,
+        rollen: &[RoleId],
+    ) -> Result<(), StoreError> {
+        self.stand_setzen(
+            akteur,
+            user,
+            AuditAction::UserApprove,
+            &["pending", "disabled"],
+            UserStatus::Active,
+            Some(rollen),
+        )
+        .await
+    }
+
+    /// Lehnt eine Registrierung ab.
+    pub async fn ablehnen(&self, akteur: ActorId, user: ActorId) -> Result<(), StoreError> {
+        self.stand_setzen(
+            akteur,
+            user,
+            AuditAction::UserReject,
+            &["pending"],
+            UserStatus::Rejected,
+            None,
+        )
+        .await
+    }
+
+    /// Sperrt ein Konto. Der letzte aktive Superadmin lässt sich nicht
+    /// sperren.
+    pub async fn sperren(&self, akteur: ActorId, user: ActorId) -> Result<(), StoreError> {
+        self.stand_setzen(
+            akteur,
+            user,
+            AuditAction::UserDisable,
+            &["active"],
+            UserStatus::Disabled,
+            None,
+        )
+        .await
+    }
+
+    /// Vergibt oder entzieht das Superadmin-Recht (nur aktiven Menschen; dem
+    /// letzten aktiven Superadmin nicht).
+    pub async fn superadmin_setzen(
+        &self,
+        akteur: ActorId,
+        user: ActorId,
+        ja: bool,
+    ) -> Result<(), StoreError> {
+        let e = eintrag(
+            akteur,
+            AuditAction::SuperadminSet,
+            "user",
+            user,
+            AuditResult::Success,
+            json!({"superadmin": ja}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        if !ja && self.ist_superadmin(user).await? && self.aktive_superadmins().await? <= 1 {
+            return Err(StoreError::Verweigert(
+                "der letzte aktive Superadmin bleibt Superadmin".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let n = sqlx::query(
+            "UPDATE app_user SET superadmin = $2 WHERE id = $1 AND kind = 'human' \
+             AND status = 'active' AND superadmin <> $2",
+        )
+        .bind(user.0)
+        .bind(ja)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n == 1 {
+            audit::schreiben(&mut tx, &e).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Setzt die Rollen eines Kontos auf genau die gegebene Menge.
+    pub async fn konto_rollen_setzen(
+        &self,
+        akteur: ActorId,
+        user: ActorId,
+        rollen: &[RoleId],
+    ) -> Result<(), StoreError> {
+        let e = eintrag(
+            akteur,
+            AuditAction::RoleGrant,
+            "user",
+            user,
+            AuditResult::Denied,
+            json!({"rollen": rollen}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        let mut tx = self.pool.begin().await?;
+        rollen_schreiben(&mut tx, user, rollen, akteur).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Legt eine Rolle an.
+    pub async fn rolle_anlegen(
+        &self,
+        akteur: ActorId,
+        name: &str,
+        beschreibung: Option<&str>,
+        rechte: &[Permission],
+    ) -> Result<Role, StoreError> {
+        let namen = rechte_namen(rechte);
+        let e = eintrag(
+            akteur,
+            AuditAction::RoleCreate,
+            "role",
+            name,
+            AuditResult::Success,
+            json!({"name": name, "rechte": namen}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        let r = Role {
+            id: RoleId::new(),
+            name: name.into(),
+            description: beschreibung.map(Into::into),
+            permissions: rechte.to_vec(),
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO app_role (id, name, description, created_at, created_by) \
+             VALUES ($1, $2, $3, now(), $4)",
+        )
+        .bind(r.id.0)
+        .bind(name)
+        .bind(beschreibung)
+        .bind(akteur.0)
+        .execute(&mut *tx)
+        .await
+        .map_err(|f| vergeben(&f, "Rollenname").unwrap_or(f.into()))?;
+        sqlx::query("SELECT rolle_rechte_setzen($1, $2)")
+            .bind(r.id.0)
+            .bind(&namen)
+            .execute(&mut *tx)
+            .await?;
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                objekt_id: Some(r.id.to_string()),
+                ..e
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(r)
+    }
+
+    /// Ändert Name, Beschreibung und Berechtigungen einer Rolle. Im Audit
+    /// stehen die Berechtigungen vorher und nachher.
+    pub async fn rolle_aendern(
+        &self,
+        akteur: ActorId,
+        rolle: RoleId,
+        name: &str,
+        beschreibung: Option<&str>,
+        rechte: &[Permission],
+    ) -> Result<(), StoreError> {
+        let namen = rechte_namen(rechte);
+        let mut e = eintrag(
+            akteur,
+            AuditAction::RoleModify,
+            "role",
+            rolle,
+            AuditResult::Success,
+            json!({"name": name, "rechte": namen}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        let mut tx = self.pool.begin().await?;
+        let vorher: Vec<String> = sqlx::query_scalar(
+            "SELECT permission FROM role_permission WHERE role_id = $1 ORDER BY 1",
+        )
+        .bind(rolle.0)
+        .fetch_all(&mut *tx)
+        .await?;
+        let n = sqlx::query(
+            "UPDATE app_role SET name = $2, description = $3, updated_at = now() WHERE id = $1",
+        )
+        .bind(rolle.0)
+        .bind(name)
+        .bind(beschreibung)
+        .execute(&mut *tx)
+        .await
+        .map_err(|f| vergeben(&f, "Rollenname").unwrap_or(f.into()))?
+        .rows_affected();
+        if n != 1 {
+            return Err(StoreError::Verweigert("Rolle unbekannt".into()));
+        }
+        sqlx::query("SELECT rolle_rechte_setzen($1, $2)")
+            .bind(rolle.0)
+            .bind(&namen)
+            .execute(&mut *tx)
+            .await?;
+        e.details = json!({"name": name, "rechte_vorher": vorher, "rechte": namen});
+        audit::schreiben(&mut tx, &e).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Löscht eine Rolle; Konten verlieren sie.
+    pub async fn rolle_loeschen(&self, akteur: ActorId, rolle: RoleId) -> Result<(), StoreError> {
+        let mut e = eintrag(
+            akteur,
+            AuditAction::RoleDelete,
+            "role",
+            rolle,
+            AuditResult::Success,
+            json!({}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        let mut tx = self.pool.begin().await?;
+        let name: Option<String> = sqlx::query_scalar("SELECT name FROM app_role WHERE id = $1")
+            .bind(rolle.0)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let Some(name) = name else {
+            return Err(StoreError::Verweigert("Rolle unbekannt".into()));
+        };
+        let konten: i64 = sqlx::query_scalar("SELECT rolle_loeschen($1)")
+            .bind(rolle.0)
+            .fetch_one(&mut *tx)
+            .await?;
+        e.details = json!({"name": name, "betroffene_konten": konten});
+        audit::schreiben(&mut tx, &e).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Meldet ein Konto an. Abgelehnt werden unbekannte Namen, nicht
+    /// freigegebene oder gesperrte Konten, Dienstkonten und falsche
+    /// Passwörter, jeweils mit Audit, ohne nach außen zu verraten, welcher
+    /// Grund vorlag.
     pub async fn anmelden(&self, username: &str, passwort: &str) -> Result<User, StoreError> {
-        let zeile: Option<(uuid::Uuid, Option<String>, bool)> =
-            sqlx::query_as("SELECT id, password_hash, active FROM app_user WHERE username = $1")
+        let zeile: Option<(uuid::Uuid, Option<String>, String)> =
+            sqlx::query_as("SELECT id, password_hash, status FROM app_user WHERE username = $1")
                 .bind(username)
                 .fetch_optional(&self.pool)
                 .await?;
-        let (akteur, hash, aktiv) = match &zeile {
-            Some((id, h, a)) => (ActorId(*id), h.as_deref(), *a),
-            None => (ActorId::unbekannt(), None, false),
+        let (akteur, hash, status) = match &zeile {
+            Some((id, h, s)) => (ActorId(*id), h.as_deref(), s.as_str()),
+            None => (ActorId::unbekannt(), None, ""),
         };
         // Immer einmal prüfen, damit die Dauer nichts verrät.
         let passt = Argon2::default()
             .verify_password(passwort.as_bytes(), hash.unwrap_or(ATTRAPPE))
             .is_ok();
-        let erfolg = zeile.is_some() && aktiv && hash.is_some() && passt;
-        let grund = match (&zeile, aktiv, hash.is_some(), passt) {
-            (None, _, _, _) => "unbekannter_name",
-            (_, false, _, _) => "konto_deaktiviert",
-            (_, _, false, _) => "kein_passwort",
-            (_, _, _, false) => "passwort_falsch",
-            _ => "",
+        let grund = if zeile.is_none() {
+            Some("unbekannter_name")
+        } else if status != "active" {
+            Some(match status {
+                "pending" => "nicht_freigegeben",
+                "rejected" => "abgelehnt",
+                _ => "gesperrt",
+            })
+        } else if hash.is_none() {
+            Some("kein_passwort")
+        } else if !passt {
+            Some("passwort_falsch")
+        } else {
+            None
         };
-        let e = AuditEintrag {
+        self.audit(&eintrag(
             akteur,
-            case_id: None,
-            aktion: AuditAction::Login,
-            objekt_typ: "user",
-            objekt_id: Some(username.to_string()),
-            ergebnis: if erfolg {
+            AuditAction::Login,
+            "user",
+            username,
+            if grund.is_none() {
                 AuditResult::Success
             } else {
                 AuditResult::Denied
             },
-            details: if erfolg {
-                json!({})
-            } else {
-                json!({"grund": grund})
+            match grund {
+                Some(g) => json!({"grund": g}),
+                None => json!({}),
             },
-        };
-        self.audit(&e).await?;
-        if !erfolg {
+        ))
+        .await?;
+        if grund.is_some() {
             return Err(StoreError::Verweigert("Anmeldung abgelehnt".into()));
         }
         self.benutzer(username)
             .await?
             .ok_or_else(|| StoreError::Verweigert("Anmeldung abgelehnt".into()))
     }
+}
+
+async fn konto_einfuegen(
+    tx: &mut sqlx::PgConnection,
+    u: &User,
+    hash: Option<String>,
+    durch: Option<ActorId>,
+) -> Result<(), StoreError> {
+    let entschieden = u.status != UserStatus::Pending;
+    sqlx::query(
+        "INSERT INTO app_user (id, username, display_name, kind, password_hash, status, \
+         superadmin, created_at, created_by, decided_at, decided_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(u.id.0)
+    .bind(&u.username)
+    .bind(&u.display_name)
+    .bind(als_text(&u.kind)?)
+    .bind(hash)
+    .bind(als_text(&u.status)?)
+    .bind(u.superadmin)
+    .bind(u.created_at)
+    .bind(durch.map(|a| a.0))
+    .bind(entschieden.then_some(u.created_at))
+    .bind(durch.filter(|_| entschieden).map(|a| a.0))
+    .execute(&mut *tx)
+    .await
+    .map_err(|f| vergeben(&f, "Anmeldename").unwrap_or(f.into()))?;
+    Ok(())
+}
+
+/// Setzt die Rollen eines Kontos und schreibt je vergebener und entzogener
+/// Rolle ein Audit-Ereignis.
+async fn rollen_schreiben(
+    tx: &mut sqlx::PgConnection,
+    user: ActorId,
+    rollen: &[RoleId],
+    akteur: ActorId,
+) -> Result<(), StoreError> {
+    let vorher: Vec<uuid::Uuid> =
+        sqlx::query_scalar("SELECT role_id FROM user_role WHERE user_id = $1")
+            .bind(user.0)
+            .fetch_all(&mut *tx)
+            .await?;
+    let nachher: Vec<uuid::Uuid> = rollen.iter().map(|r| r.0).collect();
+    sqlx::query("SELECT konto_rollen_setzen($1, $2, $3)")
+        .bind(user.0)
+        .bind(&nachher)
+        .bind(akteur.0)
+        .execute(&mut *tx)
+        .await?;
+    let vergeben = nachher
+        .iter()
+        .filter(|r| !vorher.contains(r))
+        .map(|r| (AuditAction::RoleGrant, r));
+    let entzogen = vorher
+        .iter()
+        .filter(|r| !nachher.contains(r))
+        .map(|r| (AuditAction::RoleRevoke, r));
+    for (aktion, rolle) in vergeben.chain(entzogen) {
+        audit::schreiben(
+            &mut *tx,
+            &eintrag(
+                akteur,
+                aktion,
+                "user",
+                user,
+                AuditResult::Success,
+                json!({"rolle": rolle}),
+            ),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -354,5 +833,17 @@ mod tests {
         assert!(Argon2::default()
             .verify_password(b"irgendwas", ATTRAPPE)
             .is_err());
+    }
+
+    #[test]
+    fn rechtenamen_sortiert_ohne_doppelte() {
+        assert_eq!(
+            rechte_namen(&[
+                Permission::FileView,
+                Permission::CaseView,
+                Permission::FileView
+            ]),
+            ["case.view", "file.view"]
+        );
     }
 }

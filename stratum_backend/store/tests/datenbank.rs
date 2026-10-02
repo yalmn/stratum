@@ -9,7 +9,7 @@ use stratum_model::{
     FindingCategory, FindingDisposition, FindingId, FindingPriority, FindingStatus,
 };
 use stratum_normalize::{normalisieren, Kontext};
-use stratum_store::{Datenbank, LaufAngaben, LaufStand, NeuerBenutzer, StoreError};
+use stratum_store::{Datenbank, LaufAngaben, LaufStand, StoreError};
 
 /// Handelnder Akteur in den Tests: das feste Konto der Kommandozeile.
 fn a() -> ActorId {
@@ -816,90 +816,138 @@ async fn audit_kette_und_rechte() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn benutzer_rollen_anmeldung() {
+async fn rollen_registrierung_freigabe() {
     let Some((db, _url, name)) = frische_datenbank().await else {
         return;
     };
-    use stratum_model::{Role, UserKind};
-    let neu = |n: &'static str, p: Option<&'static str>, r: &'static [Role]| NeuerBenutzer {
-        username: n,
-        display_name: n,
-        kind: if p.is_some() {
-            UserKind::Human
-        } else {
-            UserKind::Service
-        },
-        passwort: p,
-        rollen: r,
-    };
-    // Zu kurzes Passwort.
+    use stratum_model::{role_templates, Permission, RoleId, UserStatus};
+
+    // Mitgelieferte Vorlagen genau wie im Modell.
+    let rollen = db.rollen().await.unwrap();
+    assert_eq!(rollen.len(), 8);
+    for (n, _, rechte) in role_templates() {
+        let r = rollen.iter().find(|r| r.name == n).unwrap();
+        assert_eq!(r.id, RoleId::template(n));
+        let mut soll = rechte.clone();
+        soll.sort();
+        let mut ist = r.permissions.clone();
+        ist.sort();
+        assert_eq!(ist, soll, "{n}");
+    }
+    let analyst = RoleId::template("Analyst");
+
+    // Erste Einrichtung durch die Kommandozeile, danach nicht mehr.
     assert!(matches!(
-        db.benutzer_anlegen(a(), &neu("kurz", Some("zu-kurz"), &[Role::Analyst]))
+        db.superadmin_einrichten(a(), "chef", "Chef", "zu-kurz")
             .await,
         Err(StoreError::Passwort(_))
     ));
-    // Die Kommandozeile darf das erste Administratorkonto anlegen ...
-    let admin = db
-        .benutzer_anlegen(
-            a(),
-            &neu("admin", Some("ein langes Passwort"), &[Role::Administrator]),
-        )
+    let chef = db
+        .superadmin_einrichten(a(), "chef", "Chef", "ein langes Passwort")
         .await
         .unwrap();
-    // ... danach nicht mehr.
-    assert!(matches!(
-        db.benutzer_anlegen(
-            a(),
-            &neu(
-                "admin2",
-                Some("ein langes Passwort"),
-                &[Role::Administrator]
-            )
-        )
-        .await,
-        Err(StoreError::Verweigert(_))
-    ));
-    let analyst = db
-        .benutzer_anlegen(
-            admin.id,
-            &neu(
-                "analyst",
-                Some("noch ein Passwort!"),
-                &[Role::Analyst, Role::Analyst],
-            ),
-        )
-        .await
-        .unwrap();
-    assert_eq!(analyst.roles, [Role::Analyst]);
-    // Ein Analyst verwaltet keine Konten.
-    assert!(matches!(
-        db.benutzer_anlegen(analyst.id, &neu("dienst", None, &[Role::AutomationService]))
-            .await,
-        Err(StoreError::Verweigert(_))
-    ));
-
-    let u = db.anmelden("analyst", "noch ein Passwort!").await.unwrap();
-    assert_eq!((u.id, u.roles.clone()), (analyst.id, vec![Role::Analyst]));
-    assert!(db.anmelden("analyst", "falsch").await.is_err());
-    assert!(db.anmelden("niemand", "egal egal egal").await.is_err());
-    assert!(db.anmelden("stratum-cli", "egal egal egal").await.is_err());
-
     assert!(db
-        .rolle_setzen(admin.id, analyst.id, Role::ForensicExaminer, true)
-        .await
-        .unwrap());
-    assert!(db
-        .rolle_setzen(admin.id, analyst.id, Role::Analyst, false)
-        .await
-        .unwrap());
-    assert_eq!(
-        db.rollen(analyst.id).await.unwrap(),
-        [Role::ForensicExaminer]
-    );
-    assert!(db
-        .rolle_setzen(analyst.id, analyst.id, Role::Administrator, true)
+        .superadmin_einrichten(a(), "chef2", "Chef", "ein langes Passwort")
         .await
         .is_err());
+
+    // Registrierung: ohne Freigabe keine Anmeldung und keine Rechte.
+    let neu = db
+        .registrieren("mia", "Mia M.", "noch ein Passwort!")
+        .await
+        .unwrap();
+    assert_eq!(neu.status, UserStatus::Pending);
+    assert!(db
+        .registrieren("mia", "Doppelt", "noch ein Passwort!")
+        .await
+        .is_err());
+    assert!(db.anmelden("mia", "noch ein Passwort!").await.is_err());
+    assert!(db.rechte(neu.id).await.unwrap().is_empty());
+    // Nur Superadmins geben frei.
+    assert!(db.freigeben(neu.id, neu.id, &[analyst]).await.is_err());
+    db.freigeben(chef.id, neu.id, &[analyst]).await.unwrap();
+    let mia = db.anmelden("mia", "noch ein Passwort!").await.unwrap();
+    assert_eq!(mia.roles, [analyst]);
+    assert!(db.berechtigt(mia.id, Permission::FileView).await.unwrap());
+    assert!(!db
+        .berechtigt(mia.id, Permission::CredentialViewSensitive)
+        .await
+        .unwrap());
+    // Fehlende Berechtigung: abgelehnt und protokolliert.
+    let k = kontext();
+    let mut f = fall(&k);
+    f.created_by = mia.id;
+    assert!(matches!(
+        db.fall_anlegen(mia.id, &f).await,
+        Err(StoreError::Verweigert(_))
+    ));
+
+    // Superadmin legt eine eigene Rolle an, ändert und vergibt sie.
+    let r = db
+        .rolle_anlegen(
+            chef.id,
+            "Fallführung",
+            Some("eigene Rolle"),
+            &[Permission::CaseCreate, Permission::CaseView],
+        )
+        .await
+        .unwrap();
+    assert!(db
+        .rolle_anlegen(chef.id, "Fallführung", None, &[])
+        .await
+        .is_err());
+    assert!(db
+        .rolle_anlegen(mia.id, "Eigenbau", None, &[])
+        .await
+        .is_err());
+    db.rolle_aendern(
+        chef.id,
+        r.id,
+        "Fallführung",
+        None,
+        &[
+            Permission::CaseCreate,
+            Permission::CaseView,
+            Permission::CaseEdit,
+        ],
+    )
+    .await
+    .unwrap();
+    db.konto_rollen_setzen(chef.id, mia.id, &[analyst, r.id])
+        .await
+        .unwrap();
+    assert!(db.fall_anlegen(mia.id, &f).await.unwrap());
+    // Rolle gelöscht: Recht wieder weg.
+    db.rolle_loeschen(chef.id, r.id).await.unwrap();
+    assert!(!db.berechtigt(mia.id, Permission::CaseCreate).await.unwrap());
+    assert_eq!(db.benutzer("mia").await.unwrap().unwrap().roles, [analyst]);
+
+    // Der letzte Superadmin bleibt; mit einem zweiten geht es.
+    assert!(db.superadmin_setzen(chef.id, chef.id, false).await.is_err());
+    assert!(db.sperren(chef.id, chef.id).await.is_err());
+    db.superadmin_setzen(chef.id, mia.id, true).await.unwrap();
+    assert!(db
+        .berechtigt(mia.id, Permission::CredentialViewSensitive)
+        .await
+        .unwrap());
+    db.sperren(mia.id, chef.id).await.unwrap();
+    assert!(db.anmelden("chef", "ein langes Passwort").await.is_err());
+    // Ablehnen einer Registrierung; Dienstkonten haben kein Passwort.
+    let x = db
+        .registrieren("xaver", "X", "zwölf Zeichen!!")
+        .await
+        .unwrap();
+    db.ablehnen(mia.id, x.id).await.unwrap();
+    assert!(db.anmelden("xaver", "zwölf Zeichen!!").await.is_err());
+    let dienst = db
+        .dienstkonto_anlegen(mia.id, "importer", "Import", &[analyst])
+        .await
+        .unwrap();
+    assert!(db.anmelden("importer", "irgendein Passwort").await.is_err());
+    assert!(db
+        .berechtigt(dienst.id, Permission::FileView)
+        .await
+        .unwrap());
 
     let ist: Vec<(String, String)> = aktionen(&db)
         .await
@@ -909,24 +957,37 @@ async fn benutzer_rollen_anmeldung() {
     let soll = [
         ("USER_CREATE", "success"),
         ("USER_CREATE", "denied"),
-        ("USER_CREATE", "success"),
-        ("USER_CREATE", "denied"),
+        ("USER_REGISTER", "success"),
+        ("USER_REGISTER", "denied"),
+        ("LOGIN", "denied"),
+        ("USER_APPROVE", "denied"),
+        ("ROLE_GRANT", "success"),
+        ("USER_APPROVE", "success"),
         ("LOGIN", "success"),
+        ("CASE_CREATE", "denied"),
+        ("ROLE_CREATE", "success"),
+        ("ROLE_CREATE", "denied"),
+        ("ROLE_MODIFY", "success"),
+        ("ROLE_GRANT", "success"),
+        ("CASE_CREATE", "success"),
+        ("ROLE_DELETE", "success"),
+        ("SUPERADMIN_SET", "success"),
+        ("USER_DISABLE", "success"),
         ("LOGIN", "denied"),
-        ("LOGIN", "denied"),
+        ("USER_REGISTER", "success"),
+        ("USER_REJECT", "success"),
         ("LOGIN", "denied"),
         ("ROLE_GRANT", "success"),
-        ("ROLE_REVOKE", "success"),
-        ("ROLE_GRANT", "denied"),
+        ("USER_CREATE", "success"),
+        ("LOGIN", "denied"),
     ];
     assert_eq!(
         ist,
         soll.map(|(x, y)| (x.to_string(), y.to_string())).to_vec()
     );
-    // Gründe der Ablehnungen stehen nur im Audit; unbekannter Name mit dem
-    // Platzhalterkonto als Akteur.
-    let gruende: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT actor_id, details->>'grund' FROM audit_event \
+    // Gründe stehen nur im Audit.
+    let gruende: Vec<String> = sqlx::query_scalar(
+        "SELECT details->>'grund' FROM audit_event \
          WHERE action = 'LOGIN' AND result = 'denied' ORDER BY sequence",
     )
     .fetch_all(db.pool())
@@ -935,14 +996,26 @@ async fn benutzer_rollen_anmeldung() {
     assert_eq!(
         gruende,
         [
-            (analyst.id.0, "passwort_falsch".to_string()),
-            (ActorId::unbekannt().0, "unbekannter_name".to_string()),
-            (ActorId::cli().0, "kein_passwort".to_string()),
+            "nicht_freigegeben",
+            "gesperrt",
+            "abgelehnt",
+            "kein_passwort"
         ]
     );
-    // Passwort nur als Argon2id-Hash.
+    let modify: (serde_json::Value, serde_json::Value) = sqlx::query_as(
+        "SELECT details->'rechte_vorher', details->'rechte' FROM audit_event \
+         WHERE action = 'ROLE_MODIFY'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(modify.0, serde_json::json!(["case.create", "case.view"]));
+    assert_eq!(
+        modify.1,
+        serde_json::json!(["case.create", "case.edit", "case.view"])
+    );
     let hash: String =
-        sqlx::query_scalar("SELECT password_hash FROM app_user WHERE username = 'admin'")
+        sqlx::query_scalar("SELECT password_hash FROM app_user WHERE username = 'chef'")
             .fetch_one(db.pool())
             .await
             .unwrap();

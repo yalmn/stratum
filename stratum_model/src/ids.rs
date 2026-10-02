@@ -116,6 +116,19 @@ id_typ!(
 );
 verwaltung!(TagId);
 id_typ!(
+    /// Rolle (frei angelegtes Bündel von Berechtigungen).
+    RoleId
+);
+verwaltung!(RoleId);
+
+impl RoleId {
+    /// ID einer mitgelieferten Vorlage, aus ihrem Namen abgeleitet
+    /// (Migration 0004 legt die Vorlagen mit genau diesen IDs an).
+    pub fn template(name: &str) -> Self {
+        Self(derived_uuid("rolle", &[name.as_bytes()]))
+    }
+}
+id_typ!(
     /// Audit-Ereignis.
     AuditEventId
 );

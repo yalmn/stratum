@@ -617,16 +617,29 @@ Testimage: rund 149.000 Einträge in etwa 13 Sekunden, 92 MB.
 
 ### Benutzer, Rollen und Audit
 
-Konten haben feste Rollen (`administrator`, `case_manager`,
-`forensic_examiner`, `analyst`, `threat_intel_analyst`, `reviewer`,
-`read_only`, `automation_service`). Menschen melden sich mit Passwort an
-(Argon2id, mindestens 12 Zeichen), Dienstkonten haben keins. Konten und
-Rollen verwalten nur Administratoren; solange es kein menschliches
-Administratorkonto gibt, darf das Systemkonto `stratum-cli` das erste
-anlegen. Sensible Zugangsdaten sehen nur `administrator` und
-`forensic_examiner`. Die Kommandozeile arbeitet bis auf Weiteres ohne
-Anmeldung als `stratum-cli`; wer sie aufgerufen hat, steht als Benutzer
-des Betriebssystems im Audit.
+Berechtigungen sind ein fester Katalog, den stratum prüft (`case.create`,
+`case.view`, `evidence.import`, `analysis.start`, `file.view`,
+`file.extract`, `credential.view_sensitive`, `audit.view`, `audit.verify`
+und weitere, siehe `stratum_model::Permission`). Rollen sind frei benannte
+Bündel davon: Superadmins legen sie an, ändern und löschen sie und vergeben
+sie an Konten. Mitgeliefert werden die Rollen der Zielarchitektur als
+änderbare Vorlagen (Administrator, Case Manager, Forensic Examiner,
+Analyst, Threat Intel Analyst, Reviewer, Read Only, Automation Service);
+sensible Zugangsdaten sind darin nur Administrator und Forensic Examiner
+erlaubt.
+
+Menschen registrieren sich selbst (Passwort mindestens 12 Zeichen,
+gespeichert als Argon2id). Das Konto bleibt gesperrt (`pending`), bis ein
+Superadmin es freigibt und Rollen vergibt; er kann Registrierungen auch
+ablehnen und Konten sperren. Superadmins dürfen alles und verwalten Konten
+und Rollen; das hängt an keiner Rolle, und der letzte aktive Superadmin
+lässt sich weder sperren noch herabstufen. Den ersten Superadmin richtet
+das Systemkonto `stratum-cli` ein. Dienstkonten haben kein Passwort.
+
+Die Kommandozeile arbeitet bis auf Weiteres ohne Anmeldung als
+`stratum-cli` mit der Rolle Automation Service; wer sie aufgerufen hat,
+steht als Benutzer des Betriebssystems im Audit. Fehlt einem Konto eine
+Berechtigung, wird die Aktion abgelehnt und als `denied` protokolliert.
 
 Das Audit (`audit_event`) hält fest, wer was getan hat: Fall angelegt,
 Evidence registriert oder gegen ihren Hash geprüft (eine Abweichung als

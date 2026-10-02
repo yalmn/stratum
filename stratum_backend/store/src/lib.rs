@@ -30,12 +30,12 @@ use sqlx::types::Json;
 use sqlx::{Connection as _, Executor as _};
 use stratum_model::{
     ActorId, AnalysisRunId, AuditAction, AuditResult, Case, DerivationKind, Evidence, EvidenceId,
-    EvidenceRelation, EvidenceRelationId, EvidenceRelationKind, Finding,
+    EvidenceRelation, EvidenceRelationId, EvidenceRelationKind, Finding, Permission,
 };
 use stratum_normalize::{Kontext, Modell};
 
 pub use audit::{AuditEintrag, AuditPruefung};
-pub use benutzer::NeuerBenutzer;
+pub use benutzer::PASSWORT_MINDESTLAENGE;
 
 /// Fehler beim Speichern.
 #[derive(Debug, thiserror::Error)]
@@ -197,6 +197,20 @@ impl Datenbank {
     /// Rechnet die Audit-Kette nach und protokolliert das als
     /// `AUDIT_VERIFY` mit dem Ergebnis.
     pub async fn audit_pruefen(&self, akteur: ActorId) -> Result<AuditPruefung, StoreError> {
+        self.verlangen(
+            akteur,
+            Permission::AuditVerify,
+            AuditEintrag {
+                akteur,
+                case_id: None,
+                aktion: AuditAction::AuditVerify,
+                objekt_typ: "audit",
+                objekt_id: None,
+                ergebnis: AuditResult::Denied,
+                details: json!({}),
+            },
+        )
+        .await?;
         let p = audit::pruefen(&self.pool).await?;
         self.audit(&AuditEintrag {
             akteur,
@@ -222,6 +236,20 @@ impl Datenbank {
     /// Legt einen Fall an. Ein vorhandener Fall bleibt unverändert (Titel
     /// und Stand gehören dem Analysten). Liefert `true`, wenn er neu ist.
     pub async fn fall_anlegen(&self, akteur: ActorId, c: &Case) -> Result<bool, StoreError> {
+        self.verlangen(
+            akteur,
+            Permission::CaseCreate,
+            AuditEintrag {
+                akteur,
+                case_id: Some(c.id),
+                aktion: AuditAction::CaseCreate,
+                objekt_typ: "case",
+                objekt_id: Some(c.id.to_string()),
+                ergebnis: AuditResult::Denied,
+                details: json!({"case_number": c.case_number}),
+            },
+        )
+        .await?;
         let j = serde_json::to_value(c)?;
         let mut tx = self.pool.begin().await?;
         let neu = sqlx::query(
@@ -285,6 +313,16 @@ impl Datenbank {
             ergebnis,
             details,
         };
+        self.verlangen(
+            akteur,
+            Permission::EvidenceImport,
+            eintrag(
+                AuditAction::EvidenceImport,
+                AuditResult::Denied,
+                json!({"sha256": e.sha256}),
+            ),
+        )
+        .await?;
         let mut tx = self.pool.begin().await?;
         let neu: Option<bool> = sqlx::query_scalar(
             "INSERT INTO evidence (id, case_id, kind, name, role, original_name, source_uri, size, \
@@ -389,6 +427,20 @@ impl Datenbank {
         akteur: ActorId,
         r: &EvidenceRelation,
     ) -> Result<bool, StoreError> {
+        self.verlangen(
+            akteur,
+            Permission::RelationEdit,
+            AuditEintrag {
+                akteur,
+                case_id: Some(r.case_id),
+                aktion: AuditAction::RelationCreate,
+                objekt_typ: "evidence_relation",
+                objekt_id: Some(r.id.to_string()),
+                ergebnis: AuditResult::Denied,
+                details: json!({}),
+            },
+        )
+        .await?;
         let mut tx = self.pool.begin().await?;
         let neu = beziehung_schreiben(&mut tx, akteur, r).await?;
         tx.commit().await?;
@@ -398,6 +450,20 @@ impl Datenbank {
     /// Speichert ein Finding samt Belegen in einer Transaktion. Jeder Beleg
     /// muss im selben Fall existieren, sonst wird nichts geschrieben.
     pub async fn finding_speichern(&self, akteur: ActorId, f: &Finding) -> Result<(), StoreError> {
+        self.verlangen(
+            akteur,
+            Permission::FindingCreate,
+            AuditEintrag {
+                akteur,
+                case_id: Some(f.case_id),
+                aktion: AuditAction::FindingCreate,
+                objekt_typ: "finding",
+                objekt_id: Some(f.id.to_string()),
+                ergebnis: AuditResult::Denied,
+                details: json!({"title": f.title}),
+            },
+        )
+        .await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO finding (id, case_id, title, description, category, status, priority, \
@@ -477,6 +543,20 @@ impl Datenbank {
         angaben: &LaufAngaben<'_>,
     ) -> Result<AnalysisRunId, StoreError> {
         let lauf = AnalysisRunId::new();
+        self.verlangen(
+            akteur,
+            Permission::AnalysisStart,
+            AuditEintrag {
+                akteur,
+                case_id: Some(k.case_id),
+                aktion: AuditAction::AnalysisStart,
+                objekt_typ: "analysis_run",
+                objekt_id: Some(lauf.to_string()),
+                ergebnis: AuditResult::Denied,
+                details: json!({"evidence_id": k.evidence_id}),
+            },
+        )
+        .await?;
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO analysis_run (id, case_id, evidence_id, evidence_sha256, host, \
@@ -612,6 +692,25 @@ impl Datenbank {
         finished_at: chrono::DateTime<chrono::Utc>,
         report_sha256: Option<&str>,
     ) -> Result<(), StoreError> {
+        // Abbrechen ist ein eigenes Recht; abschließen darf, wer starten darf.
+        self.verlangen(
+            akteur,
+            if stand == LaufStand::Cancelled {
+                Permission::AnalysisCancel
+            } else {
+                Permission::AnalysisStart
+            },
+            AuditEintrag {
+                akteur,
+                case_id: None,
+                aktion: stand.aktion(),
+                objekt_typ: "analysis_run",
+                objekt_id: Some(lauf.to_string()),
+                ergebnis: AuditResult::Denied,
+                details: json!({}),
+            },
+        )
+        .await?;
         let mut tx = self.pool.begin().await?;
         let (evidence, fall): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
             "UPDATE analysis_run SET status = $2, finished_at = $3, report_sha256 = $4 \

@@ -1,4 +1,7 @@
--- Benutzer, Rollen und das Audit-Protokoll.
+-- Benutzer, frei definierbare Rollen und das Audit-Protokoll.
+--
+-- Konten registrieren sich selbst und warten auf Freigabe; Superadmins geben
+-- sie frei, legen Rollen als Bündel von Berechtigungen an und vergeben sie.
 --
 -- Das Audit ist eine Hash-Kette: ein Trigger vergibt jedem neuen Ereignis
 -- die nächste Nummer und berechnet
@@ -18,36 +21,160 @@ CREATE TABLE app_user (
     kind          text        NOT NULL CHECK (kind IN ('human', 'service')),
     -- Argon2id im PHC-Format, nur bei Menschen.
     password_hash text,
-    active        boolean     NOT NULL DEFAULT true,
+    -- pending: selbst registriert, wartet auf Freigabe durch einen Superadmin.
+    status        text        NOT NULL CHECK (status IN ('pending', 'active', 'disabled', 'rejected')),
+    -- Superadmins verwalten Konten und Rollen und haben alle Rechte.
+    superadmin    boolean     NOT NULL DEFAULT false,
     created_at    timestamptz NOT NULL,
     created_by    uuid REFERENCES app_user (id),
-    CHECK (kind = 'human' OR password_hash IS NULL)
+    -- Letzte Entscheidung über das Konto (Freigabe, Ablehnung, Sperre).
+    decided_at    timestamptz,
+    decided_by    uuid REFERENCES app_user (id),
+    CHECK (kind = 'human' OR password_hash IS NULL),
+    CHECK (NOT superadmin OR kind = 'human')
+);
+
+-- Rollen sind frei benannte Bündel von Berechtigungen; den Katalog der
+-- Berechtigungen legt der Code fest (stratum_model::Permission).
+CREATE TABLE app_role (
+    id          uuid PRIMARY KEY,
+    name        text        NOT NULL UNIQUE CHECK (length(name) BETWEEN 1 AND 100),
+    description text,
+    created_at  timestamptz NOT NULL,
+    created_by  uuid REFERENCES app_user (id),
+    updated_at  timestamptz
+);
+
+CREATE TABLE role_permission (
+    role_id    uuid NOT NULL REFERENCES app_role (id),
+    permission text NOT NULL CHECK (permission IN (
+        'case.create', 'case.view', 'case.edit', 'case.close', 'evidence.import', 'evidence.view', 'analysis.start', 'analysis.cancel', 'file.view', 'file.extract', 'search.run', 'credential.view_sensitive', 'finding.create', 'finding.edit', 'relation.edit', 'report.create', 'report.export', 'audit.view', 'audit.verify', 'ti.manage', 'playbook.run', 'ai.query', 'connector.use')),
+    PRIMARY KEY (role_id, permission)
 );
 
 CREATE TABLE user_role (
     user_id    uuid        NOT NULL REFERENCES app_user (id),
-    role       text        NOT NULL CHECK (role IN (
-                   'administrator', 'case_manager', 'forensic_examiner', 'analyst',
-                   'threat_intel_analyst', 'reviewer', 'read_only', 'automation_service')),
+    role_id    uuid        NOT NULL REFERENCES app_role (id),
     granted_at timestamptz NOT NULL,
     granted_by uuid REFERENCES app_user (id),
-    PRIMARY KEY (user_id, role)
+    PRIMARY KEY (user_id, role_id)
 );
+CREATE INDEX user_role_role ON user_role (role_id);
+
+-- Vorlagen: die Rollen der Zielarchitektur (IDs wie RoleId::template(name),
+-- Inhalt wie stratum_model::role_templates()). Superadmins können sie
+-- ändern, umbenennen oder löschen.
+INSERT INTO app_role (id, name, description, created_at) VALUES
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'Administrator', 'Alle fachlichen Rechte (Konten und Rollen verwalten nur Superadmins)', now()),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'Case Manager', 'Fälle anlegen, steuern und abschließen', now()),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'Forensic Examiner', 'Forensische Analyse einschließlich sensibler Zugangsdaten', now()),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'Analyst', 'Ergebnisse auswerten', now()),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'Threat Intel Analyst', 'Threat Intelligence bearbeiten', now()),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'Reviewer', 'Ergebnisse prüfen', now()),
+    ('1fb2500b-8901-5458-abd1-a55a0eb1aac2', 'Read Only', 'Nur lesen', now()),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'Automation Service', 'Technische Konten für automatische Analysen (z. B. die Kommandozeile)', now());
+INSERT INTO role_permission (role_id, permission) VALUES
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'case.create'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'case.view'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'case.edit'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'case.close'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'evidence.import'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'evidence.view'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'analysis.start'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'analysis.cancel'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'file.view'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'file.extract'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'search.run'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'credential.view_sensitive'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'finding.create'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'finding.edit'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'relation.edit'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'report.create'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'report.export'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'audit.view'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'audit.verify'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'ti.manage'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'playbook.run'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'ai.query'),
+    ('87bdaf64-12b7-53d8-b1a4-f7c00eabda6b', 'connector.use'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'case.create'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'case.view'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'case.edit'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'case.close'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'evidence.import'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'evidence.view'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'analysis.start'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'analysis.cancel'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'file.view'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'search.run'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'finding.create'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'finding.edit'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'relation.edit'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'report.create'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'report.export'),
+    ('04c03092-3dca-5760-bf24-237968f3bae7', 'audit.view'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'case.view'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'evidence.import'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'evidence.view'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'analysis.start'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'analysis.cancel'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'file.view'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'file.extract'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'search.run'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'credential.view_sensitive'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'finding.create'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'finding.edit'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'relation.edit'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'report.create'),
+    ('ab45397f-caf2-5d32-a0d7-44349b0c069c', 'report.export'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'case.view'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'evidence.view'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'file.view'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'search.run'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'finding.create'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'finding.edit'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'relation.edit'),
+    ('28ea44af-40fc-51b3-a2ef-6d7740020a35', 'report.create'),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'case.view'),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'evidence.view'),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'search.run'),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'ti.manage'),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'finding.create'),
+    ('2c3fb948-5349-527e-9aa1-b498c308ec32', 'report.create'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'case.view'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'evidence.view'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'file.view'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'search.run'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'finding.edit'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'report.create'),
+    ('f008d287-77fe-5072-9b1e-18ab745db395', 'audit.view'),
+    ('1fb2500b-8901-5458-abd1-a55a0eb1aac2', 'case.view'),
+    ('1fb2500b-8901-5458-abd1-a55a0eb1aac2', 'evidence.view'),
+    ('1fb2500b-8901-5458-abd1-a55a0eb1aac2', 'file.view'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'case.create'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'case.view'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'evidence.import'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'evidence.view'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'analysis.start'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'finding.create'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'relation.edit'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'report.create'),
+    ('98fd91af-5058-52ac-983d-4ad11d0697ce', 'audit.verify');
 
 -- Feste Konten (IDs wie ActorId::cli() und ActorId::unbekannt()).
-INSERT INTO app_user (id, username, display_name, kind, active, created_at) VALUES
+INSERT INTO app_user (id, username, display_name, kind, status, created_at) VALUES
     ('90713752-b779-524a-be66-954f05a2e0c3', 'stratum-cli', 'stratum Kommandozeile',
-     'service', true, now()),
+     'service', 'active', now()),
     ('924f4def-f441-57c7-8284-92be2c4250ad', 'unbekannt', 'unbekannter Benutzer',
-     'service', false, now());
-INSERT INTO user_role (user_id, role, granted_at) VALUES
-    ('90713752-b779-524a-be66-954f05a2e0c3', 'automation_service', now());
+     'service', 'disabled', now());
+INSERT INTO user_role (user_id, role_id, granted_at) VALUES
+    ('90713752-b779-524a-be66-954f05a2e0c3', '98fd91af-5058-52ac-983d-4ad11d0697ce', now());
 
 -- Akteure aus früheren Läufen und Tests, die es als Konto nicht gibt, als
--- deaktivierte Platzhalter übernehmen, damit die Fremdschlüssel greifen.
-INSERT INTO app_user (id, username, display_name, kind, active, created_at)
+-- gesperrte Platzhalter übernehmen, damit die Fremdschlüssel greifen.
+INSERT INTO app_user (id, username, display_name, kind, status, created_at)
 SELECT DISTINCT a, 'uebernommen-' || a::text, 'aus früheren Daten übernommen', 'service',
-       false, now()
+       'disabled', now()
 FROM (SELECT created_by FROM case_file
       UNION SELECT imported_by FROM evidence
       UNION SELECT created_by FROM evidence_relation
@@ -62,15 +189,40 @@ ALTER TABLE finding ADD FOREIGN KEY (created_by) REFERENCES app_user (id);
 -- Wer einen Lauf gestartet hat (frühere Läufe: unbekannt).
 ALTER TABLE analysis_run ADD COLUMN started_by uuid REFERENCES app_user (id);
 
--- Rolle entziehen: die Anwendung darf nichts löschen, diese eine Löschung
--- läuft mit den Rechten des Eigentümers. Liefert die Zahl entzogener Rollen.
-CREATE FUNCTION rolle_entziehen(nutzer uuid, rolle text) RETURNS bigint
+-- Die Anwendung darf nichts löschen. Die drei Stellen, an denen Rechte
+-- wegfallen, laufen über Funktionen mit den Rechten des Eigentümers; ob der
+-- Aufrufer das darf (Superadmin), prüft stratum vorher.
+
+-- Setzt die Berechtigungen einer Rolle auf genau die gegebene Menge.
+CREATE FUNCTION rolle_rechte_setzen(rolle uuid, rechte text[]) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+    DELETE FROM role_permission WHERE role_id = rolle AND permission <> ALL (rechte);
+    INSERT INTO role_permission (role_id, permission)
+    SELECT rolle, r FROM unnest(rechte) AS r ON CONFLICT DO NOTHING;
+END
+$$;
+
+-- Setzt die Rollen eines Kontos auf genau die gegebene Menge.
+CREATE FUNCTION konto_rollen_setzen(nutzer uuid, rollen uuid[], durch uuid) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+    DELETE FROM user_role WHERE user_id = nutzer AND role_id <> ALL (rollen);
+    INSERT INTO user_role (user_id, role_id, granted_at, granted_by)
+    SELECT nutzer, r, now(), durch FROM unnest(rollen) AS r ON CONFLICT DO NOTHING;
+END
+$$;
+
+-- Löscht eine Rolle samt Zuordnungen; liefert die Zahl betroffener Konten.
+CREATE FUNCTION rolle_loeschen(rolle uuid) RETURNS bigint
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
     n bigint;
 BEGIN
-    DELETE FROM user_role WHERE user_id = nutzer AND role = rolle;
+    DELETE FROM user_role WHERE role_id = rolle;
     GET DIAGNOSTICS n = ROW_COUNT;
+    DELETE FROM role_permission WHERE role_id = rolle;
+    DELETE FROM app_role WHERE id = rolle;
     RETURN n;
 END
 $$;

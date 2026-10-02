@@ -39,7 +39,7 @@ pub use evidence::{
 pub use finding::{Finding, FindingCategory, FindingDisposition, FindingPriority, FindingStatus};
 pub use ids::{
     ActorId, AnalysisRunId, ArtifactId, AuditEventId, CaseId, EntityId, EventId, EvidenceId,
-    EvidenceRelationId, FindingId, ObservationId, RelationshipId, TagId,
+    EvidenceRelationId, FindingId, ObservationId, RelationshipId, RoleId, TagId,
 };
 pub use observation::{Observation, ObservationKind};
 pub use provenance::{
@@ -48,4 +48,4 @@ pub use provenance::{
 };
 pub use relationship::{Relationship, RelationshipKind};
 pub use time::{ForensicTime, TimePrecision, TimeSemantics};
-pub use user::{Role, User, UserKind};
+pub use user::{role_templates, Permission, Role, User, UserKind, UserStatus};
