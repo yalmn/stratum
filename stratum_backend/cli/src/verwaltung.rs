@@ -1138,6 +1138,10 @@ fn server(
         );
     }
     let (rt, db) = datenbank::verbinden_mit(4)?;
+    // Zuerst die Adresse: ist sie belegt, startet auch kein Worker.
+    let listener = rt
+        .block_on(tokio::net::TcpListener::bind(adresse))
+        .with_context(|| format!("Server nicht startbar: {adresse} nicht verfügbar"))?;
     let stopp = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker = if mit_worker {
         let ausgabe = match ausgabe {
@@ -1164,7 +1168,7 @@ fn server(
     eprintln!("[+] stratum-API auf http://{adresse}/api/v1 (Strg+C beendet)");
     let (db2, s2) = (db.clone(), stopp.clone());
     let name = worker.as_ref().map(|(n, _)| n.clone());
-    rt.block_on(stratum_server::starten(db, adresse, async move {
+    rt.block_on(stratum_server::starten(db, listener, async move {
         let _ = tokio::signal::ctrl_c().await;
         s2.store(true, std::sync::atomic::Ordering::Relaxed);
         eprintln!("[*] Server wird beendet ...");

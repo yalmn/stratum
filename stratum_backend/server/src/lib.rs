@@ -179,13 +179,14 @@ pub fn router(db: Datenbank) -> Router {
         .with_state(Zustand { db })
 }
 
-/// Startet den Server und läuft, bis `stopp` endet.
+/// Startet den Server auf einer schon gebundenen Adresse und läuft, bis
+/// `stopp` endet. Erst binden, dann starten: so steht vor allem anderen
+/// fest, ob die Adresse frei ist.
 pub async fn starten(
     db: Datenbank,
-    adresse: std::net::SocketAddr,
+    listener: tokio::net::TcpListener,
     stopp: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let listener = tokio::net::TcpListener::bind(adresse).await?;
     axum::serve(listener, router(db))
         .with_graceful_shutdown(stopp)
         .await
