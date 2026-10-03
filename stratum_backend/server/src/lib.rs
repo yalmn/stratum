@@ -48,6 +48,12 @@ pub enum ApiFehler {
     /// Anfrage ungültig.
     #[error("{0}")]
     Anfrage(String),
+    /// Angefragtes ist nicht (mehr) lesbar, etwa ein Report ohne Datei.
+    #[error("{0}")]
+    NichtVerfuegbar(String),
+    /// Gespeichertes passt nicht mehr zu seinem Hash.
+    #[error("{0}")]
+    Integritaet(String),
 }
 
 impl IntoResponse for ApiFehler {
@@ -55,6 +61,8 @@ impl IntoResponse for ApiFehler {
         let status = match &self {
             ApiFehler::NichtAngemeldet => StatusCode::UNAUTHORIZED,
             ApiFehler::Anfrage(_) => StatusCode::BAD_REQUEST,
+            ApiFehler::NichtVerfuegbar(_) => StatusCode::NOT_FOUND,
+            ApiFehler::Integritaet(_) => StatusCode::CONFLICT,
             ApiFehler::Store(s) => match s {
                 StoreError::Verweigert(_) => StatusCode::FORBIDDEN,
                 StoreError::NichtGefunden(_) => StatusCode::NOT_FOUND,
@@ -159,6 +167,9 @@ pub fn router(db: Datenbank) -> Router {
         )
         .route("/api/v1/faelle/{nummer}/entitaeten", get(entitaeten))
         .route("/api/v1/entitaeten/{id}", get(entitaet))
+        .route("/api/v1/evidence/{id}/volumes", get(volumes))
+        .route("/api/v1/evidence/{id}/dateien", get(dateien))
+        .route("/api/v1/artefakte/{id}/rohfund", get(rohfund))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/audit/pruefen", post(audit_pruefen))
         .with_state(Zustand { db })
@@ -530,6 +541,120 @@ async fn entitaet(
         z.db.entitaet(u.id, stratum_model::EntityId(id), q.klartext)
             .await?;
     Ok(Json(v))
+}
+
+async fn volumes(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<Json<Value>> {
+    let v = z.db.volumes(u.id, stratum_model::EvidenceId(id)).await?;
+    Ok(Json(Value::Array(v)))
+}
+
+#[derive(Deserialize)]
+struct DateienAnfrage {
+    volume: i64,
+    /// MFT-Datensatz des Verzeichnisses, ohne Angabe die Wurzel.
+    verzeichnis: Option<i64>,
+    nach: Option<String>,
+    anzahl: Option<i64>,
+}
+
+async fn dateien(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<DateienAnfrage>,
+) -> Antwort<Json<Value>> {
+    let v = stratum_store::dateien::Verzeichnis {
+        volume_offset: q.volume,
+        mft_record: q.verzeichnis.unwrap_or(stratum_store::dateien::WURZEL),
+        nach: q.nach,
+        anzahl: q.anzahl.unwrap_or(500),
+    };
+    let seite =
+        z.db.verzeichnis(u.id, stratum_model::EvidenceId(id), &v)
+            .await?;
+    Ok(Json(serde_json::to_value(seite).map_err(StoreError::from)?))
+}
+
+/// Rohfund zu einem Artefakt aus dem Report des Laufs. Der Report wird vor
+/// dem Lesen gegen seinen SHA-256 aus der Datenbank geprüft, die
+/// Fundkennung gegen den Inhalt nachgerechnet.
+async fn rohfund(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<KlartextAnfrage>,
+) -> Antwort<Json<Value>> {
+    use stratum_lauf::rohfund::RohfundFehler;
+    let quelle =
+        z.db.rohfund_quelle(u.id, stratum_model::ArtifactId(id), q.klartext)
+            .await?;
+    let (mut fund, report) = match &quelle.rohfund_id {
+        // Ohne Kennung steht der Fund vollständig im Artefakt.
+        None => (quelle.eingebettet.clone().unwrap_or_default(), Value::Null),
+        Some(rid) => {
+            let rid = rid.clone();
+            let berichte = quelle.berichte.clone();
+            let gelesen = tokio::task::spawn_blocking(move || {
+                // Ein Integritätsfehler wiegt schwerer als ein Report, in dem
+                // der Fund nur nicht steht, und wird deshalb gemeldet.
+                let mut letzter: Option<RohfundFehler> = None;
+                for (lauf, pfad, sha) in &berichte {
+                    match stratum_lauf::rohfund::lesen(std::path::Path::new(pfad), &rid, Some(sha))
+                    {
+                        Ok(r) => return Ok((r, *lauf, pfad.clone())),
+                        Err(e) => {
+                            if !letzter.as_ref().is_some_and(RohfundFehler::integritaet) {
+                                letzter = Some(e);
+                            }
+                        }
+                    }
+                }
+                Err(letzter)
+            })
+            .await
+            .map_err(|_| StoreError::Eingabe("Lesen des Reports abgebrochen".into()))?;
+            match gelesen {
+                Ok((r, lauf, pfad)) => {
+                    let report = json!({"analysis_run_id": lauf, "pfad": pfad,
+                                        "sha256": r.report_sha256, "geprueft": true});
+                    let fund = serde_json::to_value(&r.fund).map_err(StoreError::from)?;
+                    (fund, report)
+                }
+                Err(f) => {
+                    let grund = f.as_ref().map_or_else(
+                        || "kein Report zu einem abgeschlossenen Lauf gespeichert".to_string(),
+                        ToString::to_string,
+                    );
+                    z.db.rohfund_protokollieren(&quelle, false, json!({"fehler": grund}))
+                        .await?;
+                    return Err(if f.as_ref().is_some_and(RohfundFehler::integritaet) {
+                        ApiFehler::Integritaet(grund)
+                    } else {
+                        ApiFehler::NichtVerfuegbar(grund)
+                    });
+                }
+            }
+        }
+    };
+    let maskiert = !quelle.klartext && stratum_store::daten::rohfund_maskieren(&mut fund);
+    z.db.rohfund_protokollieren(
+        &quelle,
+        true,
+        json!({"report": report, "maskiert": maskiert}),
+    )
+    .await?;
+    Ok(Json(json!({
+        "artefakt": quelle.artefakt,
+        "rohfund_id": quelle.rohfund_id,
+        "fund": fund,
+        "maskiert": maskiert,
+        "klartext": quelle.klartext,
+        "report": report,
+    })))
 }
 
 async fn audit(

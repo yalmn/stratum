@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 stratum-store = { path = "../store" }
 stratum-jobs = { path = "../jobs" }
+stratum-lauf = { path = "../lauf" }
 stratum-model = { path = "../../stratum_model" }
 axum = "0.8.9"
 base64ct = { version = "1.8.3", features = ["alloc"] }

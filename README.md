@@ -759,6 +759,9 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/faelle/{nummer}/zeitachse/arten` | Ereignisarten mit Anzahl |
 | `GET /api/v1/faelle/{nummer}/entitaeten?art=&suche=&nach=&anzahl=` | Entitäten |
 | `GET /api/v1/entitaeten/{id}?klartext=` | Entität mit Beziehungen und Ereignissen |
+| `GET /api/v1/evidence/{id}/volumes` | Volumes im Dateikatalog |
+| `GET /api/v1/evidence/{id}/dateien?volume=&verzeichnis=&nach=&anzahl=` | Inhalt eines Verzeichnisses |
+| `GET /api/v1/artefakte/{id}/rohfund?klartext=` | Rohfund eines Artefakts aus dem Report |
 | `GET /api/v1/audit?fall=&anzahl=` | Audit lesen |
 | `POST /api/v1/audit/pruefen` | Audit-Kette nachrechnen |
 
@@ -771,7 +774,17 @@ Hash, Secret, Masterkey) sind als `[maskiert]` ersetzt; `klartext=true`
 verlangt zusätzlich `credential.view_sensitive`, jeder Versuch steht als
 `CREDENTIAL_VIEW` im Audit, auch ein abgelehnter.
 
-Fehler kommen als `{"fehler": "…"}` mit 400, 401, 403, 404 oder 500
+Der Dateibaum kommt aus dem Katalog (`--katalog` bzw. `"katalog": true`
+beim Job): `verzeichnis` ist der MFT-Datensatz, ohne Angabe die Wurzel
+(5); erst Unterverzeichnisse, dann Dateien, je nach Name, mit allen
+Zeiten in voller FILETIME-Auflösung und `hat_kinder`. Abrufe stehen als
+`FILE_VIEW` im Audit. Für den Rohfund merkt sich die Datenbank Pfad und
+SHA-256 des Reports; vor dem Lesen wird die Datei gegen den Hash geprüft
+und die Fundkennung aus dem Inhalt nachgerechnet. Passt eines nicht, kommt
+409, fehlt der Report, 404. Geheimwerte der Zugangsdaten sind wie oben
+maskiert.
+
+Fehler kommen als `{"fehler": "…"}` mit 400, 401, 403, 404, 409 oder 500
 (innere Fehler ohne Einzelheiten).
 
 `konto passwort NAME` ändert ein Passwort: das eigene nach Eingabe des

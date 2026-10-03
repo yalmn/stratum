@@ -32,6 +32,15 @@ pub const GEHEIM: &[&str] = &[
     "masterkey_hex",
 ];
 
+/// Gehört ein Rohfund zu den Zugangsdaten (und trägt damit Geheimwerte)?
+/// Entscheidet wie die Zuordnung beim Normalisieren.
+pub fn rohfund_sensibel(domain: &str, art: Option<&str>) -> bool {
+    matches!(
+        (domain, art),
+        ("lsa" | "dpapi", _) | ("browser", Some("passwort_klartext"))
+    )
+}
+
 pub fn abbilden(f: &RawFinding, b: &mut Baukasten<'_>) -> Abbildung {
     match (f.domain.as_str(), text(f, "art")) {
         ("lsa", Some("dcc2")) => dcc2(f, b),

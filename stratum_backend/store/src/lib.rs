@@ -23,6 +23,7 @@
 
 pub mod audit;
 pub mod benutzer;
+pub mod dateien;
 pub mod daten;
 pub mod faelle;
 pub mod jobs;
@@ -755,8 +756,9 @@ impl Datenbank {
         Ok(g)
     }
 
-    /// Beendet einen Lauf mit Endzeit, Stand und dem SHA-256 des Reports.
-    /// Ein abgeschlossener Lauf macht seine Evidence zu `analyzed`.
+    /// Beendet einen Lauf mit Endzeit, Stand, dem SHA-256 des Reports und,
+    /// wenn er in eine Datei ging, deren absolutem Pfad. Ein abgeschlossener
+    /// Lauf macht seine Evidence zu `analyzed`.
     pub async fn lauf_abschliessen(
         &self,
         akteur: ActorId,
@@ -764,6 +766,7 @@ impl Datenbank {
         stand: LaufStand,
         finished_at: chrono::DateTime<chrono::Utc>,
         report_sha256: Option<&str>,
+        report_pfad: Option<&str>,
     ) -> Result<(), StoreError> {
         // Abbrechen ist ein eigenes Recht; abschließen darf, wer starten darf.
         self.verlangen(
@@ -786,13 +789,14 @@ impl Datenbank {
         .await?;
         let mut tx = self.pool.begin().await?;
         let (evidence, fall): (uuid::Uuid, uuid::Uuid) = sqlx::query_as(
-            "UPDATE analysis_run SET status = $2, finished_at = $3, report_sha256 = $4 \
-             WHERE id = $1 AND status = 'running' RETURNING evidence_id, case_id",
+            "UPDATE analysis_run SET status = $2, finished_at = $3, report_sha256 = $4, \
+             report_path = $5 WHERE id = $1 AND status = 'running' RETURNING evidence_id, case_id",
         )
         .bind(lauf.0)
         .bind(stand.als_text())
         .bind(finished_at)
         .bind(report_sha256)
+        .bind(report_pfad)
         .fetch_optional(&mut *tx)
         .await?
         .ok_or(StoreError::LaufNichtAktiv(lauf))?;
@@ -832,7 +836,7 @@ impl Datenbank {
                     objekt_typ: "report",
                     objekt_id: Some(r.to_string()),
                     ergebnis: AuditResult::Success,
-                    details: json!({"analysis_run_id": lauf}),
+                    details: json!({"analysis_run_id": lauf, "pfad": report_pfad}),
                 },
             )
             .await?;

@@ -316,9 +316,16 @@ async fn lauf_finding_und_evidence_beziehung() {
     let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
     let g = db.modell_speichern(lauf, &m, None).await.unwrap();
     let ende = k.zeitpunkt + chrono::Duration::seconds(5);
-    db.lauf_abschliessen(a(), g.lauf_id, LaufStand::Completed, ende, Some("d00d"))
-        .await
-        .unwrap();
+    db.lauf_abschliessen(
+        a(),
+        g.lauf_id,
+        LaufStand::Completed,
+        ende,
+        Some("d00d"),
+        None,
+    )
+    .await
+    .unwrap();
     let (stand, bericht, support): (String, String, String) = sqlx::query_as(
         "SELECT r.status, r.report_sha256, e.support FROM analysis_run r \
          JOIN evidence e ON e.id = r.evidence_id WHERE r.id = $1",
@@ -334,7 +341,7 @@ async fn lauf_finding_und_evidence_beziehung() {
     // Ein abgeschlossener Lauf lässt sich nicht noch einmal beenden und
     // nimmt nichts mehr an.
     assert!(matches!(
-        db.lauf_abschliessen(a(), g.lauf_id, LaufStand::Failed, ende, None)
+        db.lauf_abschliessen(a(), g.lauf_id, LaufStand::Failed, ende, None, None)
             .await,
         Err(StoreError::LaufNichtAktiv(_))
     ));
@@ -709,9 +716,16 @@ async fn audit_kette_und_rechte() {
     db.evidence_registrieren(a(), &ev).await.unwrap();
     db.evidence_registrieren(a(), &ev).await.unwrap();
     let lauf = db.lauf_beginnen(a(), &k, &angaben).await.unwrap();
-    db.lauf_abschliessen(a(), lauf, LaufStand::Completed, k.zeitpunkt, Some("d00d"))
-        .await
-        .unwrap();
+    db.lauf_abschliessen(
+        a(),
+        lauf,
+        LaufStand::Completed,
+        k.zeitpunkt,
+        Some("d00d"),
+        Some("/x/report.json"),
+    )
+    .await
+    .unwrap();
     // Abweichender Hash: Aktion scheitert, Prüfung bleibt im Audit.
     let falsch = evidence(
         &k,

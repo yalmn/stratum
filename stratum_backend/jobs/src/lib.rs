@@ -194,7 +194,7 @@ impl Worker {
         let geschrieben = stratum_lauf::report_schreiben(&e.report, &pfad);
         let sha = geschrieben.as_ref().ok().cloned();
         if let Some(s) = e.sitzung {
-            s.abschliessen(sha.as_deref())?;
+            s.abschliessen(sha.as_deref(), sha.as_ref().map(|_| pfad.as_path()))?;
         }
         let sha = geschrieben?;
         r.meldung(&format!("[+] Report geschrieben: {}", pfad.display()));

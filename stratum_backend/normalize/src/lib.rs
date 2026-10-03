@@ -28,7 +28,7 @@ mod zugangsdaten;
 
 /// Felder mit Geheimwerten (Passwörter, Hashes, Schlüssel) an
 /// Credential-Entitäten und in Rohfunden der Zugangsdaten.
-pub use zugangsdaten::GEHEIM as GEHEIME_FELDER;
+pub use zugangsdaten::{rohfund_sensibel, GEHEIM as GEHEIME_FELDER};
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -315,13 +315,9 @@ pub fn normalisieren(funde: &[RawFinding], k: &Kontext) -> Modell {
             "programmausfuehrung" => Some(programm::abbilden(f, &mut b)),
             "useraktivitaet" => Some(aktivitaet::abbilden(f, &mut b)),
             "persistence" => Some(persistenz::abbilden(f, &mut b)),
-            // Zugangsdaten nur mit Metadaten, der Geheimwert bleibt im Report.
-            "browser"
-                if f.attributes.get("art").map(String::as_str) == Some("passwort_klartext") =>
-            {
+            d if zugangsdaten::rohfund_sensibel(d, f.attributes.get("art").map(String::as_str)) => {
                 Some(zugangsdaten::abbilden(f, &mut b))
             }
-            "lsa" | "dpapi" => Some(zugangsdaten::abbilden(f, &mut b)),
             "browser" => Some(browser::abbilden(f, &mut b)),
             "srum" => Some(srum::abbilden(f, &mut b)),
             _ => None,

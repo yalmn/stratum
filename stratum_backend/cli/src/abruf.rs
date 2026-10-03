@@ -4,43 +4,21 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
-use sha2::{Digest, Sha256};
-use stratum_analysis::{assign_ids, masterkey_abrufen, AnalysisContext, Finding, NtfsTarget};
+use anyhow::{bail, Result};
+use stratum_analysis::{masterkey_abrufen, AnalysisContext, NtfsTarget};
 use stratum_core::ImageReader;
 
 /// Gibt den Rohfund mit dieser Kennung aus dem Report aus. Die Kennung wird
 /// aus dem Inhalt nachgerechnet; stimmt sie nicht, ist der Report verändert
 /// oder die Kennung falsch, und der Abruf schlägt fehl.
 pub fn fund(report: &Path, id: &str) -> Result<()> {
-    let bytes = std::fs::read(report)
-        .with_context(|| format!("Report nicht lesbar: {}", report.display()))?;
-    let sha256 = hex(&Sha256::digest(&bytes));
-    let v: serde_json::Value = serde_json::from_slice(&bytes)
-        .with_context(|| format!("Report ist kein JSON: {}", report.display()))?;
-    let funde: Vec<Finding> = serde_json::from_value(v["findings"].clone())
-        .context("Report enthält keine lesbare Fundliste")?;
-    let Some(f) = funde.into_iter().find(|f| f.id == id) else {
-        bail!("Kein Fund mit Kennung {id} im Report");
-    };
-    let mut nach = [Finding {
-        id: String::new(),
-        ..f.clone()
-    }];
-    assign_ids(&mut nach);
-    // Inhaltsgleiche Funde tragen `-2`, `-3`, …; verglichen wird der Hash.
-    let basis = id.split('-').next().unwrap_or(id);
-    if nach[0].id != basis {
-        bail!(
-            "Kennung {id} passt nicht zum Inhalt (nachgerechnet {}); Report verändert?",
-            nach[0].id
-        );
-    }
+    let r = stratum_lauf::rohfund::lesen(report, id, None)?;
     eprintln!(
-        "[+] Fund {id} aus {} (SHA-256 {sha256}), Kennung aus dem Inhalt bestätigt",
-        report.display()
+        "[+] Fund {id} aus {} (SHA-256 {}), Kennung aus dem Inhalt bestätigt",
+        report.display(),
+        r.report_sha256
     );
-    println!("{}", serde_json::to_string_pretty(&f)?);
+    println!("{}", serde_json::to_string_pretty(&r.fund)?);
     Ok(())
 }
 
@@ -77,13 +55,10 @@ pub fn masterkey(img: &ImageReader, targets: Vec<NtfsTarget>, guid: &str) -> Res
     Ok(())
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stratum_analysis::{assign_ids, Finding};
 
     fn report_mit(f: &Finding, name: &str) -> std::path::PathBuf {
         let p =

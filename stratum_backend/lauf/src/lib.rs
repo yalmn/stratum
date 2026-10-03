@@ -15,6 +15,7 @@ pub mod bdp;
 pub mod db;
 pub mod liveness;
 pub mod report;
+pub mod rohfund;
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -198,7 +199,7 @@ pub fn analysieren(
                 } else {
                     LaufStand::Failed
                 };
-                if let Err(e) = s.beenden(stand, None) {
+                if let Err(e) = s.beenden(stand, None, None) {
                     r.meldung(&format!("[!] Lauf in der Datenbank nicht beendbar: {e}"));
                 }
             }

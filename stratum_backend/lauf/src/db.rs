@@ -6,6 +6,8 @@
 //! angesprochen (`Handle::block_on`). Der Aufrufer stellt die Laufzeit: die
 //! Kommandozeile eine eigene, ein Worker seine.
 
+use std::path::Path;
+
 use serde_json::{json, Value};
 use stratum_model::{
     ActorId, AnalysisRunId, Case, CaseClassification, CaseId, CaseStatus, Evidence, EvidenceKind,
@@ -224,24 +226,40 @@ impl Sitzung {
     }
 
     /// Beendet den Lauf: mit dem SHA-256 des Reports als abgeschlossen,
-    /// ohne als fehlgeschlagen.
-    pub fn abschliessen(self, report_sha256: Option<&str>) -> Result<(), LaufFehler> {
+    /// ohne als fehlgeschlagen. Mit dem Pfad der Report-Datei lassen sich
+    /// Rohfunde später über die API abrufen.
+    pub fn abschliessen(
+        self,
+        report_sha256: Option<&str>,
+        report_pfad: Option<&Path>,
+    ) -> Result<(), LaufFehler> {
         let stand = if report_sha256.is_some() {
             LaufStand::Completed
         } else {
             LaufStand::Failed
         };
-        self.beenden(stand, report_sha256)
+        self.beenden(stand, report_sha256, report_pfad)
     }
 
     /// Beendet den Lauf mit dem gegebenen Stand.
-    pub fn beenden(self, stand: LaufStand, report_sha256: Option<&str>) -> Result<(), LaufFehler> {
+    pub fn beenden(
+        self,
+        stand: LaufStand,
+        report_sha256: Option<&str>,
+        report_pfad: Option<&Path>,
+    ) -> Result<(), LaufFehler> {
+        // Absolut, damit Server und Worker die Datei unabhängig vom
+        // Arbeitsverzeichnis finden; Pfade, die kein UTF-8 sind, entfallen.
+        let pfad = report_pfad
+            .and_then(|p| std::path::absolute(p).ok())
+            .and_then(|p| p.to_str().map(String::from));
         self.ziel.handle.block_on(self.ziel.db.lauf_abschliessen(
             self.ziel.akteur,
             self.lauf,
             stand,
             chrono::Utc::now(),
             report_sha256,
+            pfad.as_deref(),
         ))?;
         Ok(())
     }

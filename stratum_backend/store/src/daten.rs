@@ -10,7 +10,9 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::types::Json;
-use stratum_model::{ActorId, AuditAction, AuditResult, CaseId, EntityId, Permission};
+use stratum_model::{
+    ActorId, AnalysisRunId, ArtifactId, AuditAction, AuditResult, CaseId, EntityId, Permission,
+};
 
 use crate::audit::AuditEintrag;
 use crate::{Datenbank, StoreError};
@@ -36,6 +38,45 @@ pub fn maskieren(v: &mut Value) -> bool {
         }
     }
     etwas
+}
+
+/// Ersetzt in einem Rohfund (wie im Report) die Geheimwerte, wenn er zu
+/// den Zugangsdaten gehört. Liefert, ob etwas maskiert wurde.
+pub fn rohfund_maskieren(f: &mut Value) -> bool {
+    let domain = f.get("domain").and_then(Value::as_str).unwrap_or_default();
+    let art = f.pointer("/attributes/art").and_then(Value::as_str);
+    if !stratum_normalize::rohfund_sensibel(domain, art) {
+        return false;
+    }
+    let mut etwas = false;
+    if let Some(Value::Object(o)) = f.get_mut("attributes") {
+        for k in stratum_normalize::GEHEIME_FELDER {
+            if let Some(w) = o.get_mut(*k) {
+                *w = json!(MASKIERT);
+                etwas = true;
+            }
+        }
+    }
+    etwas
+}
+
+/// Wo der Rohfund zu einem Artefakt steht, nach geprüften Rechten.
+#[derive(Debug, Clone)]
+pub struct RohfundQuelle {
+    /// Fall des Artefakts.
+    pub fall: CaseId,
+    /// Das Artefakt.
+    pub artefakt: ArtifactId,
+    /// Kennung des Rohfunds im Report.
+    pub rohfund_id: Option<String>,
+    /// Fund vollständig im Artefakt (ohne Report erzeugt).
+    pub eingebettet: Option<Value>,
+    /// Abgeschlossene Läufe der Evidence mit Report, neueste zuerst:
+    /// Lauf, Pfad, SHA-256.
+    pub berichte: Vec<(AnalysisRunId, String, String)>,
+    /// Klartext angefordert (und erlaubt).
+    pub klartext: bool,
+    audit: AuditEintrag,
 }
 
 /// Ereignis: id, kind, occurred_utc, occurred_at, ended_at, attributes,
@@ -408,9 +449,133 @@ impl Datenbank {
     }
 }
 
+impl Datenbank {
+    /// Fundstelle des Rohfunds zu einem Artefakt. Prüft `case.view` und
+    /// `file.view`, mit `klartext` zusätzlich `credential.view_sensitive`
+    /// (abgelehnt als `CREDENTIAL_VIEW` im Audit). Den Erfolg trägt danach
+    /// [`rohfund_protokollieren`](Self::rohfund_protokollieren) ein.
+    pub async fn rohfund_quelle(
+        &self,
+        akteur: ActorId,
+        artefakt: ArtifactId,
+        klartext: bool,
+    ) -> Result<RohfundQuelle, StoreError> {
+        let zeile: Option<(uuid::Uuid, uuid::Uuid, Json<Value>)> =
+            sqlx::query_as("SELECT case_id, evidence_id, raw_metadata FROM artifact WHERE id = $1")
+                .bind(artefakt.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        let Some((fall, evidence, roh)) = zeile else {
+            return Err(StoreError::NichtGefunden(format!(
+                "kein Artefakt {artefakt}"
+            )));
+        };
+        let fall = CaseId(fall);
+        let mut audit = self
+            .lesen_erlaubt(
+                akteur,
+                Some(fall),
+                json!({"art": "rohfund", "artefakt": artefakt}),
+            )
+            .await?;
+        audit.objekt_typ = "artifact";
+        audit.objekt_id = Some(artefakt.to_string());
+        if klartext {
+            self.verlangen(
+                akteur,
+                Permission::CredentialViewSensitive,
+                AuditEintrag {
+                    aktion: AuditAction::CredentialView,
+                    ..audit.clone()
+                },
+            )
+            .await?;
+        }
+        let rohfund_id = roh
+            .0
+            .get("rohfund_id")
+            .and_then(Value::as_str)
+            .map(String::from);
+        let berichte: Vec<(uuid::Uuid, String, String)> = if rohfund_id.is_some() {
+            sqlx::query_as(
+                "SELECT id, report_path, report_sha256 FROM analysis_run \
+                 WHERE evidence_id = $1 AND status = 'completed' \
+                   AND report_path IS NOT NULL AND report_sha256 IS NOT NULL \
+                 ORDER BY finished_at DESC LIMIT 10",
+            )
+            .bind(evidence)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            Vec::new()
+        };
+        Ok(RohfundQuelle {
+            fall,
+            artefakt,
+            eingebettet: rohfund_id.is_none().then_some(roh.0),
+            rohfund_id,
+            berichte: berichte
+                .into_iter()
+                .map(|(l, p, h)| (AnalysisRunId(l), p, h))
+                .collect(),
+            klartext,
+            audit,
+        })
+    }
+
+    /// Trägt den Abruf eines Rohfunds ins Audit ein: `DATA_VIEW` mit Erfolg
+    /// oder Fehlschlag, bei Klartext zusätzlich `CREDENTIAL_VIEW`.
+    pub async fn rohfund_protokollieren(
+        &self,
+        q: &RohfundQuelle,
+        erfolg: bool,
+        details: Value,
+    ) -> Result<(), StoreError> {
+        let mut d = q.audit.details.clone();
+        if let (Value::Object(d), Value::Object(n)) = (&mut d, details) {
+            d.extend(n);
+        }
+        let e = AuditEintrag {
+            ergebnis: if erfolg {
+                AuditResult::Success
+            } else {
+                AuditResult::Failure
+            },
+            details: d,
+            ..q.audit.clone()
+        };
+        self.audit(&e).await?;
+        if erfolg && q.klartext {
+            self.audit(&AuditEintrag {
+                aktion: AuditAction::CredentialView,
+                ..e
+            })
+            .await?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rohfund_nur_bei_zugangsdaten_maskiert() {
+        let mut lsa = json!({"domain": "lsa", "attributes": {"art": "lsa_secret", "wert": "x"}});
+        assert!(rohfund_maskieren(&mut lsa));
+        assert_eq!(lsa["attributes"]["wert"], MASKIERT);
+        let mut browser = json!({"domain": "browser",
+            "attributes": {"art": "passwort_klartext", "passwort": "x", "url": "u"}});
+        assert!(rohfund_maskieren(&mut browser));
+        assert_eq!(browser["attributes"]["url"], "u");
+        // Registry-Werte heißen auch „wert“, sind aber keine Geheimnisse.
+        let mut reg = json!({"domain": "persistence", "attributes": {"wert": "Updater"}});
+        assert!(!rohfund_maskieren(&mut reg));
+        assert_eq!(reg["attributes"]["wert"], "Updater");
+        let mut verlauf = json!({"domain": "browser", "attributes": {"art": "verlauf"}});
+        assert!(!rohfund_maskieren(&mut verlauf));
+    }
 
     #[test]
     fn nur_sensible_objekte_werden_maskiert() {

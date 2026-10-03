@@ -366,7 +366,10 @@ fn main() -> Result<()> {
     // dessen Hash, sonst als fehlgeschlagen.
     if let Some(s) = sitzung {
         let abschluss = s
-            .abschliessen(ergebnis.as_ref().ok().map(String::as_str))
+            .abschliessen(
+                ergebnis.as_ref().ok().map(String::as_str),
+                ergebnis.as_ref().ok().and(cli.out.as_deref()),
+            )
             .context("Analyselauf in der Datenbank nicht abschließbar");
         if ergebnis.is_ok() {
             abschluss?;

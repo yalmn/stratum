@@ -69,9 +69,24 @@ async fn anfrage(
     (status, kopf, wert)
 }
 
-/// Schreibt ein kleines Modell (zwei Anmeldungen, ein LSA-Secret) als
-/// Analyselauf in den Fall.
-async fn modell_schreiben(db: &Datenbank, fall: CaseId, ev: &Evidence) {
+/// Katalog mit Wurzel, einem Verzeichnis und drei Dateien.
+const KATALOG: &str = r#"[
+{"volume_offset":122683392,"mft_record":5,"parent_record":5,"typ":"verzeichnis","pfad":"","name":""},
+{"volume_offset":122683392,"mft_record":100,"parent_record":5,"typ":"verzeichnis","pfad":"Windows","name":"Windows"},
+{"volume_offset":122683392,"mft_record":101,"parent_record":5,"typ":"datei","pfad":"a.txt","name":"a.txt","groesse":3},
+{"volume_offset":122683392,"mft_record":102,"parent_record":5,"typ":"datei","pfad":"b|c.txt","name":"b|c.txt","groesse":4},
+{"volume_offset":122683392,"mft_record":200,"parent_record":100,"typ":"datei","pfad":"Windows\\calc.exe","name":"calc.exe","groesse":49152,"si":{"erstellt":"2026-04-18T09:40:47.3257138Z"}}
+]"#;
+
+/// Schreibt ein kleines Modell (zwei Anmeldungen, ein LSA-Secret) samt
+/// Katalog als abgeschlossenen Analyselauf in den Fall, den Report mit den
+/// Rohfunden nach `ordner`. Liefert den Pfad des Reports.
+async fn modell_schreiben(
+    db: &Datenbank,
+    fall: CaseId,
+    ev: &Evidence,
+    ordner: &std::path::Path,
+) -> std::path::PathBuf {
     use stratum_analysis::RawFinding;
     let anmeldung = |nr: &str, ft: &str| {
         let mut f = RawFinding::new(
@@ -93,10 +108,9 @@ async fn modell_schreiben(db: &Datenbank, fall: CaseId, ev: &Evidence) {
         ] {
             f = f.with(k, v);
         }
-        f.id = format!("anmeldung{nr}");
         f
     };
-    let mut lsa = RawFinding::new(
+    let lsa = RawFinding::new(
         "lsa",
         "_SC_VBoxService",
         "SECURITY\\Policy\\Secrets\\_SC_VBoxService\\CurrVal",
@@ -105,12 +119,16 @@ async fn modell_schreiben(db: &Datenbank, fall: CaseId, ev: &Evidence) {
     .with("wert", "Dienstkennwort1")
     .with("laenge", "30")
     .with("hive_offset", "8100");
-    lsa.id = "lsa1".into();
-    let funde = vec![
+    let mut funde = vec![
         anmeldung("1", "134209790846680107"),
         anmeldung("2", "134209790946680107"),
         lsa,
     ];
+    stratum_analysis::assign_ids(&mut funde);
+    let report = ordner.join("report.json");
+    let text = serde_json::to_vec_pretty(&json!({"findings": funde})).unwrap();
+    std::fs::write(&report, &text).unwrap();
+    let report_sha256 = stratum_core::hash_bytes(&text).sha256;
     let k = stratum_normalize::Kontext {
         case_id: fall,
         evidence_id: ev.id,
@@ -135,6 +153,18 @@ async fn modell_schreiben(db: &Datenbank, fall: CaseId, ev: &Evidence) {
         .await
         .unwrap();
     db.modell_speichern(lauf, &m, None).await.unwrap();
+    db.katalog_speichern(lauf, KATALOG).await.unwrap();
+    db.lauf_abschliessen(
+        ActorId::cli(),
+        lauf,
+        stratum_store::LaufStand::Completed,
+        chrono::Utc::now(),
+        Some(&report_sha256),
+        report.to_str(),
+    )
+    .await
+    .unwrap();
+    report
 }
 
 async fn anmelden(app: &axum::Router, name: &str, pw: &str) -> String {
@@ -448,7 +478,7 @@ async fn ablauf(db: Datenbank) {
     assert_eq!(v["fehler_gesamt"], 0);
 
     // Ergebnisse: kleines Modell aus Rohfunden in den Fall schreiben.
-    modell_schreiben(&db, fall_id, &ev).await;
+    let report = modell_schreiben(&db, fall_id, &ev, tmp.path()).await;
     let (s, _, v) = anfrage(
         &app,
         "GET",
@@ -573,6 +603,163 @@ async fn ablauf(db: Datenbank) {
     )
     .await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Dateibaum: Volumes, Wurzel seitenweise (erst Verzeichnisse), Unterordner.
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/evidence/{}/volumes", ev.id),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v[0]["volume_offset"], 122683392);
+    assert_eq!(
+        (v[0]["eintraege"].as_i64(), v[0]["verzeichnisse"].as_i64()),
+        (Some(5), Some(2))
+    );
+    let wurzel = format!("/api/v1/evidence/{}/dateien?volume=122683392", ev.id);
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{wurzel}&anzahl=2"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    let e = v["eintraege"].as_array().unwrap();
+    assert_eq!(
+        (e[0]["name"].as_str(), e[0]["hat_kinder"].as_bool()),
+        (Some("Windows"), Some(true))
+    );
+    assert_eq!(e[1]["name"], "a.txt");
+    assert_eq!(e[1]["hat_kinder"], false);
+    let weiter = v["naechste"].as_str().unwrap().replace('|', "%7C");
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{wurzel}&anzahl=2&nach={weiter}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(v["eintraege"].as_array().unwrap().len(), 1);
+    assert_eq!(v["eintraege"][0]["name"], "b|c.txt");
+    assert!(v["naechste"].is_null());
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{wurzel}&verzeichnis=100"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(v["eintraege"][0]["path"], "Windows\\calc.exe");
+    assert_eq!(
+        v["eintraege"][0]["si_created"],
+        "2026-04-18T09:40:47.3257138Z"
+    );
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("{wurzel}&nach=kaputt"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/evidence/01a0fdd9-8410-7011-a689-f51d5bd3b3a5/volumes",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Rohfund aus dem Report, geprüft gegen den Hash in der Datenbank.
+    let artefakt = |domain: &'static str| {
+        let db = db.clone();
+        async move {
+            let id: uuid::Uuid = sqlx::query_scalar(
+                "SELECT id FROM artifact WHERE raw_metadata->>'domain' = $1 LIMIT 1",
+            )
+            .bind(domain)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+            format!("/api/v1/artefakte/{id}/rohfund")
+        }
+    };
+    let lsa = artefakt("lsa").await;
+    let (s, _, v) = anfrage(&app, "GET", &lsa, Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["fund"]["attributes"]["wert"], "[maskiert]");
+    assert_eq!(v["fund"]["attributes"]["laenge"], "30");
+    assert_eq!(
+        (v["maskiert"].as_bool(), v["report"]["geprueft"].as_bool()),
+        (Some(true), Some(true))
+    );
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("{lsa}?klartext=true"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{lsa}?klartext=true"),
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["fund"]["attributes"]["wert"], "Dienstkennwort1");
+    let (_, _, v) = anfrage(&app, "GET", &artefakt("eventlog").await, Some(&t_tom), None).await;
+    assert_eq!(
+        (
+            v["maskiert"].as_bool(),
+            v["fund"]["attributes"]["event_id"].as_str()
+        ),
+        (Some(false), Some("4624"))
+    );
+    // Veränderter Report: 409; fehlender Report: 404. Beides im Audit.
+    let mut text = std::fs::read(&report).unwrap();
+    text.push(b'\n');
+    std::fs::write(&report, &text).unwrap();
+    let (s, _, v) = anfrage(&app, "GET", &lsa, Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert!(
+        v["fehler"].as_str().unwrap().contains("Report verändert"),
+        "{v}"
+    );
+    std::fs::remove_file(&report).unwrap();
+    let (s, _, _) = anfrage(&app, "GET", &lsa, Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let zaehlung: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT action, result, count(*) FROM audit_event \
+         WHERE action IN ('FILE_VIEW', 'CREDENTIAL_VIEW') OR object_type = 'artifact' \
+         GROUP BY 1, 2 ORDER BY 1, 2",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        zaehlung,
+        [
+            ("CREDENTIAL_VIEW".into(), "denied".into(), 2),
+            ("CREDENTIAL_VIEW".into(), "success".into(), 2),
+            ("DATA_VIEW".into(), "failure".into(), 2),
+            ("DATA_VIEW".into(), "success".into(), 3),
+            ("FILE_VIEW".into(), "success".into(), 4),
+        ]
+    );
 
     // Abmelden beendet die Sitzung.
     let (s, kopf, _) = anfrage(&app, "DELETE", "/api/v1/sitzung", Some(&t_mia), None).await;
