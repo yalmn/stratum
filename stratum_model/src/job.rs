@@ -10,6 +10,7 @@ use crate::ids::{ActorId, AnalysisRunId, CaseId, JobId};
 /// Art eines Jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum JobKind {
     /// Analyse einer registrierten Evidence.
     Analysis,
@@ -20,6 +21,7 @@ pub enum JobKind {
 /// Stand eines Jobs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum JobStatus {
     /// Wartet auf einen Worker.
     Queued,
@@ -35,6 +37,7 @@ pub enum JobStatus {
 
 /// Ein Job.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Job {
     /// ID (UUIDv7).
     pub id: JobId,

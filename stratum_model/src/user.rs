@@ -13,6 +13,7 @@ use crate::ids::{ActorId, RoleId};
 
 /// Eine einzelne Berechtigung.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum Permission {
     /// Fall anlegen.
     #[serde(rename = "case.create")]
@@ -310,6 +311,7 @@ pub fn role_templates() -> Vec<(&'static str, &'static str, Vec<Permission>)> {
 /// Art eines Kontos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum UserKind {
     /// Mensch, meldet sich mit Passwort an.
     Human,
@@ -320,6 +322,7 @@ pub enum UserKind {
 /// Stand eines Kontos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum UserStatus {
     /// Selbst registriert, wartet auf Freigabe durch einen Superadmin.
     Pending,
@@ -333,6 +336,7 @@ pub enum UserStatus {
 
 /// Ein Benutzerkonto.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct User {
     /// ID; dieselbe wie in `created_by`, `imported_by` und im Audit.
     pub id: ActorId,

@@ -843,12 +843,33 @@ npm run build
 `http://127.0.0.1:8080/` aus (anderer Ort mit `--oberflaeche`,
 `[server] oberflaeche` in `stratum.toml` oder `STRATUM_OBERFLAECHE`).
 Angemeldet wird mit denselben Konten wie in der Kommandozeile; die Sitzung
-steckt in einem HttpOnly-Cookie. Die erste Ausbaustufe zeigt Fälle, legt
-sie an, importiert Evidence aus dem Fallordner, startet Analysen und zeigt
-den Fortschritt laufender Jobs; Schaltflächen erscheinen nur mit dem
-passenden Recht. Zeiten stehen immer in UTC. Für die Entwicklung startet
-`npm run dev` einen Vite-Server, der `/api` an `127.0.0.1:8080`
-weiterreicht.
+steckt in einem HttpOnly-Cookie.
+
+Die Oberfläche ist ein Arbeitsplatz mit festen Zonen: Topbar (Fall,
+Suche, Jobs, Benachrichtigungen, Integrität der Evidence, Konto), Sidebar
+(global und je Fall, einklappbar), Workspace und Context Drawer rechts.
+Details öffnen im Drawer, ohne die Ansicht zu verlassen; der Drawer steht
+in der Adresse (`?detail=evidence:<id>`), Ansichten sind damit teilbar.
+Formulare wie Analyse und Import erscheinen im Workspace statt in
+Dialogen. Beschriftungen sind englisch, Zeiten immer UTC. Ansichten, die
+noch kein Backend haben (Timeline, Graph, Findings, War Room …), stehen
+gesperrt in der Navigation und nennen ihre Ausbaustufe.
+
+| Taste | Wirkung |
+|---|---|
+| `⌘K` bzw. `Ctrl+K`, `/` | Command Palette |
+| `G` dann `C`, `O`, `E` | Cases, Overview, Evidence |
+| `Esc` | Drawer schließen |
+| `J`/`K`, Pfeiltasten, `Enter` | Zeile wählen, öffnen |
+| `[` | Sidebar ein- und ausklappen |
+
+`/dev/design-system` zeigt alle Bausteine (Tokens, Buttons, Eingaben,
+Badges, Tabelle, Drawer, Palette …) mit Beispielwerten. Die
+TypeScript-Typen der Modellobjekte werden aus `stratum_model` erzeugt
+(`npm run typen`, über `ts-rs` hinter dem Feature `ts`) und liegen unter
+`src/lib/api/model/`; sie werden nicht von Hand geändert. Für die
+Entwicklung startet `npm run dev` einen Vite-Server, der `/api` an
+`127.0.0.1:8080` weiterreicht.
 
 ## E01-Images
 

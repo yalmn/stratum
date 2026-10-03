@@ -11,3 +11,8 @@ serde.workspace = true
 serde_json = "1.0.151"
 uuid = { version = "1.26.1", features = ["v5", "v7", "serde"] }
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now", "serde"] }
+ts-rs = { version = "12.0.1", optional = true, features = ["chrono-impl", "uuid-impl", "serde-json-impl", "no-serde-warnings"] }
+
+[features]
+# TypeScript-Typen für die Weboberfläche erzeugen (npm run typen).
+ts = ["dep:ts-rs"]

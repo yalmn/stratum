@@ -10,6 +10,7 @@ use crate::provenance::DerivationKind;
 /// Art eines Beweisobjekts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum EvidenceKind {
     /// Rohimage eines Datenträgers (dd).
     RawDiskImage,
@@ -50,6 +51,7 @@ pub enum EvidenceKind {
 /// unterstützte Arten werden trotzdem registriert und gehasht.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum EvidenceSupport {
     /// Registriert und gehasht, noch nicht ausgewertet.
     Recognized,
@@ -63,6 +65,7 @@ pub enum EvidenceSupport {
 
 /// Ein Beweisobjekt in einem Fall.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Evidence {
     /// Technische ID des Imports (UUIDv7).
     pub id: EvidenceId,
@@ -79,6 +82,8 @@ pub struct Evidence {
     /// Ablageort (Pfad oder URI).
     pub source_uri: String,
     /// Größe in Byte (bei E01 die Mediengröße).
+    // JSON-Zahl; bis 2^53 Byte (8 PiB) exakt.
+    #[cfg_attr(feature = "ts", ts(type = "number"))]
     pub size: u64,
     /// SHA-256 über die Mediendaten (hex).
     pub sha256: String,

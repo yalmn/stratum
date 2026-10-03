@@ -36,6 +36,7 @@ macro_rules! id_typ {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
         #[serde(transparent)]
         pub struct $name(pub Uuid);
 

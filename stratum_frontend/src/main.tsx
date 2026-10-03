@@ -1,69 +1,57 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { BrowserRouter, Link, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { QueryCache, QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { ApiFehler } from "./api";
-import { MitSitzung, useSitzung } from "./sitzung";
-import { Faelle } from "./seiten/Faelle";
-import { FallSeite } from "./seiten/Fall";
-import "./stil.css";
+import "@fontsource-variable/inter";
+import "@fontsource-variable/jetbrains-mono";
+import "./design-system/tokens.css";
+import "./design-system/base.css";
+import "./design-system/components.css";
+import "./design-system/shell.css";
+import { ApiError, isUnauthorized } from "./lib/api/client";
+import { keys } from "./lib/api/queries";
+import { AppShell } from "./app/layouts/AppShell";
+import { SessionGate } from "./features/auth/SessionGate";
+import { CaseLayout } from "./features/cases/CaseLayout";
+import { CasesPage } from "./features/cases/CasesPage";
+import { DesignSystemPage } from "./design-system/DesignSystemPage";
 
 const client: QueryClient = new QueryClient({
-  // Läuft die Sitzung ab, zurück zur Anmeldung. `/ich` selbst nicht, sonst
+  // Läuft die Sitzung ab, zurück zur Anmeldung. /ich selbst nicht, sonst
   // fragte eine 401 dort endlos neu an.
   queryCache: new QueryCache({
-    onError: (e, anfrage) => {
-      if (e instanceof ApiFehler && e.status === 401 && anfrage.queryKey[0] !== "ich") {
-        void client.invalidateQueries({ queryKey: ["ich"] });
+    onError: (e, query) => {
+      if (isUnauthorized(e) && query.queryKey[0] !== keys.me[0]) {
+        void client.invalidateQueries({ queryKey: keys.me });
       }
     },
   }),
   defaultOptions: {
     queries: {
-      retry: (n, e) => !(e instanceof ApiFehler && e.status < 500) && n < 2,
+      retry: (n, e) => !(e instanceof ApiError && e.status < 500) && n < 2,
       refetchOnWindowFocus: false,
+      staleTime: 10_000,
     },
   },
 });
 
-function Rahmen() {
-  const { ich, abmelden } = useSitzung();
-  return (
-    <>
-      <header className="kopf">
-        <Link to="/" className="marke">
-          stratum
-        </Link>
-        <nav>
-          <Link to="/">Fälle</Link>
-        </nav>
-        <span className="konto">
-          {ich.konto.display_name} ({ich.konto.username})
-          <button type="button" className="leise" onClick={abmelden}>
-            Abmelden
-          </button>
-        </span>
-      </header>
-      <main className="inhalt">
-        <Routes>
-          <Route path="/" element={<Faelle />} />
-          <Route path="/faelle/:nummer/*" element={<FallSeite />} />
-          <Route path="*" element={<p className="hinweis">Seite nicht gefunden.</p>} />
-        </Routes>
-      </main>
-    </>
-  );
-}
-
-const wurzel = document.getElementById("wurzel");
-if (wurzel) {
-  createRoot(wurzel).render(
+const root = document.getElementById("wurzel");
+if (root) {
+  createRoot(root).render(
     <StrictMode>
       <QueryClientProvider client={client}>
         <BrowserRouter>
-          <MitSitzung>
-            <Rahmen />
-          </MitSitzung>
+          <SessionGate>
+            <AppShell>
+              <Routes>
+                <Route path="/" element={<Navigate to="/cases" replace />} />
+                <Route path="/cases" element={<CasesPage />} />
+                <Route path="/cases/:number/*" element={<CaseLayout />} />
+                <Route path="/dev/design-system" element={<DesignSystemPage />} />
+                <Route path="*" element={<Navigate to="/cases" replace />} />
+              </Routes>
+            </AppShell>
+          </SessionGate>
         </BrowserRouter>
       </QueryClientProvider>
     </StrictMode>,

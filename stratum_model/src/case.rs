@@ -8,6 +8,7 @@ use crate::ids::{ActorId, CaseId, TagId};
 /// Bearbeitungsstand eines Falls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum CaseStatus {
     /// Angelegt.
     New,
@@ -27,6 +28,7 @@ pub enum CaseStatus {
 /// legt sie nicht fest (Grundlage für spätere attributbasierte Rechte).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum CaseClassification {
     /// Offen.
     Open,
@@ -40,6 +42,7 @@ pub enum CaseClassification {
 
 /// Ein Fall.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Case {
     /// Technische ID (UUIDv7).
     pub id: CaseId,
