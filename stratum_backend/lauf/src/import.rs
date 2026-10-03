@@ -74,6 +74,68 @@ pub fn im_ordner(datei: &Path, ordner: &Path) -> Result<PathBuf, LaufFehler> {
     }
 }
 
+/// Eintrag im Fallordner.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OrdnerEintrag {
+    /// Name.
+    pub name: String,
+    /// `dir`, `file` oder `link` (symbolische Links werden nicht verfolgt).
+    pub typ: &'static str,
+    /// Größe in Bytes (Dateien).
+    pub groesse: Option<u64>,
+    /// Absoluter, aufgelöster Pfad.
+    pub pfad: String,
+}
+
+/// Höchstens so viele Einträge liefert [`ordner_auflisten`].
+pub const ORDNER_MAX: usize = 2000;
+
+/// Listet `rel` innerhalb von `ordner` auf: erst Verzeichnisse, dann
+/// Dateien, je nach Name. Der aufgelöste Pfad muss im Ordner bleiben.
+pub fn ordner_auflisten(
+    ordner: &Path,
+    rel: &str,
+) -> Result<(String, Vec<OrdnerEintrag>), LaufFehler> {
+    let basis = std::fs::canonicalize(ordner)
+        .kontext(|| format!("Fallordner nicht gefunden: {}", ordner.display()))?;
+    let ziel = std::fs::canonicalize(basis.join(rel.trim_start_matches('/')))
+        .kontext(|| format!("Ordner nicht gefunden: {rel}"))?;
+    if !ziel.starts_with(&basis) {
+        return Err(LaufFehler::Eingabe(format!(
+            "{rel} liegt nicht im Fallordner"
+        )));
+    }
+    let mut liste = Vec::new();
+    for e in
+        std::fs::read_dir(&ziel).kontext(|| format!("Ordner nicht lesbar: {}", ziel.display()))?
+    {
+        let Ok(e) = e else { continue };
+        let Ok(m) = e.metadata() else { continue };
+        let typ = if m.file_type().is_symlink() {
+            "link"
+        } else if m.is_dir() {
+            "dir"
+        } else {
+            "file"
+        };
+        liste.push(OrdnerEintrag {
+            name: e.file_name().to_string_lossy().into_owned(),
+            typ,
+            groesse: (typ == "file").then_some(m.len()),
+            pfad: e.path().display().to_string(),
+        });
+        if liste.len() >= ORDNER_MAX {
+            break;
+        }
+    }
+    liste.sort_by(|a, b| (a.typ != "dir", &a.name).cmp(&(b.typ != "dir", &b.name)));
+    let rel = ziel
+        .strip_prefix(&basis)
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
+    Ok((rel, liste))
+}
+
 /// Liest die Datei, hasht sie (abbrechbar, mit Fortschritt als
 /// [`Phase::Hashing`]) und stellt die Evidence zusammen. Bei E01 müssen die
 /// Akquise-Hashes zu den Mediendaten passen.
@@ -203,6 +265,32 @@ mod tests {
             einlesen(&angaben(p), &Sofort),
             Err(LaufFehler::Abgebrochen)
         ));
+    }
+
+    #[test]
+    fn ordner_nur_innerhalb() {
+        let d = tempfile::tempdir().unwrap();
+        let fall = d.path().join("fall");
+        std::fs::create_dir_all(fall.join("unter")).unwrap();
+        std::fs::write(fall.join("b.dd"), b"12345").unwrap();
+        std::fs::write(fall.join("a.E01"), b"1").unwrap();
+        let (rel, l) = ordner_auflisten(&fall, "").unwrap();
+        assert_eq!(rel, "");
+        let namen: Vec<_> = l
+            .iter()
+            .map(|e| (e.name.as_str(), e.typ, e.groesse))
+            .collect();
+        assert_eq!(
+            namen,
+            [
+                ("unter", "dir", None),
+                ("a.E01", "file", Some(1)),
+                ("b.dd", "file", Some(5))
+            ]
+        );
+        assert_eq!(ordner_auflisten(&fall, "unter").unwrap().0, "unter");
+        assert!(ordner_auflisten(&fall, "..").is_err());
+        assert!(ordner_auflisten(&fall, "fehlt").is_err());
     }
 
     #[test]

@@ -40,7 +40,12 @@ type Kontozeile = (
     String,
     bool,
     chrono::DateTime<Utc>,
+    bool,
 );
+
+/// Anmeldename und Startpasswort des ersten Superadmins. Das Passwort muss
+/// bei der ersten Anmeldung ersetzt werden.
+pub const STARTKONTO: &str = "superadmin";
 
 fn aus_text<T: serde::de::DeserializeOwned>(t: String) -> Result<T, StoreError> {
     Ok(serde_json::from_value(Value::String(t))?)
@@ -128,13 +133,15 @@ impl Datenbank {
     /// Konto nach Anmeldename, mit Rollen.
     pub async fn benutzer(&self, username: &str) -> Result<Option<User>, StoreError> {
         let zeile: Option<Kontozeile> = sqlx::query_as(
-            "SELECT id, username, display_name, kind, status, superadmin, created_at \
-             FROM app_user WHERE username = $1",
+            "SELECT id, username, display_name, kind, status, superadmin, created_at, \
+             password_change_required FROM app_user WHERE username = $1",
         )
         .bind(username)
         .fetch_optional(&self.pool)
         .await?;
-        let Some((id, username, display_name, kind, status, superadmin, created_at)) = zeile else {
+        let Some((id, username, display_name, kind, status, superadmin, created_at, wechsel)) =
+            zeile
+        else {
             return Ok(None);
         };
         let rollen: Vec<uuid::Uuid> =
@@ -151,6 +158,7 @@ impl Datenbank {
             superadmin,
             created_at,
             roles: rollen.into_iter().map(RoleId).collect(),
+            password_change_required: wechsel,
         }))
     }
 
@@ -305,6 +313,105 @@ impl Datenbank {
         ))
     }
 
+    async fn superadmins(&self) -> Result<i64, StoreError> {
+        Ok(
+            sqlx::query_scalar("SELECT count(*) FROM app_user WHERE superadmin")
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Legt beim ersten Start den Superadmin [`STARTKONTO`] mit dem
+    /// Startpasswort gleichen Namens an, falls es noch keinen Superadmin
+    /// gibt. Das Passwort muss bei der ersten Anmeldung ersetzt werden.
+    /// Liefert das Konto, wenn es neu angelegt wurde.
+    pub async fn superadmin_startkonto(&self) -> Result<Option<User>, StoreError> {
+        if self.superadmins().await? > 0 {
+            return Ok(None);
+        }
+        let u = User {
+            id: ActorId::new(),
+            username: STARTKONTO.into(),
+            display_name: "Superadmin".into(),
+            kind: UserKind::Human,
+            status: UserStatus::Active,
+            superadmin: true,
+            created_at: Utc::now(),
+            roles: Vec::new(),
+            password_change_required: true,
+        };
+        // Bewusst ohne Mindestlänge: das Startpasswort ist bekannt und nur
+        // bis zur ersten Anmeldung gültig.
+        let hash = Argon2::default()
+            .hash_password(STARTKONTO.as_bytes())
+            .map_err(|e| StoreError::Passwort(e.to_string()))?
+            .to_string();
+        let mut tx = self.pool.begin().await?;
+        konto_einfuegen(&mut tx, &u, Some(hash), Some(ActorId::cli())).await?;
+        sqlx::query("UPDATE app_user SET password_change_required = true WHERE id = $1")
+            .bind(u.id.0)
+            .execute(&mut *tx)
+            .await?;
+        audit::schreiben(
+            &mut tx,
+            &eintrag(
+                ActorId::cli(),
+                AuditAction::UserCreate,
+                "user",
+                u.id,
+                AuditResult::Success,
+                json!({"username": STARTKONTO, "superadmin": true, "startkonto": true}),
+            ),
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(Some(u))
+    }
+
+    /// Übergibt das Superadmin-Recht an ein anderes aktives Konto; der
+    /// bisherige Superadmin verliert es in derselben Transaktion. Es bleibt
+    /// immer genau einer.
+    pub async fn superadmin_uebertragen(
+        &self,
+        akteur: ActorId,
+        an: ActorId,
+    ) -> Result<(), StoreError> {
+        let e = eintrag(
+            akteur,
+            AuditAction::SuperadminSet,
+            "user",
+            an,
+            AuditResult::Success,
+            json!({"uebertragen_von": akteur}),
+        );
+        self.nur_superadmin(akteur, &e).await?;
+        if akteur == an {
+            return Err(StoreError::Eingabe("schon Superadmin".into()));
+        }
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("UPDATE app_user SET superadmin = false WHERE id = $1")
+            .bind(akteur.0)
+            .execute(&mut *tx)
+            .await?;
+        let n = sqlx::query(
+            "UPDATE app_user SET superadmin = true WHERE id = $1 AND kind = 'human' \
+             AND status = 'active'",
+        )
+        .bind(an.0)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if n != 1 {
+            tx.rollback().await?;
+            return Err(StoreError::Eingabe(
+                "nur an ein aktives, menschliches Konto".into(),
+            ));
+        }
+        audit::schreiben(&mut tx, &e).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn aktive_superadmins(&self) -> Result<i64, StoreError> {
         Ok(sqlx::query_scalar(
             "SELECT count(*) FROM app_user WHERE superadmin AND status = 'active'",
@@ -332,10 +439,20 @@ impl Datenbank {
             json!({"superadmin": true}),
         );
         anmeldename_pruefen(username)?;
-        let erste = akteur == ActorId::cli() && self.aktive_superadmins().await? == 0;
-        if !erste {
-            self.nur_superadmin(akteur, &e).await?;
+        // Es gibt genau einen Superadmin: einrichten nur, solange keiner
+        // existiert (erste Einrichtung über die Kommandozeile).
+        if self.superadmins().await? > 0 {
+            self.audit(&AuditEintrag {
+                ergebnis: AuditResult::Denied,
+                details: json!({"grund": "superadmin_vorhanden"}),
+                ..e.clone()
+            })
+            .await?;
+            return Err(StoreError::Verweigert(
+                "es gibt bereits einen Superadmin; übertragen statt neu einrichten".into(),
+            ));
         }
+        let erste = true;
         let u = User {
             id: ActorId::new(),
             username: username.into(),
@@ -345,6 +462,7 @@ impl Datenbank {
             superadmin: true,
             created_at: Utc::now(),
             roles: Vec::new(),
+            password_change_required: false,
         };
         let hash = passwort_hash(passwort)?;
         let mut tx = self.pool.begin().await?;
@@ -382,6 +500,7 @@ impl Datenbank {
             superadmin: false,
             created_at: Utc::now(),
             roles: Vec::new(),
+            password_change_required: false,
         };
         let mut tx = self.pool.begin().await?;
         if let Err(f) = konto_einfuegen(&mut tx, &u, Some(hash), None).await {
@@ -439,6 +558,7 @@ impl Datenbank {
             superadmin: false,
             created_at: Utc::now(),
             roles: rollen.to_vec(),
+            password_change_required: false,
         };
         let mut tx = self.pool.begin().await?;
         konto_einfuegen(&mut tx, &u, None, Some(akteur)).await?;
@@ -552,45 +672,6 @@ impl Datenbank {
             None,
         )
         .await
-    }
-
-    /// Vergibt oder entzieht das Superadmin-Recht (nur aktiven Menschen; dem
-    /// letzten aktiven Superadmin nicht).
-    pub async fn superadmin_setzen(
-        &self,
-        akteur: ActorId,
-        user: ActorId,
-        ja: bool,
-    ) -> Result<(), StoreError> {
-        let e = eintrag(
-            akteur,
-            AuditAction::SuperadminSet,
-            "user",
-            user,
-            AuditResult::Success,
-            json!({"superadmin": ja}),
-        );
-        self.nur_superadmin(akteur, &e).await?;
-        if !ja && self.ist_superadmin(user).await? && self.aktive_superadmins().await? <= 1 {
-            return Err(StoreError::Verweigert(
-                "der letzte aktive Superadmin bleibt Superadmin".into(),
-            ));
-        }
-        let mut tx = self.pool.begin().await?;
-        let n = sqlx::query(
-            "UPDATE app_user SET superadmin = $2 WHERE id = $1 AND kind = 'human' \
-             AND status = 'active' AND superadmin <> $2",
-        )
-        .bind(user.0)
-        .bind(ja)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
-        if n == 1 {
-            audit::schreiben(&mut tx, &e).await?;
-        }
-        tx.commit().await?;
-        Ok(())
     }
 
     /// Setzt die Rollen eines Kontos auf genau die gegebene Menge.
@@ -799,11 +880,15 @@ impl Datenbank {
         }
         let neu_hash = passwort_hash(neu)?;
         let mut tx = self.pool.begin().await?;
-        sqlx::query("UPDATE app_user SET password_hash = $2 WHERE id = $1")
-            .bind(id)
-            .bind(neu_hash)
-            .execute(&mut *tx)
-            .await?;
+        // Vom Superadmin gesetzt: das Konto muss es selbst ersetzen.
+        sqlx::query(
+            "UPDATE app_user SET password_hash = $2, password_change_required = $3 WHERE id = $1",
+        )
+        .bind(id)
+        .bind(neu_hash)
+        .bind(akteur != user)
+        .execute(&mut *tx)
+        .await?;
         let beendet = sqlx::query(
             "UPDATE app_session SET ended_at = now() WHERE user_id = $1 AND ended_at IS NULL",
         )

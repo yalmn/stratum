@@ -152,6 +152,38 @@ impl Datenbank {
         .flatten())
     }
 
+    /// Fallordner zum Durchsuchen vor einem Import (braucht
+    /// `evidence.import`) samt den Pfaden schon registrierter Evidence. Das
+    /// Ansehen steht als `FILE_VIEW` auf dem Fallordner im Audit.
+    pub async fn fallordner_ansehen(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        pfad: &str,
+    ) -> Result<(String, Vec<String>), StoreError> {
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion: AuditAction::FileView,
+            objekt_typ: "case_folder",
+            objekt_id: None,
+            ergebnis: AuditResult::Success,
+            details: json!({"pfad": pfad}),
+        };
+        self.verlangen(akteur, Permission::EvidenceImport, e.clone())
+            .await?;
+        let ordner = self.fall_ordner(fall).await?.ok_or_else(|| {
+            StoreError::Eingabe("Fall ohne Fallordner; Import nur aus dem Fallordner".into())
+        })?;
+        let quellen: Vec<String> =
+            sqlx::query_scalar("SELECT source_uri FROM evidence WHERE case_id = $1")
+                .bind(fall.0)
+                .fetch_all(&self.pool)
+                .await?;
+        self.audit(&e).await?;
+        Ok((ordner, quellen))
+    }
+
     /// Reiht einen Evidence-Import ein (braucht `evidence.import`). Erst
     /// nach der Rechteprüfung wird `pruefen` mit dem Fallordner aufgerufen;
     /// es löst die Datei auf, prüft, dass sie im Ordner liegt, und liefert

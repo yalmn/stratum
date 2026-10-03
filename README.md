@@ -661,7 +661,7 @@ stratum konto liste --als chef
 stratum konto freigeben mia --rolle Analyst --als chef
 stratum rolle anlegen Fallführung --recht case.create --recht case.view --als chef
 stratum konto rollen mia --rolle Analyst --rolle Fallführung --als chef
-stratum superadmin ernennen mia --als chef
+stratum superadmin uebertragen mia --als chef
 stratum rolle liste
 stratum rechte
 stratum audit liste --anzahl 50 --als mia
@@ -749,6 +749,11 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | Methode und Pfad | Zweck |
 |---|---|
 | `POST`, `DELETE /api/v1/sitzung` | anmelden, abmelden |
+| `POST /api/v1/registrierung` | Konto registrieren (wartet auf Freigabe) |
+| `POST /api/v1/ich/passwort` | eigenes Passwort ändern |
+| `GET /api/v1/konten`, `GET /api/v1/rollen` | Konten und Rollen (Superadmin) |
+| `POST /api/v1/konten/{id}/freigeben`, `…/ablehnen`, `…/sperren`, `…/passwort`, `…/superadmin`; `PUT …/rollen` | Konten verwalten (Superadmin) |
+| `GET /api/v1/faelle/{nummer}/ordner?pfad=` | Fallordner zur Auswahl beim Import |
 | `GET /api/v1/ich` | eigenes Konto und Rechte |
 | `GET /api/v1/rechte` | Katalog der Berechtigungen |
 | `GET`, `POST /api/v1/faelle` | Fälle auflisten, anlegen |
@@ -804,12 +809,13 @@ Fehler kommen als `{"fehler": "…"}` mit 400, 401, 403, 404, 409 oder 500
 (innere Fehler ohne Einzelheiten).
 
 `konto passwort NAME` ändert ein Passwort: das eigene nach Eingabe des
-bisherigen, als Superadmin das eines anderen Kontos; offene Sitzungen des
+bisherigen, als Superadmin das eines anderen Kontos (das es dann selbst
+ersetzen muss); offene Sitzungen des
 Kontos enden, im Audit steht `PASSWORD_CHANGE` (nie das Passwort).
 Weitere: `konto ablehnen`, `konto sperren`, `konto dienst` (Dienstkonto
 ohne Passwort), `rolle aendern` (ohne `--recht` bleiben die
 Berechtigungen, mit `--recht` gelten genau die angegebenen), `rolle
-loeschen`, `superadmin entziehen`. Die Datenbank kommt wie bei `--db` aus
+loeschen`, `superadmin uebertragen`. Die Datenbank kommt wie bei `--db` aus
 `STRATUM_DB_URL` und `STRATUM_DB_PASSWORT_DATEI`.
 
 Das Audit (`audit_event`) hält fest, wer was getan hat: Fall angelegt,
@@ -850,6 +856,19 @@ npm run build
 `[server] oberflaeche` in `stratum.toml` oder `STRATUM_OBERFLAECHE`).
 Angemeldet wird mit denselben Konten wie in der Kommandozeile; die Sitzung
 steckt in einem HttpOnly-Cookie.
+
+Beim ersten Start auf einer leeren Datenbank legt `stratum server` den
+einzigen Superadmin `superadmin` mit dem Startpasswort `superadmin` an.
+Nach der ersten Anmeldung muss es ersetzt werden (mindestens 12 Zeichen);
+bis dahin lehnt die API alles andere ab. Es gibt immer genau einen
+Superadmin; er kann das Recht an ein anderes Konto übergeben (`stratum
+superadmin uebertragen NAME` oder in der Administration). Neue Konten
+registrieren sich auf der Anmeldeseite unter "Create account" und warten,
+bis der Superadmin sie unter Administration mit Rollen freigibt. Setzt er
+ein Passwort zurück, muss das Konto es bei der nächsten Anmeldung selbst
+ersetzen. Evidence wird aus dem Fallordner auf dem Server importiert, nicht
+über den Browser hochgeladen: "Add Evidence" zeigt den Ordner zum
+Auswählen.
 
 Ansichten je Fall: Overview, War Room (Notizen und Systemeinträge zu
 Jobs und Exporten, nur anhängbar), Evidence (Import, Analyse, Details),

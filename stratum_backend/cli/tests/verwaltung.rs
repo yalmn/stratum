@@ -324,11 +324,26 @@ fn ablauf_mit_datenbank() {
     ));
     nein(&mit(&["konto", "liste"], &als_mia), "Anmeldung abgelehnt");
     let als_mia = ["--als", "mia", "--als-passwort-datei", mia_neu];
-    ok(&mit(&["superadmin", "ernennen", "mia"], &als_chef));
-    ok(&mit(&["superadmin", "entziehen", "chef"], &als_mia));
+    // Genau ein Superadmin: übergeben, nicht ernennen.
     nein(
-        &mit(&["superadmin", "entziehen", "mia"], &als_mia),
-        "letzte",
+        &mit(
+            &[
+                "superadmin",
+                "einrichten",
+                "zweiter",
+                "--anzeigename",
+                "Z",
+                "--passwort-datei",
+                chef,
+            ],
+            &als_chef,
+        ),
+        "bereits einen Superadmin",
+    );
+    ok(&mit(&["superadmin", "uebertragen", "mia"], &als_chef));
+    nein(
+        &mit(&["superadmin", "uebertragen", "chef"], &als_chef),
+        "nur Superadmins",
     );
     ok(&mit(&["rolle", "loeschen", "Fallführung"], &als_mia));
     let pruefung = ok(&mit(&["audit", "pruefen"], &als_mia));

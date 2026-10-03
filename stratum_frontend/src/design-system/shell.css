@@ -1202,3 +1202,106 @@ a.btn {
   border-top: 1px solid var(--border-muted);
   background: var(--bg-sidebar);
 }
+
+/* Administration */
+.admin-pending {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  padding: var(--sp-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.role-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.admin-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-account {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.admin-account:last-child {
+  border-bottom: none;
+}
+
+.admin-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+}
+
+.admin-who {
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+}
+
+.admin-roles {
+  font-size: var(--fs-sm);
+}
+
+.account-form {
+  max-width: 420px;
+}
+
+/* Ordnerauswahl beim Import */
+.folder-browser {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-md);
+  background: var(--bg-root);
+  max-height: 320px;
+  overflow: auto;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: 30px;
+  padding: 0 var(--sp-3);
+  border: none;
+  border-bottom: 1px solid var(--border-muted);
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder-row:hover {
+  background: var(--bg-hover);
+}
+
+.folder-row.selected {
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.folder-row svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+.folder-row .size {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}

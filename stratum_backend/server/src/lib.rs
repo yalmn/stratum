@@ -17,7 +17,7 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{any, get, post};
+use axum::routing::{any, get, post, put};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use serde::Deserialize;
@@ -54,6 +54,9 @@ pub enum ApiFehler {
     /// Gespeichertes passt nicht mehr zu seinem Hash.
     #[error("{0}")]
     Integritaet(String),
+    /// Das Konto muss zuerst sein Passwort ändern.
+    #[error("Passwort muss zuerst geändert werden")]
+    PasswortAendern,
 }
 
 impl IntoResponse for ApiFehler {
@@ -63,6 +66,7 @@ impl IntoResponse for ApiFehler {
             ApiFehler::Anfrage(_) => StatusCode::BAD_REQUEST,
             ApiFehler::NichtVerfuegbar(_) => StatusCode::NOT_FOUND,
             ApiFehler::Integritaet(_) => StatusCode::CONFLICT,
+            ApiFehler::PasswortAendern => StatusCode::FORBIDDEN,
             ApiFehler::Store(s) => match s {
                 StoreError::Verweigert(_) => StatusCode::FORBIDDEN,
                 StoreError::NichtGefunden(_) => StatusCode::NOT_FOUND,
@@ -140,10 +144,27 @@ impl FromRequestParts<Zustand> for Angemeldet {
     type Rejection = ApiFehler;
 
     async fn from_request_parts(parts: &mut Parts, z: &Zustand) -> Result<Self, Self::Rejection> {
+        let AuchMitPasswortpflicht(u) =
+            AuchMitPasswortpflicht::from_request_parts(parts, z).await?;
+        if u.password_change_required {
+            return Err(ApiFehler::PasswortAendern);
+        }
+        Ok(Angemeldet(u))
+    }
+}
+
+/// Angemeldet, auch wenn das Konto zuerst sein Passwort ändern muss. Nur
+/// für `/ich` und den Passwortwechsel.
+pub struct AuchMitPasswortpflicht(pub User);
+
+impl FromRequestParts<Zustand> for AuchMitPasswortpflicht {
+    type Rejection = ApiFehler;
+
+    async fn from_request_parts(parts: &mut Parts, z: &Zustand) -> Result<Self, Self::Rejection> {
         let t = token(&parts.headers).ok_or(ApiFehler::NichtAngemeldet)?;
         z.db.sitzung_pruefen(&t)
             .await?
-            .map(Angemeldet)
+            .map(AuchMitPasswortpflicht)
             .ok_or(ApiFehler::NichtAngemeldet)
     }
 }
@@ -153,6 +174,19 @@ pub fn router(db: Datenbank) -> Router {
     Router::new()
         .route("/api/v1/sitzung", post(anmelden).delete(abmelden))
         .route("/api/v1/ich", get(ich))
+        .route("/api/v1/ich/passwort", post(eigenes_passwort))
+        .route("/api/v1/registrierung", post(registrieren))
+        .route("/api/v1/konten", get(konten))
+        .route("/api/v1/konten/{id}/freigeben", post(konto_freigeben))
+        .route("/api/v1/konten/{id}/ablehnen", post(konto_ablehnen))
+        .route("/api/v1/konten/{id}/sperren", post(konto_sperren))
+        .route("/api/v1/konten/{id}/rollen", put(konto_rollen))
+        .route("/api/v1/konten/{id}/passwort", post(konto_passwort))
+        .route(
+            "/api/v1/konten/{id}/superadmin",
+            post(superadmin_uebertragen),
+        )
+        .route("/api/v1/rollen", get(rollen))
         .route("/api/v1/rechte", get(rechte))
         .route("/api/v1/faelle", get(faelle).post(fall_neu))
         .route("/api/v1/faelle/{nummer}", get(fall_zeigen))
@@ -164,6 +198,7 @@ pub fn router(db: Datenbank) -> Router {
             "/api/v1/faelle/{nummer}/evidence",
             post(evidence_importieren),
         )
+        .route("/api/v1/faelle/{nummer}/ordner", get(fallordner))
         .route("/api/v1/faelle/{nummer}/zeitachse", get(zeitachse))
         .route(
             "/api/v1/faelle/{nummer}/zeitachse/arten",
@@ -314,9 +349,164 @@ async fn abmelden(State(z): State<Zustand>, headers: HeaderMap) -> Antwort<Respo
     Ok(r)
 }
 
-async fn ich(State(z): State<Zustand>, Angemeldet(u): Angemeldet) -> Antwort<Json<Value>> {
+async fn ich(
+    State(z): State<Zustand>,
+    AuchMitPasswortpflicht(u): AuchMitPasswortpflicht,
+) -> Antwort<Json<Value>> {
     let rechte = z.db.rechte(u.id).await?;
     Ok(Json(json!({ "konto": u, "rechte": rechte })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Passwortwechsel {
+    bisher: String,
+    neu: String,
+}
+
+/// Eigenes Passwort ändern; auch mit Passwortpflicht erlaubt. Danach enden
+/// alle Sitzungen des Kontos, auch die laufende.
+async fn eigenes_passwort(
+    State(z): State<Zustand>,
+    AuchMitPasswortpflicht(u): AuchMitPasswortpflicht,
+    Koerper(p): Koerper<Passwortwechsel>,
+) -> Antwort<StatusCode> {
+    if p.neu == p.bisher {
+        return Err(ApiFehler::Anfrage(
+            "das neue Passwort muss sich unterscheiden".into(),
+        ));
+    }
+    z.db.passwort_aendern(u.id, &u.username, Some(&p.bisher), &p.neu)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Registrierung {
+    name: String,
+    anzeigename: String,
+    passwort: String,
+}
+
+/// Selbstregistrierung ohne Anmeldung: das Konto wartet auf Freigabe durch
+/// den Superadmin und hat bis dahin keine Rechte.
+async fn registrieren(
+    State(z): State<Zustand>,
+    Koerper(r): Koerper<Registrierung>,
+) -> Antwort<(StatusCode, Json<Value>)> {
+    let anzeige = r.anzeigename.trim();
+    if anzeige.is_empty() || anzeige.chars().count() > 120 {
+        return Err(ApiFehler::Anfrage(
+            "Anzeigename fehlt oder ist zu lang".into(),
+        ));
+    }
+    let u =
+        z.db.registrieren(r.name.trim(), anzeige, &r.passwort)
+            .await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({ "username": u.username, "status": u.status })),
+    ))
+}
+
+async fn konten(State(z): State<Zustand>, Angemeldet(u): Angemeldet) -> Antwort<Json<Value>> {
+    Ok(Json(
+        serde_json::to_value(z.db.konten(u.id).await?).map_err(StoreError::from)?,
+    ))
+}
+
+/// Rollen mit Berechtigungen (für die Freigabe; nur Superadmin).
+async fn rollen(State(z): State<Zustand>, Angemeldet(u): Angemeldet) -> Antwort<Json<Value>> {
+    if !u.superadmin {
+        return Err(StoreError::Verweigert("nur der Superadmin verwaltet Rollen".into()).into());
+    }
+    Ok(Json(
+        serde_json::to_value(z.db.rollen().await?).map_err(StoreError::from)?,
+    ))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Rollenwahl {
+    rollen: Vec<uuid::Uuid>,
+}
+
+async fn konto_freigeben(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Koerper(r): Koerper<Rollenwahl>,
+) -> Antwort<StatusCode> {
+    let rollen: Vec<_> = r.rollen.into_iter().map(stratum_model::RoleId).collect();
+    z.db.freigeben(u.id, stratum_model::ActorId(id), &rollen)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn konto_ablehnen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<StatusCode> {
+    z.db.ablehnen(u.id, stratum_model::ActorId(id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn konto_sperren(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<StatusCode> {
+    z.db.sperren(u.id, stratum_model::ActorId(id)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn konto_rollen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Koerper(r): Koerper<Rollenwahl>,
+) -> Antwort<StatusCode> {
+    let rollen: Vec<_> = r.rollen.into_iter().map(stratum_model::RoleId).collect();
+    z.db.konto_rollen_setzen(u.id, stratum_model::ActorId(id), &rollen)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NeuesPasswort {
+    neu: String,
+}
+
+/// Superadmin setzt ein Passwort; das Konto muss es bei der nächsten
+/// Anmeldung selbst ersetzen.
+async fn konto_passwort(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Koerper(p): Koerper<NeuesPasswort>,
+) -> Antwort<StatusCode> {
+    let name =
+        z.db.konten(u.id)
+            .await?
+            .into_iter()
+            .find(|k| k.id.0 == id)
+            .map(|k| k.username)
+            .ok_or_else(|| StoreError::NichtGefunden(format!("kein Konto {id}")))?;
+    z.db.passwort_aendern(u.id, &name, None, &p.neu).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn superadmin_uebertragen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<StatusCode> {
+    z.db.superadmin_uebertragen(u.id, stratum_model::ActorId(id))
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn rechte(_: Angemeldet) -> Json<Value> {
@@ -510,6 +700,43 @@ async fn job_fortschritt(
         }
     });
     Ok(Sse::new(strom).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Deserialize)]
+struct OrdnerAnfrage {
+    #[serde(default)]
+    pfad: String,
+}
+
+/// Inhalt des Fallordners (oder eines Unterordners) zur Auswahl beim
+/// Import; Dateien, die schon als Evidence registriert sind, sind markiert.
+async fn fallordner(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<OrdnerAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    let (ordner, quellen) = z.db.fallordner_ansehen(u.id, fall, &q.pfad).await?;
+    let o = ordner.clone();
+    let (rel, liste) = tokio::task::spawn_blocking(move || {
+        stratum_lauf::import::ordner_auflisten(std::path::Path::new(&o), &q.pfad)
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("Lesen abgebrochen".into()))?
+    .map_err(|e| ApiFehler::Anfrage(e.to_string()))?;
+    let eintraege: Vec<Value> = liste
+        .into_iter()
+        .map(|e| {
+            let registriert = quellen.contains(&e.pfad);
+            let mut v = serde_json::to_value(e).unwrap_or(Value::Null);
+            v["registriert"] = json!(registriert);
+            v
+        })
+        .collect();
+    Ok(Json(
+        json!({ "ordner": ordner, "pfad": rel, "eintraege": eintraege }),
+    ))
 }
 
 #[derive(Deserialize)]

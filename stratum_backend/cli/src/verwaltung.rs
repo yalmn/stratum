@@ -227,8 +227,9 @@ pub enum JobBefehl {
 /// Unterbefehle zu Superadmins.
 #[derive(Debug, Subcommand)]
 pub enum SuperadminBefehl {
-    /// Superadmin anlegen: der erste ohne `--als`, solange es keinen gibt,
-    /// weitere nur durch einen Superadmin.
+    /// Den Superadmin anlegen, solange es keinen gibt (es gibt genau
+    /// einen; `stratum server` legt sonst beim ersten Start `superadmin`
+    /// mit Startpasswort an).
     Einrichten {
         /// Anmeldename (klein, a-z 0-9 . _ -).
         name: String,
@@ -241,16 +242,10 @@ pub enum SuperadminBefehl {
         #[command(flatten)]
         als: Als,
     },
-    /// Einem freigegebenen Konto das Superadmin-Recht geben.
-    Ernennen {
-        /// Anmeldename.
-        name: String,
-        #[command(flatten)]
-        als: Als,
-    },
-    /// Das Superadmin-Recht entziehen (nicht dem letzten).
-    Entziehen {
-        /// Anmeldename.
+    /// Das Superadmin-Recht an ein anderes aktives Konto übergeben; es gibt
+    /// immer genau einen Superadmin.
+    Uebertragen {
+        /// Anmeldename des neuen Superadmins.
         name: String,
         #[command(flatten)]
         als: Als,
@@ -448,6 +443,9 @@ pub fn anmelden(
         false,
     )?;
     let u = rt.block_on(db.anmelden(&name, &p))?;
+    if u.password_change_required {
+        anyhow::bail!("{name} muss zuerst das Passwort ändern: stratum konto passwort {name}");
+    }
     Ok(u.id)
 }
 
@@ -564,11 +562,8 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
                 let u = rt.block_on(db.superadmin_einrichten(a, &name, &anzeigename, &p))?;
                 eprintln!("[+] Superadmin {} eingerichtet ({})", u.username, u.id);
             }
-            SuperadminBefehl::Ernennen { name, als } => {
-                superadmin_setzen(&rt, &db, &name, &als, true)?
-            }
-            SuperadminBefehl::Entziehen { name, als } => {
-                superadmin_setzen(&rt, &db, &name, &als, false)?
+            SuperadminBefehl::Uebertragen { name, als } => {
+                superadmin_setzen(&rt, &db, &name, &als)?
             }
         },
         Befehl::Konto(k) => konto(&rt, &db, k)?,
@@ -636,12 +631,11 @@ fn superadmin_setzen(
     db: &Datenbank,
     name: &str,
     als: &Als,
-    ja: bool,
 ) -> Result<()> {
     let a = akteur(rt, db, als)?;
     let id = konto_id(rt, db, name)?;
-    rt.block_on(db.superadmin_setzen(a, id, ja))?;
-    eprintln!("[+] {name} ist {}Superadmin", if ja { "" } else { "kein " });
+    rt.block_on(db.superadmin_uebertragen(a, id))?;
+    eprintln!("[+] {name} ist jetzt der Superadmin");
     Ok(())
 }
 
@@ -1144,6 +1138,14 @@ fn server(
         );
     }
     let (rt, db) = datenbank::verbinden_mit(4)?;
+    // Erster Start: genau einen Superadmin mit Startpasswort anlegen.
+    if rt.block_on(db.superadmin_startkonto())?.is_some() {
+        eprintln!(
+            "[!] Erster Start: Superadmin \"{0}\" mit Startpasswort \"{0}\" angelegt. \
+             Bei der ersten Anmeldung muss es ersetzt werden.",
+            stratum_store::benutzer::STARTKONTO
+        );
+    }
     // Zuerst die Adresse: ist sie belegt, startet auch kein Worker.
     let listener = rt
         .block_on(tokio::net::TcpListener::bind(adresse))

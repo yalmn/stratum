@@ -21,6 +21,7 @@ import {
   Radar,
   ScrollText,
   Search,
+  ShieldCheck,
   Users,
   Waypoints,
   Workflow,
@@ -36,6 +37,8 @@ export interface NavItem {
   key?: string;
   /** Ausbaustufe, falls noch nicht verfügbar. */
   planned?: string;
+  /** Nur für den Superadmin sichtbar. */
+  superadmin?: boolean;
 }
 
 export interface NavGroup {
@@ -56,6 +59,7 @@ export const GLOBAL_NAV: NavItem[] = [
   { id: "search", label: "Global Search", icon: <Search />, planned: INVESTIGATION },
   { id: "knowledge", label: "Knowledge", icon: <BookOpen />, planned: INTELLIGENCE },
   { id: "connectors", label: "Connectors", icon: <Plug />, planned: INTELLIGENCE },
+  { id: "admin", label: "Administration", icon: <ShieldCheck />, path: "/admin", superadmin: true },
 ];
 
 export const CASE_NAV: NavGroup[] = [

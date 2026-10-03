@@ -5,6 +5,7 @@ import { Kbd } from "../../components/ui/Kbd";
 import { Tooltip } from "../../components/ui/Tooltip";
 import { CASE_NAV, GLOBAL_NAV, type NavItem } from "../navigation";
 import { useWorkspace } from "../store";
+import { useSession } from "../../lib/permissions";
 
 function Item({ item, base, collapsed }: { item: NavItem; base: string; collapsed: boolean }) {
   const content = (
@@ -48,12 +49,13 @@ export function Sidebar() {
   const groups = useWorkspace((s) => s.collapsedGroups);
   const toggleGroup = useWorkspace((s) => s.toggleGroup);
   const match = useMatch("/cases/:number/*");
+  const { me } = useSession();
   const base = match ? `/cases/${encodeURIComponent(match.params.number ?? "")}` : "";
 
   return (
     <nav className={collapsed ? "sidebar collapsed" : "sidebar"} aria-label="Navigation">
       <div className="nav-section">
-        {GLOBAL_NAV.map((i) => (
+        {GLOBAL_NAV.filter((i) => !i.superadmin || me.konto.superadmin).map((i) => (
           <Item key={i.id} item={i} base="" collapsed={collapsed} />
         ))}
       </div>

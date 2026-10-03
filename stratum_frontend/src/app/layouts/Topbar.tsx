@@ -1,5 +1,5 @@
 import { Link, useMatch, useNavigate } from "react-router-dom";
-import { ChevronDown, LogOut, Palette, Search, ShieldAlert, ShieldCheck, User } from "lucide-react";
+import { ChevronDown, KeyRound, LogOut, Palette, Search, ShieldAlert, ShieldCheck, User } from "lucide-react";
 import { Kbd, MOD } from "../../components/ui/Kbd";
 import { Menu, Popover } from "../../components/ui/Overlay";
 import { Tooltip } from "../../components/ui/Tooltip";
@@ -70,6 +70,10 @@ function UserMenu() {
           <Menu
             close={close}
             entries={[
+              { label: "Change password", icon: <KeyRound />, onSelect: () => navigate("/account") },
+              ...(me.konto.superadmin
+                ? [{ label: "Administration", icon: <ShieldCheck />, onSelect: () => navigate("/admin") }]
+                : []),
               { label: "Design system", icon: <Palette />, onSelect: () => navigate("/dev/design-system") },
               "separator",
               { label: "Sign out", icon: <LogOut />, onSelect: () => logout.mutate() },

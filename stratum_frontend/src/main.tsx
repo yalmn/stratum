@@ -15,6 +15,8 @@ import { SessionGate } from "./features/auth/SessionGate";
 import { CaseLayout } from "./features/cases/CaseLayout";
 import { CasesPage } from "./features/cases/CasesPage";
 import { DesignSystemPage } from "./design-system/DesignSystemPage";
+import { AdminPage } from "./features/admin/AdminPage";
+import { AccountPage } from "./features/auth/AccountPage";
 
 const client: QueryClient = new QueryClient({
   // Läuft die Sitzung ab, zurück zur Anmeldung. /ich selbst nicht, sonst
@@ -48,6 +50,8 @@ if (root) {
                 <Route path="/cases" element={<CasesPage />} />
                 <Route path="/cases/:number/*" element={<CaseLayout />} />
                 <Route path="/dev/design-system" element={<DesignSystemPage />} />
+                <Route path="/admin" element={<AdminPage />} />
+                <Route path="/account" element={<AccountPage />} />
                 <Route path="*" element={<Navigate to="/cases" replace />} />
               </Routes>
             </AppShell>

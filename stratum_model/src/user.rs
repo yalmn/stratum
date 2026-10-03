@@ -182,6 +182,7 @@ impl Permission {
 
 /// Eine Rolle: frei benanntes Bündel von Berechtigungen.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub struct Role {
     /// ID.
     pub id: RoleId,
@@ -354,6 +355,10 @@ pub struct User {
     pub created_at: DateTime<Utc>,
     /// Rollen.
     pub roles: Vec<RoleId>,
+    /// Muss zuerst ein eigenes Passwort setzen (Startpasswort oder vom
+    /// Superadmin zurückgesetzt); bis dahin ist nichts anderes erlaubt.
+    #[serde(default)]
+    pub password_change_required: bool,
 }
 
 #[cfg(test)]

@@ -26,6 +26,14 @@ export type { User } from "./model/User";
 export type { WarRoomEntry } from "./model/WarRoomEntry";
 export type { WarRoomEntryKind } from "./model/WarRoomEntryKind";
 export type { ObjectRef } from "./model/ObjectRef";
+export type { Role } from "./model/Role";
+
+/** GET /faelle/{nummer}/ordner */
+export interface FolderListing {
+  ordner: string;
+  pfad: string;
+  eintraege: { name: string; typ: "dir" | "file" | "link"; groesse: number | null; pfad: string; registriert: boolean }[];
+}
 
 /** GET /ich */
 export interface Me {

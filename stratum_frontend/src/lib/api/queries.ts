@@ -25,6 +25,9 @@ import {
   type VolumeInfo,
   type WarRoomItem,
   type WarRoomPage,
+  type FolderListing,
+  type Role,
+  type User,
 } from "./types";
 
 const enc = encodeURIComponent;
@@ -53,7 +56,7 @@ export function useLogout() {
   const client = useQueryClient();
   return useMutation({
     mutationFn: () => api<void>("/sitzung", { method: "DELETE" }),
-    onSettled: () => client.clear(),
+    onSettled: () => client.resetQueries(),
   });
 }
 
@@ -324,5 +327,52 @@ export function usePostNote(number: string) {
     mutationFn: (d: { text: string; parent?: string }) =>
       api<WarRoomItem>(`/faelle/${enc(number)}/warroom`, { method: "POST", body: d }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["war-room", number] }),
+  });
+}
+
+// Konten
+
+export function useRegister() {
+  return useMutation({
+    mutationFn: (d: { name: string; anzeigename: string; passwort: string }) =>
+      api<{ username: string; status: string }>("/registrierung", { method: "POST", body: d }),
+  });
+}
+
+export function useChangeOwnPassword() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (d: { bisher: string; neu: string }) => api<void>("/ich/passwort", { method: "POST", body: d }),
+    // Alle Sitzungen enden; neu laden führt zur Anmeldung.
+    onSuccess: () => client.resetQueries(),
+  });
+}
+
+export function useAccounts() {
+  return useQuery({ queryKey: ["accounts"], queryFn: () => api<User[]>("/konten") });
+}
+
+export function useRoles() {
+  return useQuery({ queryKey: ["roles"], queryFn: () => api<Role[]>("/rollen"), staleTime: 60_000 });
+}
+
+export function useAccountAction() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (d: { id: string; action: "freigeben" | "ablehnen" | "sperren" | "rollen" | "passwort" | "superadmin"; body?: unknown }) =>
+      api<void>(`/konten/${d.id}/${d.action}`, { method: d.action === "rollen" ? "PUT" : "POST", body: d.body }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["accounts"] });
+      void client.invalidateQueries({ queryKey: keys.me });
+    },
+  });
+}
+
+export function useCaseFolder(number: string, path: string, enabled: boolean) {
+  return useQuery({
+    queryKey: ["case-folder", number, path],
+    queryFn: () => api<FolderListing>(`/faelle/${enc(number)}/ordner?pfad=${enc(path)}`),
+    enabled,
+    retry: false,
   });
 }

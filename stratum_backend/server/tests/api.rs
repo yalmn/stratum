@@ -497,6 +497,50 @@ async fn ablauf(db: Datenbank) {
         let (s, _, v) = anfrage(&app, "POST", pfad, Some(&t_mia), Some(import(falsch))).await;
         assert_eq!(s, StatusCode::BAD_REQUEST, "{falsch}: {v}");
     }
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-2/ordner",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-2/ordner",
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        (
+            v["eintraege"][0]["name"].as_str(),
+            v["eintraege"][0]["typ"].as_str()
+        ),
+        (Some("netz"), Some("dir"))
+    );
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-2/ordner?pfad=netz",
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(v["eintraege"][0]["name"], "mitschnitt.pcap");
+    assert_eq!(v["eintraege"][0]["registriert"], false);
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-2/ordner?pfad=..",
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     for runde in [true, false] {
         let (s, _, v) = anfrage(
             &app,
@@ -534,6 +578,15 @@ async fn ablauf(db: Datenbank) {
             stratum_core::hash_bytes(&pcap).sha256
         );
     }
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-2/ordner?pfad=netz",
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(v["eintraege"][0]["registriert"], true);
     let (_, _, v) = anfrage(&app, "GET", "/api/v1/faelle/API-2", Some(&t_mia), None).await;
     let e = &v["evidence"][0];
     assert_eq!(
@@ -836,7 +889,7 @@ async fn ablauf(db: Datenbank) {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let zaehlung: Vec<(String, String, i64)> = sqlx::query_as(
         "SELECT action, result, count(*) FROM audit_event \
-         WHERE action IN ('FILE_VIEW', 'CREDENTIAL_VIEW') OR object_type = 'artifact' \
+         WHERE (action IN ('FILE_VIEW', 'CREDENTIAL_VIEW') AND object_type <> 'case_folder') OR object_type = 'artifact' \
          GROUP BY 1, 2 ORDER BY 1, 2",
     )
     .fetch_all(db.pool())
@@ -1004,6 +1057,110 @@ async fn ablauf(db: Datenbank) {
     assert_eq!(s, StatusCode::NOT_FOUND);
     let (s, _, _) = anfrage(&app, "POST", &datei(101, "hash"), Some(&t_tom), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+
+    // Registrierung über die API, Freigabe und Passwortpflicht.
+    let lea = json!({"name": "lea", "anzeigename": "Lea L.", "passwort": "lea-passwort-1234"});
+    let (s, _, v) = anfrage(&app, "POST", "/api/v1/registrierung", None, Some(lea)).await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(v["status"], "pending");
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/sitzung",
+        None,
+        Some(json!({"name": "lea", "passwort": "lea-passwort-1234"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _, _) = anfrage(&app, "GET", "/api/v1/konten", Some(&t_mia), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (_, _, v) = anfrage(&app, "GET", "/api/v1/konten", Some(&t_chef), None).await;
+    let lea_id = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["username"] == "lea")
+        .map(|k| k["id"].as_str().unwrap().to_string())
+        .unwrap();
+    let (s, _, v) = anfrage(&app, "GET", "/api/v1/rollen", Some(&t_chef), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let analyst = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["name"] == "Analyst")
+        .unwrap()["id"]
+        .clone();
+    let (s, _, _) = anfrage(&app, "GET", "/api/v1/rollen", Some(&t_mia), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        &format!("/api/v1/konten/{lea_id}/freigeben"),
+        Some(&t_chef),
+        Some(json!({"rollen": [analyst]})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let t_lea = anmelden(&app, "lea", "lea-passwort-1234").await;
+    let (s, _, _) = anfrage(&app, "GET", "/api/v1/faelle", Some(&t_lea), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        &format!("/api/v1/konten/{lea_id}/passwort"),
+        Some(&t_chef),
+        Some(json!({"neu": "vom-chef-gesetzt-1"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _, _) = anfrage(&app, "GET", "/api/v1/faelle", Some(&t_lea), None).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED, "alte Sitzung endet");
+    let t_lea = anmelden(&app, "lea", "vom-chef-gesetzt-1").await;
+    let (s, _, v) = anfrage(&app, "GET", "/api/v1/faelle", Some(&t_lea), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert!(v["fehler"].as_str().unwrap().contains("Passwort"), "{v}");
+    let (_, _, v) = anfrage(&app, "GET", "/api/v1/ich", Some(&t_lea), None).await;
+    assert_eq!(v["konto"]["password_change_required"], true);
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/ich/passwort",
+        Some(&t_lea),
+        Some(json!({"bisher": "falsch-falsch-1", "neu": "lea-eigenes-pw-99"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/ich/passwort",
+        Some(&t_lea),
+        Some(json!({"bisher": "vom-chef-gesetzt-1", "neu": "lea-eigenes-pw-99"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let t_lea = anmelden(&app, "lea", "lea-eigenes-pw-99").await;
+    let (s, _, _) = anfrage(&app, "GET", "/api/v1/faelle", Some(&t_lea), None).await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        &format!("/api/v1/konten/{lea_id}/sperren"),
+        Some(&t_chef),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/sitzung",
+        None,
+        Some(json!({"name": "lea", "passwort": "lea-eigenes-pw-99"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
 
     // Weboberfläche: Dateien, sonst index.html; API-Pfade bleiben JSON.
     let gui = tmp.path().join("dist");

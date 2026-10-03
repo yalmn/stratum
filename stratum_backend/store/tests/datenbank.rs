@@ -970,10 +970,12 @@ async fn rollen_registrierung_freigabe() {
     assert!(!db.berechtigt(mia.id, Permission::CaseCreate).await.unwrap());
     assert_eq!(db.benutzer("mia").await.unwrap().unwrap().roles, [analyst]);
 
-    // Der letzte Superadmin bleibt; mit einem zweiten geht es.
-    assert!(db.superadmin_setzen(chef.id, chef.id, false).await.is_err());
+    // Genau ein Superadmin: er sperrt sich nicht selbst, er übergibt.
     assert!(db.sperren(chef.id, chef.id).await.is_err());
-    db.superadmin_setzen(chef.id, mia.id, true).await.unwrap();
+    assert!(db.superadmin_uebertragen(chef.id, chef.id).await.is_err());
+    db.superadmin_uebertragen(chef.id, mia.id).await.unwrap();
+    assert!(!db.benutzer("chef").await.unwrap().unwrap().superadmin);
+    assert!(db.superadmin_uebertragen(chef.id, chef.id).await.is_err());
     assert!(db
         .berechtigt(mia.id, Permission::CredentialViewSensitive)
         .await
@@ -1105,4 +1107,61 @@ async fn rollen_registrierung_freigabe() {
     assert!(hash.starts_with("$argon2id$"));
     assert!(db.audit_pruefen(a()).await.unwrap().intakt());
     frische_datenbank_entfernen(db, &name).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn startkonto_einmal_mit_passwortpflicht() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    let u = db.superadmin_startkonto().await.unwrap().unwrap();
+    assert!(u.superadmin && u.password_change_required);
+    assert!(db.superadmin_startkonto().await.unwrap().is_none());
+    let s = db.anmelden("superadmin", "superadmin").await.unwrap();
+    assert!(s.password_change_required);
+    // Es gibt genau einen Superadmin.
+    assert!(matches!(
+        db.superadmin_einrichten(a(), "chef", "Chef", "ein langes Passwort")
+            .await,
+        Err(StoreError::Verweigert(_))
+    ));
+    // Eigenes Passwort ersetzt das Startpasswort und hebt die Pflicht auf.
+    db.passwort_aendern(
+        s.id,
+        "superadmin",
+        Some("superadmin"),
+        "neues langes Passwort",
+    )
+    .await
+    .unwrap();
+    assert!(
+        !db.benutzer("superadmin")
+            .await
+            .unwrap()
+            .unwrap()
+            .password_change_required
+    );
+    assert!(db.anmelden("superadmin", "superadmin").await.is_err());
+    // Vom Superadmin gesetzt: das Konto muss es selbst ersetzen.
+    let m = db
+        .registrieren("mia", "Mia", "noch ein Passwort!")
+        .await
+        .unwrap();
+    db.freigeben(s.id, m.id, &[]).await.unwrap();
+    db.passwort_aendern(s.id, "mia", None, "vom Admin gesetzt!")
+        .await
+        .unwrap();
+    assert!(
+        db.anmelden("mia", "vom Admin gesetzt!")
+            .await
+            .unwrap()
+            .password_change_required
+    );
+    // Ein zweiter Superadmin ist auch in der Datenbank ausgeschlossen.
+    assert!(
+        sqlx::query("UPDATE app_user SET superadmin = true WHERE username = 'mia'")
+            .execute(db.pool())
+            .await
+            .is_err()
+    );
 }

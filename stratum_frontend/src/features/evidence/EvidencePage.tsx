@@ -2,14 +2,16 @@
 // Integrität und Aktionen. Details im Drawer, Analyse und Import inline im
 // Workspace statt in Dialogen.
 
+import { useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { Activity, FolderTree, HardDrive, Info, Play, Upload } from "lucide-react";
+import { Activity, File, Folder, FolderTree, HardDrive, Info, Play, Upload } from "lucide-react";
+import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { EmptyState, ErrorState, HashValue, Skeleton, Timestamp } from "../../components/ui/Display";
 import { Checkbox, Field, Input } from "../../components/ui/Input";
 import { useContextMenu } from "../../components/ui/Overlay";
 import { evidenceKind, IntegrityBadge, SupportBadge } from "../../components/forensic/Badges";
-import { useCase, useImportEvidence, useStartAnalysis } from "../../lib/api/queries";
+import { useCase, useCaseFolder, useImportEvidence, useStartAnalysis } from "../../lib/api/queries";
 import type { AnalysisOptions, Evidence } from "../../lib/api/types";
 import { bytes, count } from "../../lib/format";
 import { useSession } from "../../lib/permissions";
@@ -227,6 +229,53 @@ function AnalyzePanel({
   );
 }
 
+function FolderBrowser({ number, value, onPick }: { number: string; value: string; onPick: (rel: string) => void }) {
+  const [path, setPath] = useState("");
+  const listing = useCaseFolder(number, path, true);
+  const parts = path ? path.split("/") : [];
+  const join = (name: string) => (path ? `${path}/${name}` : name);
+  return (
+    <div className="stack">
+      <nav className="crumbs" aria-label="Folder">
+        <button type="button" onClick={() => setPath("")}>
+          {listing.data?.ordner ?? "Case folder"}
+        </button>
+        {parts.map((p, i) => (
+          <span key={i}>
+            <span className="crumb-sep">/</span>
+            <button type="button" onClick={() => setPath(parts.slice(0, i + 1).join("/"))}>
+              {p}
+            </button>
+          </span>
+        ))}
+      </nav>
+      <div className="folder-browser">
+        {listing.isPending && <div className="menu-label muted">Loading…</div>}
+        {listing.error && <div className="menu-label form-error">{listing.error.message}</div>}
+        {listing.data?.eintraege.length === 0 && <div className="menu-label muted">This folder is empty.</div>}
+        {listing.data?.eintraege.map((e) => {
+          const rel = join(e.name);
+          return (
+            <button
+              key={e.name}
+              type="button"
+              className={value === rel ? "folder-row selected" : "folder-row"}
+              onClick={() => (e.typ === "dir" ? setPath(rel) : onPick(rel))}
+              onDoubleClick={() => e.typ === "file" && onPick(rel)}
+            >
+              {e.typ === "dir" ? <Folder className="ico-dir" /> : <File className="ico-file" />}
+              <span>{e.name}</span>
+              {e.registriert && <Badge tone="success">registered</Badge>}
+              {e.typ === "link" && <Badge outline>link</Badge>}
+              {e.groesse !== null && <span className="size">{bytes(e.groesse)}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ImportPanel({
   number,
   folder,
@@ -239,6 +288,7 @@ function ImportPanel({
   onQueued: (job: string) => void;
 }) {
   const importEvidence = useImportEvidence(number);
+  const [file, setFile] = useState("");
   return (
     <form
       className="inline-panel"
@@ -262,9 +312,10 @@ function ImportPanel({
           and it is hashed as a background job.
         </span>
       </div>
+      <FolderBrowser number={number} value={file} onPick={setFile} />
       <div className="form-grid">
-        <Field label="File" hint="Relative to the case folder, or an absolute path inside it.">
-          <Input name="datei" required placeholder="images/workstation.E01" mono autoFocus />
+        <Field label="Selected file" hint="Pick it above, or type a path relative to the case folder.">
+          <Input name="datei" required placeholder="images/workstation.E01" mono value={file} onChange={(e) => setFile(e.target.value)} />
         </Field>
         <Field label="Display name" hint="Defaults to the file name.">
           <Input name="name" />

@@ -39,4 +39,9 @@ created_at: string,
 /**
  * Rollen.
  */
-roles: Array<RoleId>, };
+roles: Array<RoleId>, 
+/**
+ * Muss zuerst ein eigenes Passwort setzen (Startpasswort oder vom
+ * Superadmin zurückgesetzt); bis dahin ist nichts anderes erlaubt.
+ */
+password_change_required: boolean, };
