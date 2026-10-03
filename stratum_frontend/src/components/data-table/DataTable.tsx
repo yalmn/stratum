@@ -44,6 +44,7 @@ export function DataTable<T extends RowData>({
   height,
   footer,
   label,
+  onEndReached,
 }: {
   data: T[];
   columns: DataColumn<T>[];
@@ -59,6 +60,8 @@ export function DataTable<T extends RowData>({
   height?: number | string;
   footer?: ReactNode;
   label: string;
+  /** Kurz vor dem Ende der geladenen Zeilen (zum Nachladen). */
+  onEndReached?: () => void;
 }) {
   const table = useTable({
     features: dataTableFeatures,
@@ -86,6 +89,15 @@ export function DataTable<T extends RowData>({
       }
     }
   }, [selected, rows]);
+
+  // Nachladen, sobald die letzten sichtbaren Zeilen nahe am Ende liegen.
+  const items = virtualizer.getVirtualItems();
+  const last = items[items.length - 1]?.index ?? -1;
+  useEffect(() => {
+    if (onEndReached && rows.length > 0 && last >= rows.length - 25) {
+      onEndReached();
+    }
+  }, [last, rows.length, onEndReached]);
 
   const headers = table.getHeaderGroups()[0]?.headers ?? [];
   const template = headers

@@ -12,6 +12,7 @@ use crate::ids::{CaseId, EntityId};
 
 /// Art einer Entität.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "snake_case")]
 pub enum EntityKind {
     /// Rechner.

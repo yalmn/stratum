@@ -758,13 +758,19 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/jobs?fall=` | Jobs |
 | `GET`, `DELETE /api/v1/jobs/{id}` | Job ansehen, abbrechen |
 | `GET /api/v1/jobs/{id}/fortschritt` | Fortschritt als Server-Sent Events |
-| `GET /api/v1/faelle/{nummer}/zeitachse?von=&bis=&art=&entitaet=&nach=&anzahl=` | Ereignisse nach Zeit |
+| `GET /api/v1/faelle/{nummer}/zeitachse?von=&bis=&art=&entitaet=&evidence=&suche=&nach=&anzahl=` | Ereignisse nach Zeit |
 | `GET /api/v1/faelle/{nummer}/zeitachse/arten` | Ereignisarten mit Anzahl |
 | `GET /api/v1/faelle/{nummer}/entitaeten?art=&suche=&nach=&anzahl=` | Entitäten |
 | `GET /api/v1/entitaeten/{id}?klartext=` | Entität mit Beziehungen und Ereignissen |
 | `GET /api/v1/evidence/{id}/volumes` | Volumes im Dateikatalog |
 | `GET /api/v1/evidence/{id}/dateien?volume=&verzeichnis=&nach=&anzahl=` | Inhalt eines Verzeichnisses |
 | `GET /api/v1/artefakte/{id}/rohfund?klartext=` | Rohfund eines Artefakts aus dem Report |
+| `GET /api/v1/evidence/{id}/dateien/{volume}/{mft}` | Katalogeintrag (alle Namen bei Hardlinks) |
+| `GET …/dateien/{volume}/{mft}/inhalt?offset=&laenge=` | bis 64 KiB Inhalt (Hex-Ansicht) |
+| `POST …/dateien/{volume}/{mft}/hash` | SHA-256 und BLAKE3, SHA-256 in den Katalog |
+| `GET …/dateien/{volume}/{mft}/export` | Inhalt als Download (`file.extract`) |
+| `GET /api/v1/ereignisse/{id}` | Ereignis mit Beteiligten und Herkunft |
+| `GET`, `POST /api/v1/faelle/{nummer}/warroom` | War Room lesen, Notiz anhängen |
 | `GET /api/v1/audit?fall=&anzahl=` | Audit lesen |
 | `POST /api/v1/audit/pruefen` | Audit-Kette nachrechnen |
 
@@ -844,6 +850,13 @@ npm run build
 `[server] oberflaeche` in `stratum.toml` oder `STRATUM_OBERFLAECHE`).
 Angemeldet wird mit denselben Konten wie in der Kommandozeile; die Sitzung
 steckt in einem HttpOnly-Cookie.
+
+Ansichten je Fall: Overview, War Room (Notizen und Systemeinträge zu
+Jobs und Exporten, nur anhängbar), Evidence (Import, Analyse, Details),
+Explorer (Verzeichnisbaum und Dateien aus dem Katalog; im Drawer
+Zeitstempel SI und FN, NTFS-Angaben, Hex und Strings, Hash, Export mit
+`file.extract`), Timeline (Filter nach Evidence, Zeitraum, Art, Entität
+und Text; Ereignis mit Herkunft und Rohfund) und Entities.
 
 Die Oberfläche ist ein Arbeitsplatz mit festen Zonen: Topbar (Fall,
 Suche, Jobs, Benachrichtigungen, Integrität der Evidence, Konto), Sidebar

@@ -64,7 +64,7 @@ export const CASE_NAV: NavGroup[] = [
     label: "Case",
     items: [
       { id: "overview", label: "Overview", icon: <LayoutDashboard />, path: "overview", key: "o" },
-      { id: "war-room", label: "War Room", icon: <MessageSquare />, key: "w", planned: OPERATIONS },
+      { id: "war-room", label: "War Room", icon: <MessageSquare />, path: "war-room", key: "w" },
     ],
   },
   {
@@ -72,7 +72,7 @@ export const CASE_NAV: NavGroup[] = [
     label: "Evidence",
     items: [
       { id: "evidence", label: "Evidence", icon: <HardDrive />, path: "evidence", key: "e" },
-      { id: "explorer", label: "Explorer", icon: <FolderTree />, key: "x", planned: INVESTIGATION },
+      { id: "explorer", label: "Explorer", icon: <FolderTree />, path: "explorer", key: "x" },
       { id: "artifacts", label: "Artifacts", icon: <Boxes />, planned: INVESTIGATION },
     ],
   },
@@ -81,9 +81,9 @@ export const CASE_NAV: NavGroup[] = [
     label: "Investigation",
     items: [
       { id: "search", label: "Search", icon: <FileSearch />, key: "s", planned: INVESTIGATION },
-      { id: "timeline", label: "Timeline", icon: <Activity />, key: "t", planned: INVESTIGATION },
+      { id: "timeline", label: "Timeline", icon: <Activity />, path: "timeline", key: "t" },
       { id: "graph", label: "Graph", icon: <Waypoints />, key: "g", planned: INVESTIGATION },
-      { id: "entities", label: "Entities", icon: <Users />, key: "n", planned: INVESTIGATION },
+      { id: "entities", label: "Entities", icon: <Users />, path: "entities", key: "n" },
       { id: "findings", label: "Findings", icon: <Flag />, key: "f", planned: INVESTIGATION },
     ],
   },

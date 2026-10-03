@@ -40,3 +40,19 @@ export async function api<T>(path: string, options: { method?: string; body?: un
 export function isUnauthorized(e: unknown): boolean {
   return e instanceof ApiError && e.status === 401;
 }
+
+/** Rohe Bytes (etwa der Hex-Ausschnitt einer Datei). */
+export async function apiBytes(path: string): Promise<{ bytes: Uint8Array; headers: Headers }> {
+  const response = await fetch(`/api/v1${path}`, { credentials: "same-origin" });
+  if (!response.ok) {
+    let message = `HTTP ${response.status}`;
+    try {
+      const c = (await response.json()) as { fehler?: string };
+      message = c.fehler ?? message;
+    } catch {
+      // keine JSON-Antwort
+    }
+    throw new ApiError(response.status, message);
+  }
+  return { bytes: new Uint8Array(await response.arrayBuffer()), headers: response.headers };
+}

@@ -63,13 +63,14 @@ export function PropertyList({ items }: { items: [string, ReactNode][] }) {
 }
 
 /** Zeitpunkt in UTC; der volle Wert steht im Tooltip. */
-export function Timestamp({ value, precise }: { value: string | null | undefined; precise?: boolean }) {
+export function Timestamp({ value, precise, bare }: { value: string | null | undefined; precise?: boolean; bare?: boolean }) {
   if (!value) {
     return <span className="muted">—</span>;
   }
+  const text = utc(value, precise);
   return (
     <time dateTime={value} title={value} className="mono">
-      {utc(value, precise)}
+      {bare ? text.replace(/ UTC$/, "") : text}
     </time>
   );
 }

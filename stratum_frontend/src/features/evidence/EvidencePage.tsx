@@ -2,8 +2,8 @@
 // Integrität und Aktionen. Details im Drawer, Analyse und Import inline im
 // Workspace statt in Dialogen.
 
-import { useSearchParams } from "react-router-dom";
-import { HardDrive, Info, Play, Upload } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Activity, FolderTree, HardDrive, Info, Play, Upload } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { EmptyState, ErrorState, HashValue, Skeleton, Timestamp } from "../../components/ui/Display";
 import { Checkbox, Field, Input } from "../../components/ui/Input";
@@ -23,6 +23,8 @@ export function EvidencePage({ number }: { number: string }) {
   const [params, setParams] = useSearchParams();
   const { detail, open } = useDetail();
   const menu = useContextMenu();
+  const navigate = useNavigate();
+  const base = `/cases/${encodeURIComponent(number)}`;
   const adding = params.get("add") === "1";
   const analyzing = params.get("analyze");
   // Mehrere Schlüssel in einer Änderung, sonst überschreibt die zweite die erste.
@@ -141,10 +143,16 @@ export function EvidencePage({ number }: { number: string }) {
                   Open
                 </Button>
                 {can("analysis.start") && analyzable(e) && (
-                  <Button size="sm" icon={<Play />} onClick={() => set("analyze", e.id)}>
+                  <Button size="sm" variant="primary" icon={<Play />} onClick={() => set("analyze", e.id)}>
                     Analyze
                   </Button>
                 )}
+                <Button size="sm" icon={<FolderTree />} onClick={() => navigate(`${base}/explorer?ev=${e.id}`)}>
+                  Files
+                </Button>
+                <Button size="sm" icon={<Activity />} onClick={() => navigate(`${base}/timeline?ev=${e.id}`)}>
+                  Timeline
+                </Button>
               </div>
             </div>
             {analyzing === e.id && <AnalyzePanel number={number} evidence={e} onDone={() => set("analyze", null)} onQueued={showJob("analyze")} />}

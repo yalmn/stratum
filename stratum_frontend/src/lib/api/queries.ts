@@ -2,8 +2,8 @@
 // direkt; Schlüssel und Pfade stehen an einer Stelle.
 
 import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api } from "./client";
+import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, apiBytes } from "./client";
 import {
   isFinished,
   type AnalysisOptions,
@@ -14,6 +14,17 @@ import {
   type Job,
   type JobUpdate,
   type Me,
+  type EntityDetail,
+  type EntityRow,
+  type EventDetail,
+  type FileEntry,
+  type FileHashes,
+  type Page,
+  type RawFinding,
+  type TimelineEvent,
+  type VolumeInfo,
+  type WarRoomItem,
+  type WarRoomPage,
 } from "./types";
 
 const enc = encodeURIComponent;
@@ -151,4 +162,167 @@ export function useJobStream(job: Job, onFinished?: (u: JobUpdate) => void): Job
   }, [job.id, job.status, client]);
 
   return update;
+}
+
+// Explorer
+
+export function useVolumes(evidence: string | undefined) {
+  return useQuery({
+    queryKey: ["volumes", evidence],
+    queryFn: () => api<VolumeInfo[]>(`/evidence/${evidence}/volumes`),
+    enabled: !!evidence,
+    staleTime: 60_000,
+  });
+}
+
+const PAGE = 500;
+
+/** Inhalt eines Verzeichnisses, seitenweise nachgeladen. */
+export function useDirectory(evidence: string | undefined, volume: number | undefined, dir: number) {
+  return useInfiniteQuery({
+    queryKey: ["dir", evidence, volume, dir],
+    queryFn: ({ pageParam }) =>
+      api<Page<FileEntry>>(
+        `/evidence/${evidence}/dateien?volume=${volume}&verzeichnis=${dir}&anzahl=${PAGE}${
+          pageParam ? `&nach=${enc(pageParam)}` : ""
+        }`,
+      ),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.naechste ?? undefined,
+    enabled: !!evidence && volume !== undefined,
+    staleTime: 60_000,
+  });
+}
+
+/** Nur die Unterverzeichnisse (für den Baum); erste Seite genügt meist. */
+export function useSubdirs(evidence: string, volume: number, dir: number, enabled: boolean) {
+  return useQuery({
+    queryKey: ["subdirs", evidence, volume, dir],
+    queryFn: async () => {
+      const p = await api<Page<FileEntry>>(`/evidence/${evidence}/dateien?volume=${volume}&verzeichnis=${dir}&anzahl=1000`);
+      return { dirs: p.eintraege.filter((e) => e.is_directory), more: p.naechste !== null && p.eintraege.every((e) => e.is_directory) };
+    },
+    enabled,
+    staleTime: 60_000,
+  });
+}
+
+export function useFileEntry(evidence: string, volume: number, record: number) {
+  return useQuery({
+    queryKey: ["file", evidence, volume, record],
+    queryFn: () => api<FileEntry[]>(`/evidence/${evidence}/dateien/${volume}/${record}`),
+  });
+}
+
+export function useHexWindow(evidence: string, volume: number, record: number, offset: number, enabled: boolean) {
+  return useQuery({
+    queryKey: ["hex", evidence, volume, record, offset],
+    queryFn: () => apiBytes(`/evidence/${evidence}/dateien/${volume}/${record}/inhalt?offset=${offset}&laenge=4096`),
+    enabled,
+    placeholderData: keepPreviousData,
+    staleTime: Infinity,
+  });
+}
+
+export function useHashFile(evidence: string, volume: number, record: number) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: () => api<FileHashes>(`/evidence/${evidence}/dateien/${volume}/${record}/hash`, { method: "POST" }),
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["file", evidence, volume, record] });
+      void client.invalidateQueries({ queryKey: ["dir", evidence, volume] });
+    },
+  });
+}
+
+export function fileExportUrl(evidence: string, volume: number, record: number): string {
+  return `/api/v1/evidence/${evidence}/dateien/${volume}/${record}/export`;
+}
+
+// Timeline
+
+export interface TimelineFilter {
+  evidence?: string;
+  von?: string;
+  bis?: string;
+  arten?: string[];
+  entitaet?: string;
+  suche?: string;
+}
+
+export function useTimeline(number: string, f: TimelineFilter) {
+  const q = new URLSearchParams({ anzahl: "300" });
+  if (f.evidence) q.set("evidence", f.evidence);
+  if (f.von) q.set("von", f.von);
+  if (f.bis) q.set("bis", f.bis);
+  if (f.arten && f.arten.length > 0) q.set("art", f.arten.join(","));
+  if (f.entitaet) q.set("entitaet", f.entitaet);
+  if (f.suche) q.set("suche", f.suche);
+  const base = `/faelle/${enc(number)}/zeitachse?${q.toString()}`;
+  return useInfiniteQuery({
+    queryKey: ["timeline", number, base],
+    queryFn: ({ pageParam }) => api<Page<TimelineEvent>>(pageParam ? `${base}&nach=${enc(pageParam)}` : base),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.naechste ?? undefined,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useEventDetail(id: string) {
+  return useQuery({ queryKey: ["event", id], queryFn: () => api<EventDetail>(`/ereignisse/${id}`) });
+}
+
+export function useRawFinding(artifact: string | null, cleartext: boolean, enabled: boolean) {
+  return useQuery({
+    queryKey: ["raw", artifact, cleartext],
+    queryFn: () => api<RawFinding>(`/artefakte/${artifact}/rohfund${cleartext ? "?klartext=true" : ""}`),
+    enabled: enabled && !!artifact,
+    retry: false,
+  });
+}
+
+// Entitäten
+
+export function useEntities(number: string, kind: string, search: string) {
+  const q = new URLSearchParams({ anzahl: "300" });
+  if (kind) q.set("art", kind);
+  if (search) q.set("suche", search);
+  const base = `/faelle/${enc(number)}/entitaeten?${q.toString()}`;
+  return useInfiniteQuery({
+    queryKey: ["entities", number, base],
+    queryFn: ({ pageParam }) => api<Page<EntityRow>>(pageParam ? `${base}&nach=${enc(pageParam)}` : base),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.naechste ?? undefined,
+    placeholderData: keepPreviousData,
+  });
+}
+
+export function useEntity(id: string, cleartext: boolean) {
+  return useQuery({
+    queryKey: ["entity", id, cleartext],
+    queryFn: () => api<EntityDetail>(`/entitaeten/${id}${cleartext ? "?klartext=true" : ""}`),
+    retry: false,
+  });
+}
+
+// War Room
+
+export function useWarRoom(number: string) {
+  return useInfiniteQuery({
+    queryKey: ["war-room", number],
+    queryFn: ({ pageParam }) =>
+      api<WarRoomPage>(`/faelle/${enc(number)}/warroom?anzahl=100${pageParam ? `&vor=${pageParam}` : ""}`),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.naechste ?? undefined,
+    refetchInterval: 10_000,
+  });
+}
+
+export function usePostNote(number: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (d: { text: string; parent?: string }) =>
+      api<WarRoomItem>(`/faelle/${enc(number)}/warroom`, { method: "POST", body: d }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["war-room", number] }),
+  });
 }

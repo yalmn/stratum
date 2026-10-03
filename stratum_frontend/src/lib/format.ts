@@ -75,6 +75,25 @@ export function label(code: string): string {
     .join(" ");
 }
 
+// NTFS-Dateiattribute, wie der Katalog sie benennt.
+const FILE_ATTRIBUTES: Record<string, string> = {
+  schreibgeschuetzt: "read-only",
+  versteckt: "hidden",
+  system: "system",
+  archiv: "archive",
+  temporaer: "temporary",
+  sparse: "sparse",
+  reparse_point: "reparse point",
+  komprimiert: "compressed",
+  offline: "offline",
+  nicht_indiziert: "not indexed",
+  verschluesselt: "encrypted",
+};
+
+export function fileAttributes(a: string[] | null | undefined): string {
+  return (a ?? []).map((x) => FILE_ATTRIBUTES[x] ?? x).join(", ");
+}
+
 export function shortHash(h: string, head = 8, tail = 4): string {
   return h.length > head + tail + 1 ? `${h.slice(0, head)}…${h.slice(-tail)}` : h;
 }

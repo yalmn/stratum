@@ -4,7 +4,7 @@
 import { useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 
-export type DetailKind = "evidence" | "job" | "case";
+export type DetailKind = "evidence" | "job" | "case" | "file" | "event" | "entity";
 
 export interface Detail {
   kind: DetailKind;
@@ -20,7 +20,7 @@ export function parseDetail(v: string | null): Detail | null {
     return null;
   }
   const kind = v.slice(0, i) as DetailKind;
-  return ["evidence", "job", "case"].includes(kind) ? { kind, id: v.slice(i + 1) } : null;
+  return ["evidence", "job", "case", "file", "event", "entity"].includes(kind) ? { kind, id: v.slice(i + 1) } : null;
 }
 
 export function useDetail() {

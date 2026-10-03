@@ -15,6 +15,10 @@ import { useWorkspace } from "../../app/store";
 import { EvidencePage } from "../evidence/EvidencePage";
 import { OverviewPage } from "../overview/OverviewPage";
 import { PlannedView } from "./PlannedView";
+import { EntitiesPage } from "../entities/EntitiesPage";
+import { ExplorerPage } from "../explorer/ExplorerPage";
+import { TimelinePage } from "../timeline/TimelinePage";
+import { WarRoomPage } from "../war-room/WarRoomPage";
 
 function Metric({ label, value, tip }: { label: string; value: string; tip?: string }) {
   const m = (
@@ -57,6 +61,37 @@ function CaseHeader({ number }: { number: string }) {
           <ClassificationBadge value={f.classification} />
         </div>
         <span className="spacer" />
+        {can("analysis.start") && (
+          <Popover
+            align="right"
+            trigger={({ toggle }) => (
+              <Button variant="primary" icon={<Play />} onClick={toggle}>
+                Analyze
+              </Button>
+            )}
+          >
+            {(close) => {
+              const images = (c.data?.evidence ?? []).filter((e) => e.kind === "raw_disk_image" || e.kind === "e01_image");
+              return (
+                <Menu
+                  close={close}
+                  entries={
+                    images.length > 0
+                      ? [
+                          { section: "Analyze evidence" },
+                          ...images.map((e) => ({
+                            label: e.name,
+                            icon: <Play />,
+                            onSelect: () => navigate(`${base}/evidence?analyze=${e.id}`),
+                          })),
+                        ]
+                      : [{ label: "No disk image in this case yet", disabled: true }]
+                  }
+                />
+              );
+            }}
+          </Popover>
+        )}
         <Tooltip text="Planned: Operational Layer">
           <Button icon={<Workflow />} disabled>
             Run Playbook
@@ -145,6 +180,10 @@ export function CaseLayout() {
           <Route index element={<Navigate to="overview" replace />} />
           <Route path="overview" element={<OverviewPage number={number} />} />
           <Route path="evidence" element={<EvidencePage number={number} />} />
+          <Route path="explorer" element={<ExplorerPage number={number} />} />
+          <Route path="timeline" element={<TimelinePage number={number} />} />
+          <Route path="entities" element={<EntitiesPage number={number} />} />
+          <Route path="war-room" element={<WarRoomPage number={number} />} />
           <Route path=":view" element={<PlannedView />} />
         </Routes>
       </div>

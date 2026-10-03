@@ -2,7 +2,7 @@
 // neben dem Workspace. Jede Art hat einen Inhalt, der Rahmen ist gleich.
 
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Ban, Copy, Play } from "lucide-react";
+import { Activity, ArrowRight, Ban, Copy, FolderTree, Play } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { CodeBlock, CopyButton, ErrorState, HashValue, PropertyList, Skeleton, Timestamp } from "../../components/ui/Display";
 import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
@@ -23,6 +23,9 @@ import { useSession } from "../../lib/permissions";
 import { useDetail, type Detail } from "../../app/detail";
 import { jobTitle } from "../jobs/JobsCenter";
 import { useLiveJob } from "../jobs/live";
+import { EntityDrawer } from "./EntityDrawer";
+import { EventDrawer } from "./EventDrawer";
+import { FileDrawer } from "./FileDrawer";
 
 export function ContextDrawer({ detail, caseNumber }: { detail: Detail; caseNumber?: string }) {
   const { close } = useDetail();
@@ -32,11 +35,18 @@ export function ContextDrawer({ detail, caseNumber }: { detail: Detail; caseNumb
   if (!caseNumber) {
     return null;
   }
-  return detail.kind === "evidence" ? (
-    <EvidenceDetail number={caseNumber} id={detail.id} onClose={close} />
-  ) : (
-    <JobDetail number={caseNumber} id={detail.id} onClose={close} />
-  );
+  switch (detail.kind) {
+    case "evidence":
+      return <EvidenceDetail number={caseNumber} id={detail.id} onClose={close} />;
+    case "job":
+      return <JobDetail number={caseNumber} id={detail.id} onClose={close} />;
+    case "file":
+      return <FileDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
+    case "event":
+      return <EventDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
+    case "entity":
+      return <EntityDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
+  }
 }
 
 function Loading({ kind, onClose }: { kind: string; onClose: () => void }) {
@@ -98,6 +108,12 @@ function EvidenceDetail({ number, id, onClose }: { number: string; id: string; o
             Analyze
           </Button>
         )}
+        <Button size="sm" icon={<FolderTree />} onClick={() => navigate(`/cases/${encodeURIComponent(number)}/explorer?ev=${e.id}`)}>
+          Explore files
+        </Button>
+        <Button size="sm" icon={<Activity />} onClick={() => navigate(`/cases/${encodeURIComponent(number)}/timeline?ev=${e.id}`)}>
+          Timeline
+        </Button>
         <Button size="sm" icon={<Copy />} onClick={() => void navigator.clipboard?.writeText(e.id)}>
           Copy reference
         </Button>
