@@ -97,6 +97,11 @@ id_typ!(
     ActorId
 );
 verwaltung!(ActorId);
+id_typ!(
+    /// Eintrag im War Room.
+    WarRoomEntryId
+);
+verwaltung!(WarRoomEntryId);
 
 impl ActorId {
     /// Systemkonto der Kommandozeile, solange sie ohne Anmeldung arbeitet.

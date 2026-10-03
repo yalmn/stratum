@@ -11,7 +11,8 @@ use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use sqlx::types::Json;
 use stratum_model::{
-    ActorId, AnalysisRunId, ArtifactId, AuditAction, AuditResult, CaseId, EntityId, Permission,
+    ActorId, AnalysisRunId, ArtifactId, AuditAction, AuditResult, CaseId, EntityId, EventId,
+    EvidenceId, Permission,
 };
 
 use crate::audit::AuditEintrag;
@@ -129,6 +130,10 @@ pub struct Zeitfenster {
     pub arten: Vec<String>,
     /// Nur Ereignisse mit dieser beteiligten Entität.
     pub entitaet: Option<EntityId>,
+    /// Nur Ereignisse aus dieser Evidence (über die Herkunftsangaben).
+    pub evidence: Option<EvidenceId>,
+    /// Text in Art oder Attributen (ohne Groß- und Kleinschreibung).
+    pub suche: Option<String>,
     /// Weiter nach diesem Eintrag (aus `naechste` der vorigen Seite).
     pub nach: Option<String>,
     /// Höchstens so viele Einträge (1 bis 1000).
@@ -142,6 +147,16 @@ pub struct Seite {
     pub eintraege: Vec<Value>,
     /// Marke für die nächste Seite, falls es weitere gibt.
     pub naechste: Option<String>,
+}
+
+/// Suchtext als Literal für ILIKE, nicht als Muster: `%` und `_` maskieren.
+fn muster(s: &str) -> String {
+    format!(
+        "%{}%",
+        s.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
 }
 
 /// Marke `zeit|id` in ihre Teile.
@@ -214,6 +229,9 @@ impl Datenbank {
                  AND ($5::uuid IS NULL OR EXISTS (SELECT 1 FROM event_participant p \
                    WHERE p.event_id = e.id AND p.entity_id = $5)) \
                  AND ($6::timestamptz IS NULL OR (e.occurred_utc, e.id) > ($6, $7)) \
+                 AND ($9::uuid IS NULL OR EXISTS (SELECT 1 FROM provenance v \
+                   WHERE v.evidence_id = $9 AND v.object_type = 'event' AND v.object_id = e.id)) \
+                 AND ($10::text IS NULL OR e.kind ILIKE $10 OR e.attributes::text ILIKE $10) \
                  ORDER BY e.occurred_utc, e.id LIMIT $8",
         )
         .bind(fall.0)
@@ -224,6 +242,8 @@ impl Datenbank {
         .bind(nach.map(|n| n.0))
         .bind(nach.map(|n| n.1))
         .bind(anzahl + 1)
+        .bind(f.evidence.map(|x| x.0))
+        .bind(f.suche.as_deref().map(muster))
         .fetch_all(&self.pool)
         .await?;
         let mehr = zeilen.len() as i64 > anzahl;
@@ -311,15 +331,7 @@ impl Datenbank {
             }
             None => None,
         };
-        // Suchtext als Literal, nicht als Muster: % und _ maskieren.
-        let muster = suche.map(|s| {
-            format!(
-                "%{}%",
-                s.replace('\\', "\\\\")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_")
-            )
-        });
+        let muster = suche.map(muster);
         let zeilen: Vec<EntitaetZeile> = sqlx::query_as(
             "SELECT n.id, n.kind, n.canonical_key, n.display_name, n.attributes, \
                  n.first_seen, n.last_seen, \
@@ -445,6 +457,60 @@ impl Datenbank {
             },
             "beziehungen": beziehungen.into_iter().map(|j| j.0).collect::<Vec<_>>(),
             "ereignisse": ereignisse.into_iter().map(|j| j.0).collect::<Vec<_>>(),
+        }))
+    }
+}
+
+impl Datenbank {
+    /// Ein Ereignis mit Beteiligten und Herkunft: Evidence, Artefakt mit
+    /// Fundstelle und Parser, Analyselauf und Kennung des Rohfunds.
+    pub async fn ereignis(&self, akteur: ActorId, id: EventId) -> Result<Value, StoreError> {
+        let zeile: Option<(uuid::Uuid, Json<Value>)> = sqlx::query_as(
+            "SELECT e.case_id, jsonb_build_object('id', e.id, 'kind', e.kind, \
+               'occurred_utc', e.occurred_utc, 'occurred_at', e.occurred_at, \
+               'ended_at', e.ended_at, 'attributes', e.attributes, 'derivation', e.derivation, \
+               'participants', COALESCE((SELECT jsonb_agg(jsonb_build_object( \
+                 'entity_id', p.entity_id, 'role', p.role, 'kind', n.kind, \
+                 'name', n.display_name) ORDER BY p.role, n.display_name) \
+                 FROM event_participant p JOIN entity n ON n.id = p.entity_id \
+                 WHERE p.event_id = e.id), '[]')) \
+             FROM event e WHERE e.id = $1",
+        )
+        .bind(id.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some((fall, ereignis)) = zeile else {
+            return Err(StoreError::NichtGefunden(format!("kein Ereignis {id}")));
+        };
+        let e = self
+            .lesen_erlaubt(
+                akteur,
+                Some(CaseId(fall)),
+                json!({"art": "ereignis", "ereignis": id}),
+            )
+            .await?;
+        let herkunft: Vec<Json<Value>> = sqlx::query_scalar(
+            "SELECT jsonb_build_object('role', p.role, 'evidence_id', p.evidence_id, \
+               'evidence_name', v.name, 'artifact_id', p.artifact_id, 'artifact_kind', a.kind, \
+               'source_locator', COALESCE(p.source_locator, a.source_locator), \
+               'parser', COALESCE(p.parser, a.parser), 'analysis_run_id', p.analysis_run_id, \
+               'rohfund_id', a.raw_metadata->>'rohfund_id') \
+             FROM provenance p LEFT JOIN artifact a ON a.id = p.artifact_id \
+             LEFT JOIN evidence v ON v.id = p.evidence_id \
+             WHERE p.object_type = 'event' AND p.object_id = $1 \
+             ORDER BY p.role LIMIT 50",
+        )
+        .bind(id.0)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut ereignis = ereignis.0;
+        if let Some(a) = ereignis.get_mut("attributes") {
+            maskieren(a);
+        }
+        self.audit(&e).await?;
+        Ok(json!({
+            "ereignis": ereignis,
+            "herkunft": herkunft.into_iter().map(|j| j.0).collect::<Vec<_>>(),
         }))
     }
 }

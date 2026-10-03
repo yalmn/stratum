@@ -108,6 +108,8 @@ pub enum AuditAction {
     ReportExport,
     /// Anfrage an ein Sprachmodell.
     AiQuery,
+    /// Eintrag im War Room geschrieben.
+    WarRoomPost,
     /// Antwort eines Sprachmodells.
     AiResponse,
     /// Connector genutzt.

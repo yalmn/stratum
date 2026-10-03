@@ -171,6 +171,7 @@ pub enum SourceLocator {
 /// Verweis auf ein Objekt des Modells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "id", rename_all = "snake_case")]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
 pub enum ObjectRef {
     /// Fall.
     Case(CaseId),

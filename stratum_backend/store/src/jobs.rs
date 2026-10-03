@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json;
 use stratum_model::{
     ActorId, AnalysisRunId, AuditAction, AuditResult, CaseId, Evidence, EvidenceId, Job, JobId,
-    JobKind, JobStatus, Permission,
+    JobKind, JobStatus, ObjectRef, Permission, WarRoomEntryKind,
 };
 
 use crate::audit::{self, AuditEintrag};
@@ -123,7 +123,20 @@ impl Datenbank {
         .bind(akteur.0)
         .execute(&mut *tx)
         .await?;
-        audit::schreiben(&mut tx, &e).await?;
+        let audit_id = audit::schreiben(&mut tx, &e).await?;
+        crate::war_room::anhaengen(
+            &mut tx,
+            crate::war_room::Neu {
+                fall,
+                akteur,
+                art: WarRoomEntryKind::SystemEvent,
+                refs: &[ObjectRef::Evidence(evidence)],
+                payload: json!({"event": "job_queued", "job_id": id, "job_kind": "analysis", "optionen": optionen}),
+                parent: None,
+                audit: Some(audit_id),
+            },
+        )
+        .await?;
         tx.commit().await?;
         Ok(id)
     }
@@ -176,11 +189,25 @@ impl Datenbank {
         .bind(akteur.0)
         .execute(&mut *tx)
         .await?;
-        audit::schreiben(
+        let audit_id = audit::schreiben(
             &mut tx,
             &AuditEintrag {
                 details: json!({"art": "evidence_import", "parameter": parameter}),
                 ..e
+            },
+        )
+        .await?;
+        crate::war_room::anhaengen(
+            &mut tx,
+            crate::war_room::Neu {
+                fall,
+                akteur,
+                art: WarRoomEntryKind::SystemEvent,
+                refs: &[],
+                payload: json!({"event": "job_queued", "job_id": id, "job_kind": "evidence_import",
+                    "datei": parameter.get("datei")}),
+                parent: None,
+                audit: Some(audit_id),
             },
         )
         .await?;
@@ -278,16 +305,55 @@ impl Datenbank {
         fehler: Option<&str>,
         ergebnis: Option<&Value>,
     ) -> Result<(), StoreError> {
-        sqlx::query(
+        let mut tx = self.pool.begin().await?;
+        let job: Option<(uuid::Uuid, uuid::Uuid, String, Json<Value>)> = sqlx::query_as(
             "UPDATE job SET status = $2, finished_at = now(), error = $3, result = $4 \
-             WHERE id = $1 AND status = 'running'",
+             WHERE id = $1 AND status = 'running' RETURNING case_id, created_by, kind, parameters",
         )
         .bind(id.0)
         .bind(status_text(status))
         .bind(fehler)
         .bind(ergebnis.map(Json))
-        .execute(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
+        // Im War Room: Ende des Jobs mit den wichtigsten Zahlen.
+        if let Some((fall, von, art, parameter)) = job {
+            let r = ergebnis.cloned().unwrap_or(Value::Null);
+            let evidence = parameter
+                .0
+                .get("evidence_id")
+                .or_else(|| r.get("evidence_id"))
+                .and_then(Value::as_str)
+                .and_then(|s| s.parse().ok())
+                .map(|u| ObjectRef::Evidence(stratum_model::EvidenceId(u)));
+            let kurz: serde_json::Map<String, Value> = [
+                "funde",
+                "zeitstrahl",
+                "warnungen",
+                "name",
+                "neu",
+                "sha256",
+                "report_sha256",
+            ]
+            .iter()
+            .filter_map(|k| r.get(*k).map(|v| ((*k).to_string(), v.clone())))
+            .collect();
+            crate::war_room::anhaengen(
+                &mut tx,
+                crate::war_room::Neu {
+                    fall: CaseId(fall),
+                    akteur: ActorId(von),
+                    art: WarRoomEntryKind::SystemEvent,
+                    refs: evidence.as_slice(),
+                    payload: json!({"event": "job_finished", "job_id": id, "job_kind": art,
+                        "status": status, "error": fehler, "result": kurz}),
+                    parent: None,
+                    audit: None,
+                },
+            )
+            .await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 

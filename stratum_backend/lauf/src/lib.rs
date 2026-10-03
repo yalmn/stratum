@@ -12,6 +12,7 @@
 #![warn(missing_docs)]
 
 pub mod bdp;
+pub mod datei;
 pub mod db;
 pub mod import;
 pub mod liveness;

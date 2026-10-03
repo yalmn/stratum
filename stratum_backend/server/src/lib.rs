@@ -171,6 +171,27 @@ pub fn router(db: Datenbank) -> Router {
         )
         .route("/api/v1/faelle/{nummer}/entitaeten", get(entitaeten))
         .route("/api/v1/entitaeten/{id}", get(entitaet))
+        .route("/api/v1/ereignisse/{id}", get(ereignis))
+        .route(
+            "/api/v1/faelle/{nummer}/warroom",
+            get(war_room).post(war_room_schreiben),
+        )
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}",
+            get(datei_eintrag),
+        )
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/inhalt",
+            get(datei_inhalt),
+        )
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/hash",
+            post(datei_hash),
+        )
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/export",
+            get(datei_export),
+        )
         .route("/api/v1/evidence/{id}/volumes", get(volumes))
         .route("/api/v1/evidence/{id}/dateien", get(dateien))
         .route("/api/v1/artefakte/{id}/rohfund", get(rohfund))
@@ -533,6 +554,8 @@ struct ZeitachseAnfrage {
     /// Ereignisarten, durch Komma getrennt.
     art: Option<String>,
     entitaet: Option<uuid::Uuid>,
+    evidence: Option<uuid::Uuid>,
+    suche: Option<String>,
     nach: Option<String>,
     anzahl: Option<i64>,
 }
@@ -558,6 +581,8 @@ async fn zeitachse(
             })
             .unwrap_or_default(),
         entitaet: q.entitaet.map(stratum_model::EntityId),
+        evidence: q.evidence.map(stratum_model::EvidenceId),
+        suche: q.suche.filter(|s| !s.trim().is_empty()),
         nach: q.nach,
         anzahl: q.anzahl.unwrap_or(200),
     };
@@ -738,6 +763,292 @@ async fn rohfund(
         "klartext": quelle.klartext,
         "report": report,
     })))
+}
+
+async fn ereignis(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+) -> Antwort<Json<Value>> {
+    Ok(Json(z.db.ereignis(u.id, stratum_model::EventId(id)).await?))
+}
+
+#[derive(Deserialize)]
+struct WarRoomAnfrage {
+    vor: Option<uuid::Uuid>,
+    anzahl: Option<i64>,
+}
+
+async fn war_room(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<WarRoomAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    let (eintraege, naechste) =
+        z.db.war_room(
+            u.id,
+            fall,
+            q.vor.map(stratum_model::WarRoomEntryId),
+            q.anzahl.unwrap_or(100),
+        )
+        .await?;
+    let mut liste = Vec::with_capacity(eintraege.len());
+    for (e, name) in eintraege {
+        let mut v = serde_json::to_value(e).map_err(StoreError::from)?;
+        v["actor_name"] = json!(name);
+        liste.push(v);
+    }
+    Ok(Json(json!({ "eintraege": liste, "naechste": naechste })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WarRoomEintrag {
+    text: String,
+    #[serde(default = "notiz")]
+    art: stratum_model::WarRoomEntryKind,
+    #[serde(default)]
+    refs: Vec<stratum_model::ObjectRef>,
+    parent: Option<uuid::Uuid>,
+}
+
+fn notiz() -> stratum_model::WarRoomEntryKind {
+    stratum_model::WarRoomEntryKind::AnalystNote
+}
+
+async fn war_room_schreiben(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Koerper(e): Koerper<WarRoomEintrag>,
+) -> Antwort<(StatusCode, Json<Value>)> {
+    let fall = fall_id(&z, &nummer).await?;
+    let neu =
+        z.db.war_room_schreiben(
+            u.id,
+            fall,
+            e.art,
+            &e.text,
+            &e.refs,
+            e.parent.map(stratum_model::WarRoomEntryId),
+        )
+        .await?;
+    let mut v = serde_json::to_value(neu).map_err(StoreError::from)?;
+    v["actor_name"] = json!(u.display_name);
+    Ok((StatusCode::CREATED, Json(v)))
+}
+
+/// Datei im Katalog: Evidence, Volume-Offset, MFT-Datensatz.
+type DateiPfad = Path<(uuid::Uuid, i64, i64)>;
+
+fn ort<'a>(
+    q: &'a stratum_store::dateien::DateiQuelle,
+    volume: i64,
+    record: i64,
+) -> Antwort<stratum_lauf::datei::DateiOrt<'a>> {
+    let falsch = || ApiFehler::Anfrage("Volume oder Datensatz negativ".into());
+    Ok(stratum_lauf::datei::DateiOrt {
+        image: std::path::Path::new(&q.image),
+        bdp: q.bdp.as_deref().map(std::path::Path::new),
+        volume_offset: u64::try_from(volume).map_err(|_| falsch())?,
+        mft: u64::try_from(record).map_err(|_| falsch())?,
+    })
+}
+
+#[derive(Deserialize)]
+struct Ausschnitt {
+    #[serde(default)]
+    offset: u64,
+    laenge: Option<u64>,
+}
+
+/// Katalogeintrag eines Datensatzes (bei Hardlinks mehrere Namen).
+async fn datei_eintrag(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+) -> Antwort<Json<Value>> {
+    let v =
+        z.db.datei_eintrag(u.id, stratum_model::EvidenceId(id), volume, record)
+            .await?;
+    Ok(Json(Value::Array(v)))
+}
+
+/// Bis zu 64 KiB des Inhalts ab `offset` als Bytes (Hex-Ansicht).
+async fn datei_inhalt(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+    Query(a): Query<Ausschnitt>,
+) -> Antwort<Response> {
+    use stratum_store::dateien::Zugriff;
+    let q =
+        z.db.datei_quelle(
+            u.id,
+            stratum_model::EvidenceId(id),
+            volume,
+            record,
+            Zugriff::Ansehen,
+        )
+        .await?;
+    let laenge = a.laenge.unwrap_or(4096);
+    let groesse = q.groesse;
+    let daten = tokio::task::spawn_blocking(move || {
+        let o = ort(&q, volume, record)?;
+        stratum_lauf::datei::ausschnitt(&o, a.offset, laenge)
+            .map_err(|e| ApiFehler::NichtVerfuegbar(e.to_string()))
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("Lesen abgebrochen".into()))??;
+    let mut r = daten.into_response();
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    h.insert("x-stratum-offset", HeaderValue::from(a.offset));
+    if let Some(g) = groesse {
+        h.insert("x-stratum-groesse", HeaderValue::from(g));
+    }
+    Ok(r)
+}
+
+/// Liest die Datei vollständig, liefert SHA-256 und BLAKE3 und vermerkt
+/// den SHA-256 im Katalog.
+async fn datei_hash(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+) -> Antwort<Json<Value>> {
+    use stratum_store::dateien::Zugriff;
+    let ev = stratum_model::EvidenceId(id);
+    let q =
+        z.db.datei_quelle(u.id, ev, volume, record, Zugriff::Hashen)
+            .await?;
+    let h = tokio::task::spawn_blocking(move || {
+        let o = ort(&q, volume, record)?;
+        stratum_lauf::datei::schreiben(&o, std::io::sink())
+            .map(|(_, h)| h)
+            .map_err(|e| ApiFehler::NichtVerfuegbar(e.to_string()))
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("Lesen abgebrochen".into()))??;
+    let vermerkt =
+        z.db.datei_hash_vermerken(ev, volume, record, &h.sha256)
+            .await?;
+    let mut v = serde_json::to_value(&h).map_err(StoreError::from)?;
+    v["im_katalog_vermerkt"] = json!(vermerkt);
+    Ok(Json(v))
+}
+
+/// Schreibt in einen Kanal; der Server schickt die Blöcke als Antwort.
+struct KanalWriter {
+    tx: tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>,
+    puffer: Vec<u8>,
+}
+
+impl KanalWriter {
+    const BLOCK: usize = 256 * 1024;
+
+    fn senden(&mut self) -> std::io::Result<()> {
+        if self.puffer.is_empty() {
+            return Ok(());
+        }
+        let block = std::mem::replace(&mut self.puffer, Vec::with_capacity(Self::BLOCK));
+        self.tx
+            .blocking_send(Ok(block.into()))
+            .map_err(|_| std::io::Error::other("Verbindung beendet"))
+    }
+}
+
+impl std::io::Write for KanalWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.puffer.extend_from_slice(buf);
+        if self.puffer.len() >= Self::BLOCK {
+            self.senden()?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.senden()
+    }
+}
+
+/// Inhalt als Download (braucht `file.extract`). Nach dem letzten Block
+/// steht der Export mit SHA-256 im War Room.
+async fn datei_export(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+) -> Antwort<Response> {
+    use stratum_store::dateien::Zugriff;
+    let q =
+        z.db.datei_quelle(
+            u.id,
+            stratum_model::EvidenceId(id),
+            volume,
+            record,
+            Zugriff::Exportieren,
+        )
+        .await?;
+    // Image und Volume vorab prüfen, damit ein Fehler als Antwort und nicht
+    // als abgebrochener Download ankommt.
+    let q = tokio::task::spawn_blocking(move || {
+        stratum_lauf::datei::pruefen(&ort(&q, volume, record)?)
+            .map_err(|e| ApiFehler::NichtVerfuegbar(e.to_string()))?;
+        Ok::<_, ApiFehler>(q)
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("Prüfen abgebrochen".into()))??;
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let db = z.db.clone();
+    let handle = tokio::runtime::Handle::current();
+    let name = q.name.clone();
+    let akteur = u.id;
+    tokio::task::spawn_blocking(move || {
+        let Ok(o) = ort(&q, volume, record) else {
+            return;
+        };
+        let w = KanalWriter {
+            tx: tx.clone(),
+            puffer: Vec::with_capacity(KanalWriter::BLOCK),
+        };
+        match stratum_lauf::datei::schreiben(&o, w) {
+            Ok((mut w, h)) => {
+                let _ = std::io::Write::flush(&mut w);
+                let _ = handle
+                    .block_on(db.datei_exportiert(akteur, &q, volume, record, h.bytes, &h.sha256));
+            }
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+            }
+        }
+    });
+    let strom = stream::poll_fn(move |cx| rx.poll_recv(cx));
+    let mut r = Response::new(axum::body::Body::from_stream(strom));
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    // Nur sichere Zeichen im Dateinamen; der Rest wird ersetzt.
+    let sicher: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || ".-_".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if let Ok(v) = HeaderValue::from_str(&format!("attachment; filename=\"{sicher}\"")) {
+        h.insert(header::CONTENT_DISPOSITION, v);
+    }
+    Ok(r)
 }
 
 async fn audit(

@@ -43,9 +43,11 @@ fn marke_lesen(m: &str) -> Result<(bool, i64, String), StoreError> {
     Ok((datei, rec, name))
 }
 
-const VERZEICHNIS: &str = "\
-SELECT jsonb_build_object(
-    'mft_record', f.mft_record, 'name', f.name, 'path', f.path,
+/// Ein Katalogeintrag als JSON mit Zeiten als Text und `hat_kinder`.
+macro_rules! datei_json {
+    () => {
+        "jsonb_build_object(
+    'mft_record', f.mft_record, 'parent_record', f.parent_record, 'name', f.name, 'path', f.path,
     'is_directory', f.is_directory, 'sequence', f.sequence, 'size', f.size,
     'valid_length', f.valid_length,
     'si_created', filetime_iso(f.si_created), 'si_modified', filetime_iso(f.si_modified),
@@ -59,14 +61,30 @@ SELECT jsonb_build_object(
     'hat_kinder', f.is_directory AND EXISTS (
         SELECT 1 FROM file c WHERE c.evidence_id = f.evidence_id
             AND c.volume_offset = f.volume_offset AND c.parent_record = f.mft_record
-            AND c.mft_record <> c.parent_record)),
-    NOT f.is_directory, f.mft_record, f.name
-FROM file f
-WHERE f.evidence_id = $1 AND f.volume_offset = $2 AND f.parent_record = $3
-  AND f.mft_record <> f.parent_record
-  AND ($4::boolean IS NULL OR (NOT f.is_directory, f.name, f.mft_record) > ($4, $6, $5))
-ORDER BY NOT f.is_directory, f.name, f.mft_record
-LIMIT $7";
+            AND c.mft_record <> c.parent_record))"
+    };
+}
+
+const VERZEICHNIS: &str = concat!(
+    "SELECT ",
+    datei_json!(),
+    ",
+        NOT f.is_directory, f.mft_record, f.name
+    FROM file f
+    WHERE f.evidence_id = $1 AND f.volume_offset = $2 AND f.parent_record = $3
+      AND f.mft_record <> f.parent_record
+      AND ($4::boolean IS NULL OR (NOT f.is_directory, f.name, f.mft_record) > ($4, $6, $5))
+    ORDER BY NOT f.is_directory, f.name, f.mft_record
+    LIMIT $7"
+);
+
+/// Alle Einträge eines Datensatzes (mehrere bei Hardlinks).
+const EINTRAG: &str = concat!(
+    "SELECT ",
+    datei_json!(),
+    " FROM file f WHERE f.evidence_id = $1 AND f.volume_offset = $2 AND f.mft_record = $3 \
+     ORDER BY f.parent_record, f.name LIMIT 32"
+);
 
 impl Datenbank {
     /// Fall einer Evidence und Prüfung der Leserechte; liefert den
@@ -125,6 +143,36 @@ impl Datenbank {
             .collect())
     }
 
+    /// Ein Datensatz aus dem Katalog mit allen Namen (Hardlinks).
+    pub async fn datei_eintrag(
+        &self,
+        akteur: ActorId,
+        evidence: EvidenceId,
+        volume_offset: i64,
+        mft_record: i64,
+    ) -> Result<Vec<Value>, StoreError> {
+        let e = self
+            .datei_lesen_erlaubt(
+                akteur,
+                evidence,
+                json!({"art": "eintrag", "volume_offset": volume_offset, "mft_record": mft_record}),
+            )
+            .await?;
+        let zeilen: Vec<Json<Value>> = sqlx::query_scalar(EINTRAG)
+            .bind(evidence.0)
+            .bind(volume_offset)
+            .bind(mft_record)
+            .fetch_all(&self.pool)
+            .await?;
+        if zeilen.is_empty() {
+            return Err(StoreError::NichtGefunden(format!(
+                "MFT-Datensatz {mft_record} nicht im Katalog"
+            )));
+        }
+        self.audit(&e).await?;
+        Ok(zeilen.into_iter().map(|j| j.0).collect())
+    }
+
     /// Inhalt eines Verzeichnisses: erst Unterverzeichnisse, dann Dateien,
     /// je nach Name. `hat_kinder` sagt, ob ein Unterverzeichnis Einträge hat.
     pub async fn verzeichnis(
@@ -179,6 +227,163 @@ impl Datenbank {
             eintraege,
             naechste,
         })
+    }
+}
+
+/// Wofür eine Datei gelesen wird; bestimmt Recht und Audit-Aktion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zugriff {
+    /// Ausschnitt ansehen (Hex-Ansicht).
+    Ansehen,
+    /// Vollständig lesen und hashen.
+    Hashen,
+    /// Inhalt herunterladen.
+    Exportieren,
+}
+
+/// Was der Server zum Lesen einer Datei braucht, nach geprüften Rechten.
+#[derive(Debug, Clone)]
+pub struct DateiQuelle {
+    /// Fall.
+    pub fall: CaseId,
+    /// Evidence.
+    pub evidence: EvidenceId,
+    /// Pfad des Images.
+    pub image: String,
+    /// bdp.info, falls bei der Evidence vermerkt.
+    pub bdp: Option<String>,
+    /// Name der Datei im Katalog.
+    pub name: String,
+    /// Pfad im Volume.
+    pub pfad: String,
+    /// Größe laut Katalog.
+    pub groesse: Option<i64>,
+    /// Audit-Ereignis des Zugriffs.
+    pub audit: stratum_model::AuditEventId,
+}
+
+impl Datenbank {
+    /// Prüft Rechte und Katalog für einen Dateizugriff und trägt ihn ins
+    /// Audit ein (`FILE_VIEW`, beim Export `FILE_EXTRACT`). Nur Dateien aus
+    /// dem Katalog der Evidence sind erreichbar.
+    pub async fn datei_quelle(
+        &self,
+        akteur: ActorId,
+        evidence: EvidenceId,
+        volume_offset: i64,
+        mft_record: i64,
+        zugriff: Zugriff,
+    ) -> Result<DateiQuelle, StoreError> {
+        let ev: Option<(uuid::Uuid, String, Json<Value>)> =
+            sqlx::query_as("SELECT case_id, source_uri, metadata FROM evidence WHERE id = $1")
+                .bind(evidence.0)
+                .fetch_optional(&self.pool)
+                .await?;
+        let (fall, image, meta) =
+            ev.ok_or_else(|| StoreError::NichtGefunden(format!("keine Evidence {evidence}")))?;
+        let fall = CaseId(fall);
+        let (aktion, recht) = match zugriff {
+            Zugriff::Exportieren => (AuditAction::FileExtract, Permission::FileExtract),
+            _ => (AuditAction::FileView, Permission::FileView),
+        };
+        let mut e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion,
+            objekt_typ: "file",
+            objekt_id: Some(format!("{evidence}:{volume_offset}:{mft_record}")),
+            ergebnis: AuditResult::Success,
+            details: json!({"zugriff": format!("{zugriff:?}").to_lowercase()}),
+        };
+        self.verlangen(akteur, Permission::CaseView, e.clone())
+            .await?;
+        self.verlangen(akteur, recht, e.clone()).await?;
+        let datei: Option<(String, String, Option<i64>, bool)> = sqlx::query_as(
+            "SELECT name, path, size, is_directory FROM file \
+             WHERE evidence_id = $1 AND volume_offset = $2 AND mft_record = $3 LIMIT 1",
+        )
+        .bind(evidence.0)
+        .bind(volume_offset)
+        .bind(mft_record)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (name, pfad, groesse, verzeichnis) = datei.ok_or_else(|| {
+            StoreError::NichtGefunden(format!("MFT-Datensatz {mft_record} nicht im Katalog"))
+        })?;
+        if verzeichnis {
+            return Err(StoreError::Eingabe(
+                "ein Verzeichnis hat keinen Dateiinhalt".into(),
+            ));
+        }
+        e.details["pfad"] = json!(pfad);
+        let audit = self.audit(&e).await?;
+        Ok(DateiQuelle {
+            fall,
+            evidence,
+            image,
+            bdp: meta
+                .0
+                .get("bdp_info")
+                .and_then(Value::as_str)
+                .map(String::from),
+            name,
+            pfad,
+            groesse,
+            audit,
+        })
+    }
+
+    /// Vermerkt den berechneten SHA-256 im Katalog, falls dort noch keiner
+    /// steht. Liefert, ob er neu eingetragen wurde.
+    pub async fn datei_hash_vermerken(
+        &self,
+        evidence: EvidenceId,
+        volume_offset: i64,
+        mft_record: i64,
+        sha256: &str,
+    ) -> Result<bool, StoreError> {
+        let n = sqlx::query(
+            "UPDATE file SET sha256 = $4 WHERE evidence_id = $1 AND volume_offset = $2 \
+             AND mft_record = $3 AND sha256 IS NULL",
+        )
+        .bind(evidence.0)
+        .bind(volume_offset)
+        .bind(mft_record)
+        .bind(sha256)
+        .execute(&self.pool)
+        .await?
+        .rows_affected();
+        Ok(n > 0)
+    }
+
+    /// Trägt einen abgeschlossenen Export in den War Room ein (mit Hash des
+    /// gelieferten Inhalts), verknüpft mit dem Audit-Ereignis des Zugriffs.
+    pub async fn datei_exportiert(
+        &self,
+        akteur: ActorId,
+        q: &DateiQuelle,
+        volume_offset: i64,
+        mft_record: i64,
+        bytes: u64,
+        sha256: &str,
+    ) -> Result<(), StoreError> {
+        let mut tx = self.pool.begin().await?;
+        crate::war_room::anhaengen(
+            &mut tx,
+            crate::war_room::Neu {
+                fall: q.fall,
+                akteur,
+                art: stratum_model::WarRoomEntryKind::FileExtracted,
+                refs: &[stratum_model::ObjectRef::Evidence(q.evidence)],
+                payload: json!({"pfad": q.pfad, "name": q.name, "volume_offset": volume_offset,
+                    "mft_record": mft_record, "bytes": bytes, "sha256": sha256}),
+                parent: None,
+                audit: Some(q.audit),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 }
 

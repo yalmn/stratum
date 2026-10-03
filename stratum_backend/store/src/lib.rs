@@ -28,6 +28,7 @@ pub mod daten;
 pub mod faelle;
 pub mod jobs;
 pub mod sitzung;
+pub mod war_room;
 
 use serde_json::{json, Value};
 use sqlx::postgres::{PgConnectOptions, PgConnection, PgPool, PgPoolOptions};

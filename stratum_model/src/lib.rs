@@ -28,6 +28,7 @@ pub mod provenance;
 pub mod relationship;
 pub mod time;
 pub mod user;
+pub mod war_room;
 
 pub use artifact::{Artifact, ArtifactKind};
 pub use audit::{AuditAction, AuditEvent, AuditResult};
@@ -41,6 +42,7 @@ pub use finding::{Finding, FindingCategory, FindingDisposition, FindingPriority,
 pub use ids::{
     ActorId, AnalysisRunId, ArtifactId, AuditEventId, CaseId, EntityId, EventId, EvidenceId,
     EvidenceRelationId, FindingId, JobId, ObservationId, RelationshipId, RoleId, TagId,
+    WarRoomEntryId,
 };
 pub use job::{Job, JobKind, JobStatus};
 pub use observation::{Observation, ObservationKind};
@@ -51,3 +53,4 @@ pub use provenance::{
 pub use relationship::{Relationship, RelationshipKind};
 pub use time::{ForensicTime, TimePrecision, TimeSemantics};
 pub use user::{role_templates, Permission, Role, User, UserKind, UserStatus};
+pub use war_room::{WarRoomEntry, WarRoomEntryKind};

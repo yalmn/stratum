@@ -853,6 +853,158 @@ async fn ablauf(db: Datenbank) {
         ]
     );
 
+    // Zeitachse je Evidence und mit Suchtext; Ereignis mit Herkunft.
+    let za = "/api/v1/faelle/API-1/zeitachse";
+    let laenge = |v: &Value| v["eintraege"].as_array().unwrap().len();
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{za}?evidence={}", ev.id),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(laenge(&v), 2, "{v}");
+    let eid = v["eintraege"][0]["id"].as_str().unwrap().to_string();
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{za}?evidence=01a0fdd9-8410-7011-a689-f51d5bd3b3a5"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(laenge(&v), 0);
+    let (_, _, v) = anfrage(&app, "GET", &format!("{za}?suche=4624"), Some(&t_tom), None).await;
+    assert_eq!(laenge(&v), 2);
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{za}?suche=100%25"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(laenge(&v), 0);
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/ereignisse/{eid}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["ereignis"]["kind"], "user_logon");
+    let h = &v["herkunft"][0];
+    assert_eq!(h["evidence_name"], "leer.dd");
+    assert!(
+        h["rohfund_id"].is_string() && h["source_locator"].is_object(),
+        "{h}"
+    );
+
+    // War Room: Systemeinträge zum Analyse-Job, Notizen, Seiten.
+    let wr = "/api/v1/faelle/API-1/warroom";
+    let (s, _, v) = anfrage(&app, "GET", wr, Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    let ereignisse: Vec<&str> = v["eintraege"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["payload"]["event"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(ereignisse, ["job_finished", "job_queued"]);
+    assert_eq!(v["eintraege"][0]["payload"]["status"], "completed");
+    assert_eq!(v["eintraege"][0]["object_refs"][0]["type"], "evidence");
+    let (s, _, v) = anfrage(
+        &app,
+        "POST",
+        wr,
+        Some(&t_tom),
+        Some(json!({"text": "  Erste Einschätzung  "})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    assert_eq!(
+        (v["kind"].as_str(), v["payload"]["text"].as_str()),
+        (Some("analyst_note"), Some("Erste Einschätzung"))
+    );
+    assert!(v["audit_event_id"].is_string());
+    let notiz = v["id"].as_str().unwrap().to_string();
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        wr,
+        Some(&t_tom),
+        Some(json!({"text": "x", "art": "system_event"})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, _) = anfrage(&app, "POST", wr, Some(&t_tom), Some(json!({"text": "   "}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, v) = anfrage(
+        &app,
+        "POST",
+        wr,
+        Some(&t_mia),
+        Some(json!({"text": "Bestätigt", "parent": notiz})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::CREATED, "{v}");
+    let (_, _, v) = anfrage(&app, "GET", &format!("{wr}?anzahl=1"), Some(&t_tom), None).await;
+    assert_eq!(v["eintraege"][0]["parent_entry_id"], notiz.as_str());
+    assert!(v["eintraege"][0]["actor_name"].is_string());
+    let weiter = v["naechste"].as_str().unwrap().to_string();
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{wr}?anzahl=1&vor={weiter}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(v["eintraege"][0]["id"], notiz.as_str());
+    // Einträge sind unveränderlich, auch für die Anwendungsrolle.
+    assert!(sqlx::query("UPDATE war_room_entry SET payload = '{}'")
+        .execute(db.pool())
+        .await
+        .is_err());
+
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/evidence/{}/dateien/122683392/200", ev.id),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(
+        (v[0]["name"].as_str(), v[0]["parent_record"].as_i64()),
+        (Some("calc.exe"), Some(100))
+    );
+    // Dateiinhalt: nur Katalogdateien, Verzeichnisse nicht, Export nur mit
+    // file.extract. leer.dd enthält kein NTFS, Lesen scheitert deshalb mit 404.
+    let datei = |record: i64, was: &str| {
+        format!(
+            "/api/v1/evidence/{}/dateien/122683392/{record}/{was}",
+            ev.id
+        )
+    };
+    let (s, _, v) = anfrage(&app, "GET", &datei(101, "inhalt"), Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    assert!(v["fehler"].as_str().unwrap().contains("NTFS"), "{v}");
+    let (s, _, _) = anfrage(&app, "GET", &datei(100, "inhalt"), Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _, _) = anfrage(&app, "GET", &datei(999, "inhalt"), Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _, _) = anfrage(&app, "GET", &datei(101, "export"), Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, _) = anfrage(&app, "GET", &datei(101, "export"), Some(&t_mia), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _, _) = anfrage(&app, "POST", &datei(101, "hash"), Some(&t_tom), None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+
     // Weboberfläche: Dateien, sonst index.html; API-Pfade bleiben JSON.
     let gui = tmp.path().join("dist");
     std::fs::create_dir_all(gui.join("assets")).unwrap();
