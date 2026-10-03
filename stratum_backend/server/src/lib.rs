@@ -160,6 +160,10 @@ pub fn router(db: Datenbank) -> Router {
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job).delete(job_abbrechen))
         .route("/api/v1/jobs/{id}/fortschritt", get(job_fortschritt))
+        .route(
+            "/api/v1/faelle/{nummer}/evidence",
+            post(evidence_importieren),
+        )
         .route("/api/v1/faelle/{nummer}/zeitachse", get(zeitachse))
         .route(
             "/api/v1/faelle/{nummer}/zeitachse/arten",
@@ -441,6 +445,41 @@ async fn job_fortschritt(
         }
     });
     Ok(Sse::new(strom).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ImportAnfrage {
+    /// Datei im Fallordner, relativ zu ihm oder absolut.
+    datei: String,
+    name: Option<String>,
+    rolle: Option<String>,
+    art: Option<stratum_model::EvidenceKind>,
+}
+
+/// Evidence aus dem Fallordner importieren: als Job, weil der Hash über
+/// ein großes Image lange dauert. Antwort 202 mit der Job-ID.
+async fn evidence_importieren(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Koerper(a): Koerper<ImportAnfrage>,
+) -> Antwort<(StatusCode, Json<Value>)> {
+    let fall = fall_id(&z, &nummer).await?;
+    let id =
+        z.db.import_einreihen(u.id, fall, |ordner| {
+            let datei = stratum_lauf::import::im_ordner(&ordner.join(&a.datei), ordner)
+                .map_err(|e| e.to_string())?;
+            serde_json::to_value(stratum_jobs::ImportParameter {
+                datei,
+                name: a.name,
+                rolle: a.rolle,
+                art: a.art,
+            })
+            .map_err(|e| e.to_string())
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "job": id }))))
 }
 
 #[derive(Deserialize)]

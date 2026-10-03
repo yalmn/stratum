@@ -13,6 +13,7 @@
 
 pub mod bdp;
 pub mod db;
+pub mod import;
 pub mod liveness;
 pub mod report;
 pub mod rohfund;

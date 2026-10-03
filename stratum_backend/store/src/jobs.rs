@@ -128,6 +128,66 @@ impl Datenbank {
         Ok(id)
     }
 
+    /// Fallordner eines Falls, falls einer festgelegt ist.
+    pub async fn fall_ordner(&self, fall: CaseId) -> Result<Option<String>, StoreError> {
+        Ok(sqlx::query_scalar::<_, Option<String>>(
+            "SELECT case_folder FROM case_file WHERE id = $1",
+        )
+        .bind(fall.0)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
+    }
+
+    /// Reiht einen Evidence-Import ein (braucht `evidence.import`). Erst
+    /// nach der Rechteprüfung wird `pruefen` mit dem Fallordner aufgerufen;
+    /// es löst die Datei auf, prüft, dass sie im Ordner liegt, und liefert
+    /// die Parameter des Jobs. Der Worker prüft vor dem Lesen noch einmal.
+    pub async fn import_einreihen(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        pruefen: impl FnOnce(&std::path::Path) -> Result<Value, String>,
+    ) -> Result<JobId, StoreError> {
+        let id = JobId::new();
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion: AuditAction::JobCreate,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({"art": "evidence_import"}),
+        };
+        self.verlangen(akteur, Permission::EvidenceImport, e.clone())
+            .await?;
+        let ordner = self.fall_ordner(fall).await?.ok_or_else(|| {
+            StoreError::Eingabe("Fall ohne Fallordner; Import nur aus dem Fallordner".into())
+        })?;
+        let parameter = pruefen(std::path::Path::new(&ordner)).map_err(StoreError::Eingabe)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO job (id, case_id, kind, status, parameters, created_by, created_at) \
+             VALUES ($1, $2, 'evidence_import', 'queued', $3, $4, now())",
+        )
+        .bind(id.0)
+        .bind(fall.0)
+        .bind(Json(&parameter))
+        .bind(akteur.0)
+        .execute(&mut *tx)
+        .await?;
+        audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                details: json!({"art": "evidence_import", "parameter": parameter}),
+                ..e
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
     /// Holt den ältesten wartenden Job und setzt ihn auf `running`, solange
     /// nicht schon [`GLEICHZEITIG`] Jobs laufen. Vorher werden verwaiste
     /// Jobs (ohne Lebenszeichen seit [`VERWAIST_NACH_SEKUNDEN`]) als
@@ -390,5 +450,6 @@ impl Datenbank {
 pub fn art_text(k: JobKind) -> &'static str {
     match k {
         JobKind::Analysis => "analysis",
+        JobKind::EvidenceImport => "evidence_import",
     }
 }

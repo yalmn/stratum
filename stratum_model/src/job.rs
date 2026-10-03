@@ -1,5 +1,5 @@
-//! Jobs: Aufträge, die ein Worker im Hintergrund ausführt (zuerst
-//! Analysen). Ein Job läuft im Namen dessen, der ihn angelegt hat.
+//! Jobs: Aufträge, die ein Worker im Hintergrund ausführt (Analysen und
+//! Evidence-Importe). Ein Job läuft im Namen dessen, der ihn angelegt hat.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +13,8 @@ use crate::ids::{ActorId, AnalysisRunId, CaseId, JobId};
 pub enum JobKind {
     /// Analyse einer registrierten Evidence.
     Analysis,
+    /// Datei aus dem Fallordner hashen und als Evidence registrieren.
+    EvidenceImport,
 }
 
 /// Stand eines Jobs.

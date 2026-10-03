@@ -2,6 +2,8 @@
 //!
 //! Ein Analyse-Job analysiert eine im Fall registrierte Evidence mit
 //! [`stratum_lauf::analysieren`], im Namen dessen, der den Job angelegt hat.
+//! Ein Import-Job hasht eine Datei aus dem Fallordner und registriert sie
+//! als Evidence ([`stratum_lauf::import`]).
 //! Fortschritt geht höchstens einmal je Sekunde in die Job-Tabelle; das ist
 //! zugleich das Lebenszeichen, und die Antwort sagt, ob abgebrochen werden
 //! soll. Report und Seitendateien liegen in `<ausgabe>/<Job-ID>/`.
@@ -48,6 +50,23 @@ pub struct AnalyseOptionen {
     /// Die bei der Evidence vermerkte bdp.info verwenden (nur diese
     /// Partition).
     pub bdp: bool,
+}
+
+/// Parameter eines Import-Jobs.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportParameter {
+    /// Datei, aufgelöst und innerhalb des Fallordners.
+    pub datei: PathBuf,
+    /// Anzeigename (Standard: Dateiname).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// System oder Rolle, zu der die Evidence gehört.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rolle: Option<String>,
+    /// Art statt der Erkennung.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub art: Option<EvidenceKind>,
 }
 
 #[derive(Deserialize)]
@@ -122,6 +141,13 @@ impl Worker {
                 }
                 Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
             },
+            JobKind::EvidenceImport => match self.import(&job, &r) {
+                Ok(e) => (JobStatus::Completed, None, Some(e)),
+                Err(LaufFehler::Abgebrochen) => {
+                    (JobStatus::Cancelled, Some("abgebrochen".to_string()), None)
+                }
+                Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
+            },
         };
         r.senden(true);
         self.handle.block_on(self.db.job_beenden(
@@ -131,6 +157,50 @@ impl Worker {
             ergebnis.as_ref(),
         ))?;
         Ok(status)
+    }
+
+    fn import(&self, job: &Job, r: &JobRueckmeldung<'_>) -> Result<Value, LaufFehler> {
+        let p: ImportParameter = serde_json::from_value(job.parameters.clone())?;
+        // Noch einmal prüfen: zwischen Einreihen und Ausführen kann sich
+        // der Ordner geändert haben (etwa ein neuer symbolischer Link).
+        let ordner = self
+            .handle
+            .block_on(self.db.fall_ordner(job.case_id))?
+            .ok_or_else(|| LaufFehler::Eingabe("Fall ohne Fallordner".into()))?;
+        let datei = stratum_lauf::import::im_ordner(&p.datei, std::path::Path::new(&ordner))?;
+        let ev = stratum_lauf::import::einlesen(
+            &stratum_lauf::import::Einlesen {
+                fall: job.case_id,
+                datei,
+                name: p.name,
+                rolle: p.rolle,
+                art: p.art,
+                akteur: job.created_by,
+            },
+            r,
+        )?;
+        let neu = self
+            .handle
+            .block_on(self.db.evidence_registrieren(job.created_by, &ev))?;
+        r.meldung(&format!(
+            "[+] Evidence {} {}",
+            ev.name,
+            if neu {
+                "registriert"
+            } else {
+                "war schon registriert, Hash bestätigt"
+            }
+        ));
+        Ok(json!({
+            "evidence_id": ev.id,
+            "name": ev.name,
+            "kind": ev.kind,
+            "support": ev.support,
+            "sha256": ev.sha256,
+            "blake3": ev.blake3,
+            "groesse": ev.size,
+            "neu": neu,
+        }))
     }
 
     fn analyse(&self, job: &Job, r: &JobRueckmeldung<'_>) -> Result<Value, LaufFehler> {

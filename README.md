@@ -751,6 +751,7 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/rechte` | Katalog der Berechtigungen |
 | `GET`, `POST /api/v1/faelle` | Fälle auflisten, anlegen |
 | `GET /api/v1/faelle/{nummer}` | Fall mit Evidence |
+| `POST /api/v1/faelle/{nummer}/evidence` | Evidence aus dem Fallordner importieren (`{"datei", "name", "rolle", "art"}`), als Job |
 | `POST /api/v1/faelle/{nummer}/analysen` | Analyse als Job (`{"evidence", "optionen"}`) |
 | `GET /api/v1/jobs?fall=` | Jobs |
 | `GET`, `DELETE /api/v1/jobs/{id}` | Job ansehen, abbrechen |
@@ -764,6 +765,13 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/artefakte/{id}/rohfund?klartext=` | Rohfund eines Artefakts aus dem Report |
 | `GET /api/v1/audit?fall=&anzahl=` | Audit lesen |
 | `POST /api/v1/audit/pruefen` | Audit-Kette nachrechnen |
+
+Der Import über die API nimmt nur Dateien aus dem Fallordner (`ordner`
+beim Anlegen des Falls), relativ zu ihm oder absolut; Pfade werden
+aufgelöst, ein symbolischer Link oder `..` nach draußen wird abgelehnt.
+Er braucht `evidence.import`, läuft als Job (Antwort 202 mit der Job-ID)
+und hasht, erkennt die Art und registriert wie `evidence hinzu`; der
+Worker prüft den Pfad vor dem Lesen noch einmal.
 
 Zeitachse und Entitäten kommen seitenweise (`anzahl` bis 1000, Vorgabe
 200) als `{"eintraege", "naechste"}`; `naechste` wird als `nach` der

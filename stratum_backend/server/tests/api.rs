@@ -454,6 +454,98 @@ async fn ablauf(db: Datenbank) {
     let (_, _, v) = anfrage(&app, "GET", "/api/v1/jobs?fall=API-1", Some(&t_mia), None).await;
     assert_eq!(v.as_array().unwrap().len(), 1);
 
+    // Evidence-Import als Job, nur aus dem Fallordner.
+    let ordner = tmp.path().join("fall2");
+    std::fs::create_dir_all(ordner.join("netz")).unwrap();
+    let mut pcap = vec![0xd4, 0xc3, 0xb2, 0xa1];
+    pcap.resize(1 << 12, 1);
+    std::fs::write(ordner.join("netz/mitschnitt.pcap"), &pcap).unwrap();
+    std::fs::write(tmp.path().join("fremd.pcap"), &pcap).unwrap();
+    let fall2 =
+        json!({"nummer": "API-2", "titel": "Import", "ordner": ordner.display().to_string()});
+    let (s, _, _) = anfrage(&app, "POST", "/api/v1/faelle", Some(&t_chef), Some(fall2)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let import = |datei: &str| json!({"datei": datei, "rolle": "Router"});
+    let pfad = "/api/v1/faelle/API-2/evidence";
+    let (s, _, _) = anfrage(
+        &app,
+        "POST",
+        pfad,
+        Some(&t_tom),
+        Some(import("netz/mitschnitt.pcap")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, v) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-1/evidence",
+        Some(&t_mia),
+        Some(import("leer.dd")),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert!(
+        v["fehler"].as_str().unwrap().contains("ohne Fallordner"),
+        "{v}"
+    );
+    for falsch in [
+        "../fremd.pcap",
+        "fehlt.pcap",
+        tmp.path().join("fremd.pcap").to_str().unwrap(),
+    ] {
+        let (s, _, v) = anfrage(&app, "POST", pfad, Some(&t_mia), Some(import(falsch))).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{falsch}: {v}");
+    }
+    for runde in [true, false] {
+        let (s, _, v) = anfrage(
+            &app,
+            "POST",
+            pfad,
+            Some(&t_mia),
+            Some(import("netz/mitschnitt.pcap")),
+        )
+        .await;
+        assert_eq!(s, StatusCode::ACCEPTED, "{v}");
+        let job = v["job"].as_str().unwrap().to_string();
+        let worker = stratum_jobs::Worker::neu(
+            db.clone(),
+            tokio::runtime::Handle::current(),
+            tmp.path().join("jobs"),
+        );
+        let (_, status) = tokio::task::spawn_blocking(move || worker.einmal().unwrap())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(status, stratum_model::JobStatus::Completed);
+        let (_, _, v) = anfrage(
+            &app,
+            "GET",
+            &format!("/api/v1/jobs/{job}"),
+            Some(&t_mia),
+            None,
+        )
+        .await;
+        assert_eq!(v["kind"], "evidence_import");
+        assert_eq!(v["result"]["kind"], "pcap");
+        assert_eq!(v["result"]["neu"], runde);
+        assert_eq!(
+            v["result"]["sha256"],
+            stratum_core::hash_bytes(&pcap).sha256
+        );
+    }
+    let (_, _, v) = anfrage(&app, "GET", "/api/v1/faelle/API-2", Some(&t_mia), None).await;
+    let e = &v["evidence"][0];
+    assert_eq!(
+        (e["name"].as_str(), e["kind"].as_str()),
+        (Some("mitschnitt.pcap"), Some("pcap"))
+    );
+    assert_eq!(
+        (e["role"].as_str(), e["support"].as_str()),
+        (Some("Router"), Some("unsupported_format"))
+    );
+    assert_eq!(v["evidence"].as_array().unwrap().len(), 1);
+
     // Audit: mia hat audit.view nicht, chef als Superadmin schon.
     let (s, _, _) = anfrage(&app, "GET", "/api/v1/audit", Some(&t_mia), None).await;
     assert_eq!(s, StatusCode::FORBIDDEN);

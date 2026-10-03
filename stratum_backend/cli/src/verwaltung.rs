@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use stratum_model::{
-    ActorId, Case, CaseClassification, CaseId, CaseStatus, Evidence, EvidenceKind, EvidenceSupport,
-    Permission, Role, RoleId,
+    ActorId, Case, CaseClassification, CaseId, CaseStatus, Permission, Role, RoleId,
 };
 use stratum_store::Datenbank;
 
@@ -913,33 +912,6 @@ fn text_von<T: serde::Serialize>(v: &T) -> Result<String> {
         .to_string())
 }
 
-/// Erkennt die Art am Format. Nur Formate mit belegter Kennung; alles
-/// andere ist `other` und kann mit `--art` gesetzt werden.
-fn art_erkennen(img: &stratum_core::ImageReader) -> EvidenceKind {
-    if img.format() == stratum_core::ImageFormat::Ewf {
-        return EvidenceKind::E01Image;
-    }
-    let kopf = img
-        .read_at(0, 4)
-        .map(|k| k.into_owned())
-        .unwrap_or_default();
-    // pcap: Magic 0xa1b2c3d4 (Mikro-) bzw. 0xa1b23c4d (Nanosekunden) in
-    // der Byte-Reihenfolge des Schreibers (pcap-savefile(5)); pcapng: Section
-    // Header Block 0x0A0D0D0A (IETF draft-ietf-opsawg-pcapng).
-    match kopf.as_slice() {
-        [0xd4, 0xc3, 0xb2, 0xa1]
-        | [0xa1, 0xb2, 0xc3, 0xd4]
-        | [0x4d, 0x3c, 0xb2, 0xa1]
-        | [0xa1, 0xb2, 0x3c, 0x4d]
-        | [0x0a, 0x0d, 0x0d, 0x0a] => return EvidenceKind::Pcap,
-        _ => {}
-    }
-    match stratum_core::scan_partitions(img).scheme {
-        stratum_core::PartitionScheme::None => EvidenceKind::Other,
-        _ => EvidenceKind::RawDiskImage,
-    }
-}
-
 fn evidence(rt: &tokio::runtime::Runtime, db: &Datenbank, e: EvidenceBefehl) -> Result<()> {
     let EvidenceBefehl::Hinzu {
         fall,
@@ -954,70 +926,24 @@ fn evidence(rt: &tokio::runtime::Runtime, db: &Datenbank, e: EvidenceBefehl) -> 
     let fall_id = rt
         .block_on(db.fall_id(&fall))?
         .with_context(|| format!("kein Fall {fall}"))?;
-    let img = stratum_core::ImageReader::open(&datei)
-        .with_context(|| format!("Datei nicht lesbar: {}", datei.display()))?;
-    let kind = match &art {
-        Some(t) => serde_json::from_value(serde_json::Value::String(t.clone()))
-            .with_context(|| format!("unbekannte Art {t}"))?,
-        None => art_erkennen(&img),
+    let art = match &art {
+        Some(t) => Some(
+            serde_json::from_value(serde_json::Value::String(t.clone()))
+                .with_context(|| format!("unbekannte Art {t}"))?,
+        ),
+        None => None,
     };
-    let pb = crate::konsole::bytes_bar(img.len(), "Hashing");
-    let cb: stratum_core::Progress = &|done| pb.set_position(done);
-    let h = stratum_core::hash_image_with_progress(&img, Some(cb))
-        .context("Hash nicht berechenbar (Datei beschädigt?)")?;
-    pb.finish_and_clear();
-    let ewf = img.ewf().map(|x| stratum_lauf::ewf_report(x, Some(&h)));
-    if let Some(i) = &ewf {
-        for (n, stimmt) in [("MD5", i.md5_stimmt), ("SHA-1", i.sha1_stimmt)] {
-            if stimmt == Some(false) {
-                anyhow::bail!("Akquise-{n} des E01 stimmt nicht mit den Mediendaten überein");
-            }
-        }
-    }
-    // bdp.info von ForensiCUnlock neben einem Image gehört dazu.
-    let bdp = datei
-        .parent()
-        .map(|d| d.join("bdp.info"))
-        .filter(|p| p.is_file())
-        .and_then(|p| std::fs::canonicalize(p).ok());
-    let support = match kind {
-        EvidenceKind::RawDiskImage | EvidenceKind::E01Image => EvidenceSupport::Recognized,
-        _ => EvidenceSupport::UnsupportedFormat,
-    };
-    let dateiname = datei
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| datei.display().to_string());
-    let jetzt = chrono::Utc::now();
-    let ev = Evidence {
-        id: stratum_lauf::evidence_id_ableiten(fall_id, &h.sha256, kind),
-        case_id: fall_id,
-        kind,
-        name: name.unwrap_or_else(|| dateiname.clone()),
-        role: rolle,
-        original_name: Some(dateiname),
-        source_uri: std::fs::canonicalize(&datei)?.display().to_string(),
-        size: img.len(),
-        sha256: h.sha256.clone(),
-        blake3: h.blake3.clone(),
-        acquired_at: img
-            .ewf()
-            .and_then(|x| x.info().acquired_unix())
-            .and_then(|u| chrono::DateTime::from_timestamp(u, 0)),
-        imported_at: jetzt,
-        imported_by: a,
-        acquisition_method: None,
-        read_only: true,
-        support,
-        parent_evidence_id: None,
-        metadata: serde_json::json!({
-            "md5": h.md5,
-            "sha1": h.sha1,
-            "ewf": ewf,
-            "bdp_info": bdp.map(|p| p.display().to_string()),
-            "art_erkannt": art.is_none(),
-        }),
-    };
+    let ev = stratum_lauf::import::einlesen(
+        &stratum_lauf::import::Einlesen {
+            fall: fall_id,
+            datei,
+            name,
+            rolle,
+            art,
+            akteur: a,
+        },
+        &crate::konsole::Konsole::default(),
+    )?;
     let neu = rt.block_on(db.evidence_registrieren(a, &ev))?;
     eprintln!(
         "[+] Evidence {} {} ({}, {}) im Fall {fall}",
