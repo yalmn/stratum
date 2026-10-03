@@ -831,7 +831,7 @@ Datenbank.
 ### Weboberfläche
 
 Die Oberfläche liegt in `stratum_frontend/` und wird einmal gebaut
-(Node.js 20 oder neuer):
+(Node.js 20.19 oder ab 22.12, wie Vite es verlangt):
 
 ```sh
 cd stratum_frontend
