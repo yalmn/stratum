@@ -185,16 +185,50 @@ async fn frische_datenbank_entfernen(db: Datenbank, name: &str) {
         .unwrap();
 }
 
-async fn verbinden() -> Option<Datenbank> {
-    let Some(url) = url() else {
+/// Wegwerf-Datenbank eines Tests; wird beim Verlassen entfernt, auch wenn
+/// der Test scheitert. So bleiben in der eigentlichen Datenbank keine
+/// Testfälle zurück.
+struct Wegwerf {
+    db: Datenbank,
+    name: String,
+}
+
+impl std::ops::Deref for Wegwerf {
+    type Target = Datenbank;
+    fn deref(&self) -> &Datenbank {
+        &self.db
+    }
+}
+
+impl Drop for Wegwerf {
+    fn drop(&mut self) {
+        // Eigene Laufzeit in einem eigenen Thread: Drop ist synchron und
+        // läuft auch beim Abwickeln nach einem fehlgeschlagenen Test.
+        let name = std::mem::take(&mut self.name);
+        let _ = std::thread::spawn(move || {
+            use sqlx::Executor as _;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            rt.block_on(async {
+                let mut o = eigentuemer(&url().unwrap()).await;
+                let sql = format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)");
+                o.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(sql)))
+                    .await
+                    .unwrap();
+            });
+        })
+        .join();
+    }
+}
+
+async fn verbinden() -> Option<Wegwerf> {
+    let Some((db, _, name)) = frische_datenbank().await else {
         eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
         return None;
     };
-    Some(
-        Datenbank::verbinden_mit(&url, passwort().as_deref())
-            .await
-            .expect("Verbindung"),
-    )
+    Some(Wegwerf { db, name })
 }
 
 #[tokio::test(flavor = "current_thread")]
