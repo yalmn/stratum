@@ -9,6 +9,7 @@ license.workspace = true
 stratum-store = { path = "../store" }
 stratum-jobs = { path = "../jobs" }
 stratum-lauf = { path = "../lauf" }
+tower-http = { version = "0.7.1", features = ["fs"] }
 stratum-model = { path = "../../stratum_model" }
 axum = "0.8.9"
 base64ct = { version = "1.8.3", features = ["alloc"] }

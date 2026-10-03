@@ -30,9 +30,9 @@ Die Begriffe für die Suche stehen bewusst nicht im Code, sondern in einer pro F
 
 ## Aufbau
 
-Das Projekt ist in Teile gegliedert: `stratum_backend/` mit Analyse-Engine
-und CLI, `stratum_model/` mit dem gemeinsamen Datenmodell; eine Oberfläche
-(`stratum_frontend/`) folgt. Das Cargo-Workspace liegt im
+Das Projekt ist in Teile gegliedert: `stratum_backend/` mit Analyse-Engine,
+Server und CLI, `stratum_model/` mit dem gemeinsamen Datenmodell und
+`stratum_frontend/` mit der Weboberfläche. Das Cargo-Workspace liegt im
 Wurzelverzeichnis, Build-Befehle und `target/` bleiben dort.
 
 ```
@@ -50,13 +50,15 @@ stratum_backend/
   normalize/ Abbildung der Funde auf das Datenmodell
   store/     PostgreSQL: Modell, Fälle, Evidence, Konten, Rollen, Audit
   lauf/      ein Analyselauf als Bibliothek (Image bis Report, Datenbank),
-             genutzt von CLI, Worker und künftig dem Server
+             genutzt von CLI, Worker und Server
   jobs/      Worker: führt Jobs aus der Warteschlange in PostgreSQL aus
   server/    HTTP-API (/api/v1) auf Axum
   cli/       Binary "stratum": Optionen, Anmeldung, Ausgabe
   fuzz/      cargo-fuzz-Targets
   begriffe/  Begriffslisten für die Keyword-Suche
   xsoar/     Vorlage für Cortex XSOAR
+stratum_frontend/
+  src/       Weboberfläche (React, TypeScript, Vite, TanStack Query)
 stratum_model/
   src/       Fall, Evidence, Artefakte, Observationen, Entitäten,
              Ereignisse, Beziehungen, Findings, Herkunft, Zeitangaben, IDs
@@ -825,6 +827,28 @@ JSON aus und endet mit Fehler, wenn sie nicht intakt ist. Ein Superuser der
 Datenbank kann Trigger abschalten; eine Änderung findet dann das
 Nachrechnen. Spätere Ausbaustufe: signierte Prüfpunkte außerhalb der
 Datenbank.
+
+### Weboberfläche
+
+Die Oberfläche liegt in `stratum_frontend/` und wird einmal gebaut
+(Node.js 20 oder neuer):
+
+```sh
+cd stratum_frontend
+npm ci
+npm run build
+```
+
+`stratum server` liefert danach `stratum_frontend/dist` unter
+`http://127.0.0.1:8080/` aus (anderer Ort mit `--oberflaeche`,
+`[server] oberflaeche` in `stratum.toml` oder `STRATUM_OBERFLAECHE`).
+Angemeldet wird mit denselben Konten wie in der Kommandozeile; die Sitzung
+steckt in einem HttpOnly-Cookie. Die erste Ausbaustufe zeigt Fälle, legt
+sie an, importiert Evidence aus dem Fallordner, startet Analysen und zeigt
+den Fortschritt laufender Jobs; Schaltflächen erscheinen nur mit dem
+passenden Recht. Zeiten stehen immer in UTC. Für die Entwicklung startet
+`npm run dev` einen Vite-Server, der `/api` an `127.0.0.1:8080`
+weiterreicht.
 
 ## E01-Images
 

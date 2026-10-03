@@ -16,6 +16,9 @@
 //!
 //! [jobs]
 //! ausgabe = "/var/lib/stratum/jobs"          # Reports der Jobs, je Job ein Ordner
+//!
+//! [server]
+//! oberflaeche = "stratum_frontend/dist"      # gebaute Weboberfläche
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -34,6 +37,14 @@ pub struct Konfig {
     konto: Konto,
     #[serde(default)]
     jobs: Jobs,
+    #[serde(default)]
+    server: Server,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Server {
+    oberflaeche: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -148,6 +159,25 @@ impl Geladen {
             (Some(p), Some(k)) if p.is_relative() => k.parent().unwrap_or(Path::new(".")).join(p),
             (Some(p), _) => p.clone(),
             (None, _) => PathBuf::from("stratum-jobs"),
+        }
+    }
+
+    /// Gebaute Weboberfläche: `STRATUM_OBERFLAECHE`, sonst die Datei
+    /// (relativ zur Konfigurationsdatei), sonst `stratum_frontend/dist`,
+    /// wenn dort eine `index.html` liegt.
+    pub fn oberflaeche(&self) -> Option<PathBuf> {
+        if let Some(p) = std::env::var_os("STRATUM_OBERFLAECHE").filter(|p| !p.is_empty()) {
+            return Some(PathBuf::from(p));
+        }
+        match (&self.inhalt.server.oberflaeche, &self.pfad) {
+            (Some(p), Some(k)) if p.is_relative() => {
+                Some(k.parent().unwrap_or(Path::new(".")).join(p))
+            }
+            (Some(p), _) => Some(p.clone()),
+            (None, _) => {
+                let p = PathBuf::from("stratum_frontend/dist");
+                p.join("index.html").is_file().then_some(p)
+            }
         }
     }
 

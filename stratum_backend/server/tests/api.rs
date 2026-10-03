@@ -853,6 +853,41 @@ async fn ablauf(db: Datenbank) {
         ]
     );
 
+    // Weboberfläche: Dateien, sonst index.html; API-Pfade bleiben JSON.
+    let gui = tmp.path().join("dist");
+    std::fs::create_dir_all(gui.join("assets")).unwrap();
+    std::fs::write(
+        gui.join("index.html"),
+        "<!doctype html><title>stratum</title>",
+    )
+    .unwrap();
+    std::fs::write(gui.join("assets/a.js"), "export {};").unwrap();
+    let mit_gui = stratum_server::router_mit_oberflaeche(db.clone(), Some(&gui));
+    for (pfad, status, art) in [
+        ("/", StatusCode::OK, "text/html"),
+        ("/faelle/API-1", StatusCode::OK, "text/html"),
+        ("/assets/a.js", StatusCode::OK, "text/javascript"),
+        (
+            "/api/v1/gibtsnicht",
+            StatusCode::NOT_FOUND,
+            "application/json",
+        ),
+        ("/api/v1/ich", StatusCode::UNAUTHORIZED, "application/json"),
+    ] {
+        let r = mit_gui
+            .clone()
+            .oneshot(Request::get(pfad).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(r.status(), status, "{pfad}");
+        let typ = r.headers()[header::CONTENT_TYPE].to_str().unwrap();
+        assert!(typ.starts_with(art), "{pfad}: {typ}");
+        assert!(r.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .contains("frame-ancestors 'none'"));
+    }
+
     // Abmelden beendet die Sitzung.
     let (s, kopf, _) = anfrage(&app, "DELETE", "/api/v1/sitzung", Some(&t_mia), None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);

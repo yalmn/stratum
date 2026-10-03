@@ -69,6 +69,10 @@ pub enum Befehl {
         /// STRATUM_JOB_AUSGABE).
         #[arg(long, value_name = "ORDNER")]
         ausgabe: Option<PathBuf>,
+        /// Gebaute Weboberfläche (sonst aus stratum.toml bzw.
+        /// STRATUM_OBERFLAECHE, sonst stratum_frontend/dist, falls gebaut).
+        #[arg(long, value_name = "ORDNER")]
+        oberflaeche: Option<PathBuf>,
     },
     /// Katalog aller Berechtigungen ausgeben.
     Rechte,
@@ -529,7 +533,8 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
             nicht_nur_lokal,
             worker,
             ausgabe,
-        } => return server(adresse, nicht_nur_lokal, worker, ausgabe),
+            oberflaeche,
+        } => return server(adresse, nicht_nur_lokal, worker, ausgabe, oberflaeche),
         _ => {}
     }
     let (rt, db) = datenbank::verbinden()?;
@@ -1130,6 +1135,7 @@ fn server(
     nicht_nur_lokal: bool,
     mit_worker: bool,
     ausgabe: Option<PathBuf>,
+    oberflaeche: Option<PathBuf>,
 ) -> Result<()> {
     if !adresse.ip().is_loopback() && !nicht_nur_lokal {
         anyhow::bail!(
@@ -1165,19 +1171,44 @@ fn server(
     } else {
         None
     };
+    let oberflaeche = match oberflaeche {
+        Some(o) => Some(o),
+        None => crate::konfig::konfig()?.oberflaeche(),
+    };
+    match &oberflaeche {
+        Some(o) if o.join("index.html").is_file() => {
+            eprintln!(
+                "[+] Weboberfläche auf http://{adresse}/ (aus {})",
+                o.display()
+            );
+        }
+        Some(o) => anyhow::bail!(
+            "Weboberfläche nicht gebaut: {} fehlt (cd stratum_frontend, npm ci, npm run build)",
+            o.join("index.html").display()
+        ),
+        None => eprintln!(
+            "[*] ohne Weboberfläche (stratum_frontend/dist nicht gebaut: cd stratum_frontend, \
+             npm ci, npm run build)"
+        ),
+    }
     eprintln!("[+] stratum-API auf http://{adresse}/api/v1 (Strg+C beendet)");
     let (db2, s2) = (db.clone(), stopp.clone());
     let name = worker.as_ref().map(|(n, _)| n.clone());
-    rt.block_on(stratum_server::starten(db, listener, async move {
-        let _ = tokio::signal::ctrl_c().await;
-        s2.store(true, std::sync::atomic::Ordering::Relaxed);
-        eprintln!("[*] Server wird beendet ...");
-        if let Some(n) = name {
-            if let Err(e) = db2.worker_jobs_abbrechen(&n).await {
-                eprintln!("[!] Abbruch nicht angefordert: {e}");
+    rt.block_on(stratum_server::starten(
+        db,
+        listener,
+        oberflaeche.as_deref(),
+        async move {
+            let _ = tokio::signal::ctrl_c().await;
+            s2.store(true, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("[*] Server wird beendet ...");
+            if let Some(n) = name {
+                if let Err(e) = db2.worker_jobs_abbrechen(&n).await {
+                    eprintln!("[!] Abbruch nicht angefordert: {e}");
+                }
             }
-        }
-    }))
+        },
+    ))
     .context("Server nicht startbar")?;
     if let Some((_, faden)) = worker {
         let _ = faden.join();

@@ -17,7 +17,7 @@ use axum::http::request::Parts;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{any, get, post};
 use axum::{Json, Router};
 use futures_util::stream::{self, Stream};
 use serde::Deserialize;
@@ -179,15 +179,58 @@ pub fn router(db: Datenbank) -> Router {
         .with_state(Zustand { db })
 }
 
+/// Wie [`router`], dazu die Weboberfläche aus `oberflaeche` (der gebaute
+/// Ordner `stratum_frontend/dist`): Dateien von dort, alle übrigen Pfade
+/// außerhalb von `/api` erhalten `index.html`, damit Adressen der
+/// Oberfläche auch beim Neuladen funktionieren. Unbekannte API-Pfade
+/// bleiben 404 im gewohnten Format. Jede Antwort trägt
+/// Sicherheits-Kopfzeilen (CSP nur eigene Quellen, kein Einbetten).
+pub fn router_mit_oberflaeche(db: Datenbank, oberflaeche: Option<&std::path::Path>) -> Router {
+    let r = router(db).route("/api/{*rest}", any(api_unbekannt));
+    let r = match oberflaeche {
+        Some(d) => r.fallback_service(
+            tower_http::services::ServeDir::new(d)
+                .fallback(tower_http::services::ServeFile::new(d.join("index.html"))),
+        ),
+        None => r,
+    };
+    r.layer(axum::middleware::map_response(sicherheitskoepfe))
+}
+
+async fn api_unbekannt() -> ApiFehler {
+    ApiFehler::Store(StoreError::NichtGefunden("unbekannter Pfad".into()))
+}
+
+async fn sicherheitskoepfe(mut r: Response) -> Response {
+    let h = r.headers_mut();
+    h.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(
+            "default-src 'self'; img-src 'self' data:; object-src 'none'; \
+             base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+        ),
+    );
+    h.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    r
+}
+
 /// Startet den Server auf einer schon gebundenen Adresse und läuft, bis
 /// `stopp` endet. Erst binden, dann starten: so steht vor allem anderen
-/// fest, ob die Adresse frei ist.
+/// fest, ob die Adresse frei ist. Mit `oberflaeche` auch die Weboberfläche.
 pub async fn starten(
     db: Datenbank,
     listener: tokio::net::TcpListener,
+    oberflaeche: Option<&std::path::Path>,
     stopp: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(db))
+    axum::serve(listener, router_mit_oberflaeche(db, oberflaeche))
         .with_graceful_shutdown(stopp)
         .await
 }
