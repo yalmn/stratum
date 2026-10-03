@@ -72,6 +72,8 @@ pub enum AuditAction {
     AnalysisCancel,
     /// Suche ausgeführt.
     SearchRun,
+    /// Ergebnisse gelesen (Timeline, Entitäten, Beziehungen).
+    DataView,
     /// Datei angesehen.
     FileView,
     /// Datei extrahiert.

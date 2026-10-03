@@ -26,6 +26,10 @@ mod srum;
 mod usb;
 mod zugangsdaten;
 
+/// Felder mit Geheimwerten (Passwörter, Hashes, Schlüssel) an
+/// Credential-Entitäten und in Rohfunden der Zugangsdaten.
+pub use zugangsdaten::GEHEIM as GEHEIME_FELDER;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use chrono::{DateTime, Utc};

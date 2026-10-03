@@ -69,6 +69,74 @@ async fn anfrage(
     (status, kopf, wert)
 }
 
+/// Schreibt ein kleines Modell (zwei Anmeldungen, ein LSA-Secret) als
+/// Analyselauf in den Fall.
+async fn modell_schreiben(db: &Datenbank, fall: CaseId, ev: &Evidence) {
+    use stratum_analysis::RawFinding;
+    let anmeldung = |nr: &str, ft: &str| {
+        let mut f = RawFinding::new(
+            "eventlog",
+            "Anmeldung erfolgreich",
+            "Windows\\System32\\winevt\\Logs\\Security.evtx",
+        );
+        for (k, v) in [
+            ("event_id", "4624"),
+            ("event_record_id", nr),
+            ("filetime", ft),
+            ("anbieter", "Microsoft-Windows-Security-Auditing"),
+            ("benutzer", "ich"),
+            ("benutzer_sid", "S-1-5-21-1-2-3-1001"),
+            ("volume_offset", "122683392"),
+            ("mft_record", "39938"),
+            ("mft_record_offset", "3384805376"),
+            ("datei_offset", "69632"),
+        ] {
+            f = f.with(k, v);
+        }
+        f.id = format!("anmeldung{nr}");
+        f
+    };
+    let mut lsa = RawFinding::new(
+        "lsa",
+        "_SC_VBoxService",
+        "SECURITY\\Policy\\Secrets\\_SC_VBoxService\\CurrVal",
+    )
+    .with("art", "lsa_secret")
+    .with("wert", "Dienstkennwort1")
+    .with("laenge", "30")
+    .with("hive_offset", "8100");
+    lsa.id = "lsa1".into();
+    let funde = vec![
+        anmeldung("1", "134209790846680107"),
+        anmeldung("2", "134209790946680107"),
+        lsa,
+    ];
+    let k = stratum_normalize::Kontext {
+        case_id: fall,
+        evidence_id: ev.id,
+        evidence_sha256: ev.sha256.clone(),
+        host: Some("TESTRECHNER".into()),
+        stratum_version: "test".into(),
+        zeitpunkt: chrono::Utc::now(),
+    };
+    let m = stratum_normalize::normalisieren(&funde, &k);
+    let konfiguration = json!({});
+    let lauf = db
+        .lauf_beginnen(
+            ActorId::cli(),
+            &k,
+            &stratum_store::LaufAngaben {
+                started_at: chrono::Utc::now(),
+                configuration: &konfiguration,
+                configuration_hash: None,
+                audit_details: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+    db.modell_speichern(lauf, &m, None).await.unwrap();
+}
+
 async fn anmelden(app: &axum::Router, name: &str, pw: &str) -> String {
     let (s, _, v) = anfrage(
         app,
@@ -378,6 +446,133 @@ async fn ablauf(db: Datenbank) {
     }
     let (_, _, v) = anfrage(&app, "POST", "/api/v1/audit/pruefen", Some(&t_chef), None).await;
     assert_eq!(v["fehler_gesamt"], 0);
+
+    // Ergebnisse: kleines Modell aus Rohfunden in den Fall schreiben.
+    modell_schreiben(&db, fall_id, &ev).await;
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/zeitachse?anzahl=1",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["eintraege"].as_array().unwrap().len(), 1);
+    let erstes = v["eintraege"][0].clone();
+    assert_eq!(erstes["kind"], "user_logon");
+    assert!(erstes["participants"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| p["name"] == "ich"));
+    let weiter = v["naechste"].as_str().unwrap().to_string();
+    let (_, _, v2) = anfrage(
+        &app,
+        "GET",
+        &format!(
+            "/api/v1/faelle/API-1/zeitachse?anzahl=1&nach={}",
+            weiter
+                .replace('+', "%2B")
+                .replace(':', "%3A")
+                .replace('|', "%7C")
+        ),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(v2["eintraege"].as_array().unwrap().len(), 1);
+    assert_ne!(v2["eintraege"][0]["id"], erstes["id"]);
+    assert!(v2["eintraege"][0]["occurred_utc"].as_str() >= erstes["occurred_utc"].as_str());
+    assert!(v2["naechste"].is_null());
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/zeitachse?art=gibts_nicht",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert!(v["eintraege"].as_array().unwrap().is_empty());
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/zeitachse/arten",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert!(v
+        .as_array()
+        .unwrap()
+        .contains(&json!({"art": "user_logon", "anzahl": 2})));
+
+    // Entitäten: das Dienstpasswort ist maskiert.
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/entitaeten?suche=vbox&art=credential",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    let cred = v["eintraege"][0].clone();
+    assert_eq!(cred["display_name"], "LSA-Secret _SC_VBoxService");
+    assert_eq!(cred["attributes"]["wert"], "[maskiert]");
+    let id = cred["id"].as_str().unwrap().to_string();
+    let (_, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/entitaeten/{id}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(v["entitaet"]["attributes"]["wert"], "[maskiert]");
+    assert!(v["beziehungen"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|b| b["kind"] == "BELONGS_TO" && b["gegenueber"]["name"] == "VBoxService"));
+    // Klartext nur mit credential.view_sensitive (Analyst nicht, Forensic
+    // Examiner ja), beides im Audit.
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/entitaeten/{id}?klartext=true"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/entitaeten/{id}?klartext=true"),
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(v["entitaet"]["attributes"]["wert"], "Dienstkennwort1");
+    let cv: Vec<(String, uuid::Uuid)> = sqlx::query_as(
+        "SELECT result, actor_id FROM audit_event WHERE action = 'CREDENTIAL_VIEW' ORDER BY sequence",
+    )
+    .fetch_all(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(cv.len(), 2);
+    assert_eq!(cv[0].0, "denied");
+    assert_eq!(cv[1].0, "success");
+    let (s, _, _) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/entitaeten/01a0fdd9-8410-7011-a689-f51d5bd3b3a5",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
 
     // Abmelden beendet die Sitzung.
     let (s, kopf, _) = anfrage(&app, "DELETE", "/api/v1/sitzung", Some(&t_mia), None).await;

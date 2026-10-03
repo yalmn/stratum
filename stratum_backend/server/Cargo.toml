@@ -20,6 +20,8 @@ uuid = "1.26.1"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }
 
 [dev-dependencies]
+stratum-analysis = { path = "../analysis" }
+stratum-normalize = { path = "../normalize" }
 futures-util = { version = "0.3.34", default-features = false, features = ["std", "async-await-macro"] }
 tokio = { version = "1.53.1", features = ["rt", "rt-multi-thread", "net", "time", "macros"] }
 tower = { version = "0.5.3", features = ["util"] }

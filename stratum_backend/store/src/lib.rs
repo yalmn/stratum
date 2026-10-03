@@ -23,6 +23,7 @@
 
 pub mod audit;
 pub mod benutzer;
+pub mod daten;
 pub mod faelle;
 pub mod jobs;
 pub mod sitzung;

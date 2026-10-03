@@ -152,6 +152,13 @@ pub fn router(db: Datenbank) -> Router {
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job).delete(job_abbrechen))
         .route("/api/v1/jobs/{id}/fortschritt", get(job_fortschritt))
+        .route("/api/v1/faelle/{nummer}/zeitachse", get(zeitachse))
+        .route(
+            "/api/v1/faelle/{nummer}/zeitachse/arten",
+            get(zeitachse_arten),
+        )
+        .route("/api/v1/faelle/{nummer}/entitaeten", get(entitaeten))
+        .route("/api/v1/entitaeten/{id}", get(entitaet))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/audit/pruefen", post(audit_pruefen))
         .with_state(Zustand { db })
@@ -423,6 +430,106 @@ async fn job_fortschritt(
         }
     });
     Ok(Sse::new(strom).keep_alive(KeepAlive::default()))
+}
+
+#[derive(Deserialize)]
+struct ZeitachseAnfrage {
+    von: Option<chrono::DateTime<chrono::Utc>>,
+    bis: Option<chrono::DateTime<chrono::Utc>>,
+    /// Ereignisarten, durch Komma getrennt.
+    art: Option<String>,
+    entitaet: Option<uuid::Uuid>,
+    nach: Option<String>,
+    anzahl: Option<i64>,
+}
+
+async fn zeitachse(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<ZeitachseAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    let f = stratum_store::daten::Zeitfenster {
+        von: q.von,
+        bis: q.bis,
+        arten: q
+            .art
+            .map(|a| {
+                a.split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        entitaet: q.entitaet.map(stratum_model::EntityId),
+        nach: q.nach,
+        anzahl: q.anzahl.unwrap_or(200),
+    };
+    let seite = z.db.zeitachse(u.id, fall, &f).await?;
+    Ok(Json(serde_json::to_value(seite).map_err(StoreError::from)?))
+}
+
+async fn zeitachse_arten(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    let arten = z.db.zeitachse_arten(u.id, fall).await?;
+    Ok(Json(Value::Array(
+        arten
+            .into_iter()
+            .map(|(art, anzahl)| json!({ "art": art, "anzahl": anzahl }))
+            .collect(),
+    )))
+}
+
+#[derive(Deserialize)]
+struct EntitaetenAnfrage {
+    art: Option<String>,
+    suche: Option<String>,
+    nach: Option<String>,
+    anzahl: Option<i64>,
+}
+
+async fn entitaeten(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<EntitaetenAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    let seite =
+        z.db.entitaeten(
+            u.id,
+            fall,
+            q.art.as_deref(),
+            q.suche.as_deref().filter(|s| !s.is_empty()),
+            q.nach.as_deref(),
+            q.anzahl.unwrap_or(200),
+        )
+        .await?;
+    Ok(Json(serde_json::to_value(seite).map_err(StoreError::from)?))
+}
+
+#[derive(Deserialize)]
+struct KlartextAnfrage {
+    #[serde(default)]
+    klartext: bool,
+}
+
+async fn entitaet(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<KlartextAnfrage>,
+) -> Antwort<Json<Value>> {
+    let v =
+        z.db.entitaet(u.id, stratum_model::EntityId(id), q.klartext)
+            .await?;
+    Ok(Json(v))
 }
 
 async fn audit(

@@ -755,8 +755,21 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/jobs?fall=` | Jobs |
 | `GET`, `DELETE /api/v1/jobs/{id}` | Job ansehen, abbrechen |
 | `GET /api/v1/jobs/{id}/fortschritt` | Fortschritt als Server-Sent Events |
+| `GET /api/v1/faelle/{nummer}/zeitachse?von=&bis=&art=&entitaet=&nach=&anzahl=` | Ereignisse nach Zeit |
+| `GET /api/v1/faelle/{nummer}/zeitachse/arten` | Ereignisarten mit Anzahl |
+| `GET /api/v1/faelle/{nummer}/entitaeten?art=&suche=&nach=&anzahl=` | Entitäten |
+| `GET /api/v1/entitaeten/{id}?klartext=` | Entität mit Beziehungen und Ereignissen |
 | `GET /api/v1/audit?fall=&anzahl=` | Audit lesen |
 | `POST /api/v1/audit/pruefen` | Audit-Kette nachrechnen |
+
+Zeitachse und Entitäten kommen seitenweise (`anzahl` bis 1000, Vorgabe
+200) als `{"eintraege", "naechste"}`; `naechste` wird als `nach` der
+nächsten Anfrage übergeben. `von` und `bis` sind RFC 3339, `art` eine
+Liste mit Komma. Lesen verlangt `case.view` und `file.view` und steht als
+`DATA_VIEW` im Audit. Geheime Werte sensibler Zugangsdaten (Passwort,
+Hash, Secret, Masterkey) sind als `[maskiert]` ersetzt; `klartext=true`
+verlangt zusätzlich `credential.view_sensitive`, jeder Versuch steht als
+`CREDENTIAL_VIEW` im Audit, auch ein abgelehnter.
 
 Fehler kommen als `{"fehler": "…"}` mit 400, 401, 403, 404 oder 500
 (innere Fehler ohne Einzelheiten).

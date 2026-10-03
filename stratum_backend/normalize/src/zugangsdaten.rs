@@ -22,7 +22,8 @@ use crate::hilfen::{
 use crate::{Abbildung, Baukasten, GELESEN};
 
 /// Felder mit Geheimwerten, die an die Credential-Entität übernommen werden.
-const GEHEIM: &[&str] = &[
+/// Dieselben Namen tragen die Rohfunde; wer anzeigt, maskiert genau diese.
+pub const GEHEIM: &[&str] = &[
     "passwort",
     "dcc2_hash",
     "wert",
