@@ -1022,6 +1022,7 @@ async fn rollen_registrierung_freigabe() {
         ("CASE_CREATE", "success"),
         ("ROLE_DELETE", "success"),
         ("SUPERADMIN_SET", "success"),
+        ("SUPERADMIN_SET", "denied"),
         ("USER_DISABLE", "success"),
         ("LOGIN", "denied"),
         ("USER_REGISTER", "success"),
