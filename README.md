@@ -761,6 +761,7 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `POST /api/v1/faelle/{nummer}/evidence` | Evidence aus dem Fallordner importieren (`{"datei", "name", "rolle", "art"}`), als Job |
 | `POST /api/v1/faelle/{nummer}/analysen` | Analyse als Job (`{"evidence", "optionen"}`) |
 | `PUT /api/v1/faelle/{nummer}` | Titel, Beschreibung, Fallordner, Einstufung und Status ändern (`case.edit`) |
+| `POST /api/v1/evidence/{id}/dateien/{volume}/{record}/ips` | IP-Literale im Dateiinhalt suchen, mit logischen Bytepositionen (`search.run`, `file.view`) |
 | `GET /api/v1/jobs?fall=` | Jobs |
 | `GET`, `DELETE /api/v1/jobs/{id}` | Job ansehen, abbrechen |
 | `GET /api/v1/jobs/{id}/fortschritt` | Fortschritt als Server-Sent Events |

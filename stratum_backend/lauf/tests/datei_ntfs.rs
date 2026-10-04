@@ -1,7 +1,7 @@
 //! Dateiinhalt, Vorschau und Wortsuche an einem synthetischen NTFS, ohne Mount.
 use std::process::Command;
 use stratum_core::ImageReader;
-use stratum_lauf::datei::{ausschnitt, vorschau, wort_suchen, DateiOrt};
+use stratum_lauf::datei::{ausschnitt, ips_suchen, vorschau, wort_suchen, DateiOrt};
 use stratum_ntfs::NtfsVolume;
 
 #[test]
@@ -15,6 +15,9 @@ fn dateiinhalt_suche_und_vorschau() {
     bytes.extend_from_slice(b" padding ");
     let utf16_offset = bytes.len() as u64;
     bytes.extend("Grüße".encode_utf16().flat_map(u16::to_le_bytes));
+    bytes.extend(b" 192.0.2.1 ");
+    let ip16 = bytes.len() as u64;
+    bytes.extend("2001:db8::1".encode_utf16().flat_map(u16::to_le_bytes));
     std::fs::write(&source, &bytes).unwrap();
     std::fs::write(&image, vec![0u8; 16 * 1024 * 1024]).unwrap();
     assert!(Command::new("mkntfs")
@@ -53,6 +56,13 @@ fn dateiinhalt_suche_und_vorschau() {
         [4094, utf16_offset]
     );
     assert_eq!(ausschnitt(&o, 4094, 7).unwrap(), "Grüße".as_bytes());
+    let ips = ips_suchen(&o).unwrap();
+    assert!(ips.vollstaendig);
+    assert_eq!(ips.gelesen, bytes.len() as u64);
+    assert_eq!(ips.treffer.len(), 2);
+    assert_eq!(ips.treffer[0].adresse, "192.0.2.1");
+    assert_eq!(ips.treffer[1].offset, ip16);
+    assert_eq!(ips.treffer[1].adresse, "2001:db8::1");
     assert_eq!(vorschau(&o, bytes.len() as u64).unwrap(), bytes);
     assert!(vorschau(&o, 8 * 1024 * 1024 + 1).is_err());
     assert_eq!(std::fs::read(&image).unwrap(), before);

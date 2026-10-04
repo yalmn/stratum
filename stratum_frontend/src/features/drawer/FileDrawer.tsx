@@ -8,7 +8,7 @@ import { Button } from "../../components/ui/Button";
 import { CodeBlock, CopyButton, ErrorState, HashValue, PropertyList, Skeleton, Tabs, Timestamp } from "../../components/ui/Display";
 import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
 import { HexViewer, strings } from "../../components/forensic/HexViewer";
-import { fileExportUrl, useFileEntry, useHashFile, useHexWindow, useFileSearch, useFilePreview } from "../../lib/api/queries";
+import { fileExportUrl, useFileEntry, useHashFile, useHexWindow, useFileSearch, useFilePreview, useFileIps } from "../../lib/api/queries";
 import { Input, Select } from "../../components/ui/Input";
 import { bytes, count, fileAttributes } from "../../lib/format";
 import { useSession } from "../../lib/permissions";
@@ -55,6 +55,7 @@ function FileView({
   const hash = useHashFile(evidence, volume, record);
   const [view, setView] = useState<"hex" | "strings" | "text" | "preview" | null>("hex");
   const search = useFileSearch(evidence, volume, record);
+  const ips = useFileIps(evidence, volume, record);
   const [word, setWord] = useState("");
   const [offset, setOffset] = useState(0);
 
@@ -116,6 +117,24 @@ function FileView({
           {search.data && <>
             <p role="status">Search for “{search.variables}”: {count(search.data.treffer.length)} matches in {bytes(search.data.gelesen)}. {search.data.vollstaendig ? "Whole file searched." : "Search limit reached; results are incomplete."}</p>
             <div className="file-matches">{search.data.treffer.map((t) => <Button key={`${t.offset}-${t.kodierung}`} size="sm" variant="ghost" onClick={() => { setOffset(Math.floor(t.offset / WINDOW) * WINDOW); setView("hex"); }}>0x{t.offset.toString(16).toUpperCase()} · {t.kodierung}</Button>)}</div>
+          </>}
+        </DrawerSection>
+      )}
+      {!f.is_directory && can("search.run") && (
+        <DrawerSection title="IP address occurrences">
+          <Button size="sm" disabled={ips.isPending} onClick={() => ips.mutate()}>{ips.isPending ? "Scanning…" : "Find IP addresses"}</Button>
+          <p className="muted">ASCII and UTF-16LE literals, up to 256 MiB and 500 occurrences. Logical file offsets. Text occurrences do not establish network activity.</p>
+          {ips.error && <ErrorState title="IP search failed" reason={ips.error.message} />}
+          {ips.data && <>
+            <p role="status">{count(ips.data.ergebnis.treffer.length)} occurrences in {bytes(ips.data.ergebnis.gelesen)}. {ips.data.ergebnis.vollstaendig ? "Whole file searched." : "Search limit reached; results are incomplete."}</p>
+            <div className="file-matches">{ips.data.ergebnis.treffer.map((t) => (
+              <div className="row" key={`${t.offset}-${t.kodierung}`}>
+                <Button size="sm" variant="ghost" title={`Original: ${t.original}. Show surrounding logical bytes.`} onClick={() => { setOffset(Math.max(0, t.offset - 64)); setView("hex"); }}>
+                  {t.art} {t.adresse} · 0x{t.offset.toString(16).toUpperCase()} · {t.kodierung}
+                </Button>
+                <CopyButton value={t.adresse} label="Copy IP address" />
+              </div>
+            ))}</div>
           </>}
         </DrawerSection>
       )}

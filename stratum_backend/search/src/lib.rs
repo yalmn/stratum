@@ -20,6 +20,7 @@
 
 mod engine;
 mod finding;
+pub mod ip;
 mod terms;
 
 pub use engine::{SearchEngine, SearchResult};

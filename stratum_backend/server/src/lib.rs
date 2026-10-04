@@ -235,6 +235,10 @@ pub fn router(db: Datenbank) -> Router {
             post(datei_suche),
         )
         .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/ips",
+            post(datei_ips),
+        )
+        .route(
             "/api/v1/evidence/{id}/dateien/{volume}/{record}/vorschau",
             get(datei_vorschau),
         )
@@ -1259,6 +1263,45 @@ async fn datei_suche(
     z.db.dateisuche_protokollieren(u.id, &quelle, &wort, details, v.is_ok())
         .await?;
     Ok(Json(serde_json::to_value(v?).map_err(StoreError::from)?))
+}
+
+async fn datei_ips(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+) -> Antwort<Json<Value>> {
+    let q =
+        z.db.datei_quelle(
+            u.id,
+            stratum_model::EvidenceId(id),
+            volume,
+            record,
+            stratum_store::dateien::Zugriff::Suchen,
+        )
+        .await?;
+    let quelle = q.clone();
+    let v = tokio::task::spawn_blocking(move || {
+        let o = ort(&q, volume, record)?;
+        stratum_lauf::datei::ips_suchen(&o).map_err(|e| ApiFehler::NichtVerfuegbar(e.to_string()))
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("IP-Suche abgebrochen".into()))
+    .and_then(|v| v);
+    let details = match &v {
+        Ok(v) => {
+            json!({"modus":"ip-literal-v1", "treffer":v.treffer.len(), "gelesen":v.gelesen, "vollstaendig":v.vollstaendig, "volume":volume, "mft":record})
+        }
+        Err(_) => {
+            json!({"modus":"ip-literal-v1", "status":"fehlgeschlagen", "volume":volume, "mft":record})
+        }
+    };
+    z.db.dateisuche_protokollieren(u.id, &quelle, "ip-literal-v1", details, v.is_ok())
+        .await?;
+    Ok(Json(
+        json!({"quelle":{"evidence":id,"volume":volume,"mft":record,"pfad":quelle.pfad,"offset_basis":"logical_file"},
+            "ableitung":stratum_model::DerivationKind::Parsed,
+            "parser":{"name":"ip-literal-v1","version":env!("CARGO_PKG_VERSION")},"ergebnis":v?}),
+    ))
 }
 
 async fn datei_vorschau(

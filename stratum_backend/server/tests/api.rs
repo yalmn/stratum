@@ -1271,6 +1271,13 @@ async fn ablauf(db: Datenbank) {
     assert_eq!(result.0, "failure");
     assert!(!result.1.contains("Geheimwort"));
     assert!(result.1.contains("suchtext_sha256"));
+    let (status, _, _) = anfrage(&app, "POST", &datei(101, "ips"), None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = anfrage(&app, "POST", &datei(101, "ips"), Some(&t_tom), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let result: (String, String) = sqlx::query_as("SELECT result, details::text FROM audit_event WHERE action = 'SEARCH_RUN' ORDER BY sequence DESC LIMIT 1").fetch_one(db.pool()).await.unwrap();
+    assert_eq!(result.0, "failure");
+    assert!(result.1.contains("ip-literal-v1"));
     let (status, _, _) = anfrage(&app, "GET", &datei(101, "vorschau"), Some(&t_tom), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 

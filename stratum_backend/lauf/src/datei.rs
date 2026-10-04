@@ -286,6 +286,31 @@ pub fn wort_suchen(o: &DateiOrt<'_>, wort: &str) -> Result<WortSuche, LaufFehler
     Ok(scanner.ergebnis)
 }
 
+/// Sucht syntaktisch gültige IP-Literale, höchstens 256 MiB und 500 Treffer.
+/// Die Fundstellen sind logische Datei-Offsets, keine Netzwerkbeobachtungen.
+pub fn ips_suchen(o: &DateiOrt<'_>) -> Result<stratum_search::ip::IpSuche, LaufFehler> {
+    let mut scanner = stratum_search::ip::IpScanner::neu(SUCHE_MAX);
+    let img = ImageReader::open(o.image).kontext(|| "Image nicht lesbar".into())?;
+    let mut vol = oeffnen(&img, o)?;
+    let prefetch = |offset: u64, len: u64| img.prefetch(offset, len);
+    let ende = match vol.write_file_by_record(o.mft, "", &prefetch, &mut scanner) {
+        Ok(Some(_)) => true,
+        Ok(None) => {
+            return Err(LaufFehler::Eingabe(
+                "Datei hat keinen lesbaren Datenstrom".into(),
+            ))
+        }
+        Err(_) if scanner.begrenzt() => false,
+        Err(e) => {
+            return Err(LaufFehler::Schritt {
+                kontext: "IP-Suche fehlgeschlagen".into(),
+                quelle: Box::new(e),
+            })
+        }
+    };
+    Ok(scanner.abschliessen(ende))
+}
+
 /// Behält nur die Bytes im Bereich `von..bis` und meldet danach einen Fehler,
 /// damit das Lesen nicht bis zum Dateiende weiterläuft.
 struct Fenster {

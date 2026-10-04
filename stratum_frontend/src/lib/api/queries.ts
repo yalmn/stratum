@@ -256,6 +256,15 @@ export function useFilePreview(evidence: string, volume: number, record: number,
   });
 }
 
+export function useFileIps(evidence: string, volume: number, record: number) {
+  return useMutation({
+    mutationFn: () => api<{
+      quelle: { evidence: string; volume: number; mft: number; pfad: string };
+      ergebnis: { gelesen: number; vollstaendig: boolean; treffer: { adresse: string; original: string; art: string; offset: number; laenge: number; kodierung: string }[] };
+    }>(`/evidence/${evidence}/dateien/${volume}/${record}/ips`, { method: "POST" }),
+  });
+}
+
 export function useCatalogSearch(evidence: string, volume: number, filter: { suche: string; endung: string; format: string }, enabled: boolean) {
   return useInfiniteQuery({
     queryKey: ["file-search", evidence, volume, filter],
