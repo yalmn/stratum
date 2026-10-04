@@ -14,6 +14,9 @@ import {
   type Job,
   type JobUpdate,
   type Me,
+  type GraphPage,
+  type RelationshipDetail,
+  type AuditRow,
   type EntityDetail,
   type EntityRow,
   type EventDetail,
@@ -428,4 +431,32 @@ export function useCaseFolder(number: string, path: string, enabled: boolean) {
     enabled,
     retry: false,
   });
+}
+
+
+export function useGraphExpand(number: string) {
+  return useMutation({ mutationFn: (v: { id: string; nach?: string }) => api<GraphPage>(`/faelle/${enc(number)}/graph/${enc(v.id)}?anzahl=30${v.nach ? `&nach=${enc(v.nach)}` : ""}`) });
+}
+export function useRelationship(number: string, id: string) {
+  return useQuery({ queryKey: ["relationship", number, id], queryFn: () => api<RelationshipDetail>(`/faelle/${enc(number)}/beziehungen/${enc(id)}`), retry: false });
+}
+export function useAudit(number: string, enabled: boolean) {
+  return useInfiniteQuery({ queryKey: ["audit", number], queryFn: ({ pageParam }) => api<AuditRow[]>(`/audit?fall=${enc(number)}&anzahl=100${pageParam ? `&vor=${pageParam}` : ""}`),
+    initialPageParam: 0, getNextPageParam: (p) => p.length === 100 ? p.at(-1)?.sequence : undefined, enabled });
+}
+export function useVerifyAudit() {
+  return useMutation({ mutationFn: () => api<{ ereignisse: number; letzter_hash: string; fehler: string[]; fehler_gesamt: number }>("/audit/pruefen", { method: "POST" }) });
+}
+
+
+export function useYaraScan(evidence: string, volume: number, record: number) {
+  const client = useQueryClient();
+  return useMutation({ mutationFn: (regeln: string) => api<{ job_id: string; regel_sha256: string }>(`/evidence/${evidence}/dateien/${volume}/${record}/yara`, { method: "POST", body: { regeln } }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["jobs"] }) });
+}
+
+export function useNetworkLookup(number: string) {
+  const client = useQueryClient();
+  return useMutation({ mutationFn: (body: { ziel: string; dns: boolean; whois: boolean }) => api<{ job_id: string; host: string }>(`/faelle/${enc(number)}/netzwerk`, { method: "POST", body }),
+    onSuccess: () => client.invalidateQueries({ queryKey: ["jobs"] }) });
 }

@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Activity, ArrowLeft, ArrowRight, Eye } from "lucide-react";
+import { Activity, ArrowLeft, ArrowRight, Eye, Globe, Waypoints } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { ErrorState, PropertyList, Skeleton, Timestamp } from "../../components/ui/Display";
 import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
@@ -39,6 +39,8 @@ export function EntityDrawer({ id, caseNumber, onClose }: { id: string; caseNumb
   return (
     <DrawerFrame kind={label(e.kind)} title={e.display_name} onClose={onClose}>
       <div className="drawer-actions">
+        {["ip_address", "domain_name", "url"].includes(e.kind) && can("connector.use") && <Button size="sm" icon={<Globe />} onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/network?target=${encodeURIComponent(e.canonical_key.replace(/^(ip|domain|url):/, ""))}`)}>DNS / WHOIS</Button>}
+        <Button size="sm" icon={<Waypoints />} onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/graph?entity=${e.id}&detail=entity:${e.id}`)}>Show in graph</Button>
         <Button
           size="sm"
           icon={<Activity />}

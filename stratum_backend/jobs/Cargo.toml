@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+stratum-connectors = { path = "../connectors" }
+tempfile.workspace = true
+stratum-core.workspace = true
 stratum-lauf = { path = "../lauf" }
 stratum-store = { path = "../store" }
 stratum-model = { path = "../../stratum_model" }

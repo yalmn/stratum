@@ -23,7 +23,7 @@ function SystemBody({ e }: { e: WarRoomItem }) {
   const p = e.payload as Record<string, unknown>;
   const { open } = useDetail();
   const job = typeof p.job_id === "string" ? p.job_id : null;
-  const what = p.job_kind === "evidence_import" ? "Evidence import" : "Analysis";
+  const what = p.job_kind === "network_enrichment" ? "DNS / WHOIS" : p.job_kind === "yara_scan" ? "YARA scan" : p.job_kind === "evidence_import" ? "Evidence import" : "Analysis";
   const evidence = e.object_refs.find((r) => r.type === "evidence");
   if (e.kind === "file_extracted") {
     return (

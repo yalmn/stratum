@@ -252,3 +252,18 @@ export interface WarRoomPage {
   eintraege: WarRoomItem[];
   naechste: string | null;
 }
+
+
+export interface GraphNode { id: string; kind: string; name: string }
+export interface GraphEdge { id: string; kind: string; source: string; target: string; derivation: DerivationKind }
+export interface GraphPage { wurzel: string; knoten: GraphNode[]; kanten: GraphEdge[]; naechste: string | null }
+export interface RelationshipDetail {
+  beziehung: { id: string; kind: string; source: GraphNode; target: GraphNode; derivation: DerivationKind; valid_from: string | null; valid_until: string | null };
+  herkunft: { role: string; evidence_id: string; artifact_id: string | null; observation_id: string | null; source_locator: Record<string, unknown> | null; parser: Record<string, unknown> | null; analysis_run_id: string | null }[];
+  herkunft_vollstaendig: boolean;
+}
+export interface AuditRow {
+  id: string; sequence: number; actor_id: string; akteur: string; case_id: string | null;
+  timestamp: string; action: string; object_type: string; object_id: string | null;
+  result: string; details: Record<string, unknown>; previous_hash: string | null; hash: string;
+}

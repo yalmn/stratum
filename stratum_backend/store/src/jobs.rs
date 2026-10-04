@@ -141,6 +141,71 @@ impl Datenbank {
         Ok(id)
     }
 
+    /// YARA-Auftrag nach geprüftem Katalogzugriff einreihen. Regeltext wird
+    /// unverändert im Auftrag aufbewahrt; das Audit enthält nur seinen Hash.
+    pub async fn yara_job(
+        &self,
+        akteur: ActorId,
+        quelle: &crate::dateien::DateiQuelle,
+        volume: i64,
+        mft: i64,
+        regeln: &str,
+        regel_hash: &str,
+    ) -> Result<JobId, StoreError> {
+        let id = JobId::new();
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(quelle.fall),
+            aktion: AuditAction::JobCreate,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({"art":"yara_scan", "regel_sha256":regel_hash, "evidence":quelle.evidence, "volume":volume, "mft":mft}),
+        };
+        self.verlangen(akteur, Permission::AnalysisStart, e.clone())
+            .await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO job(id,case_id,kind,status,parameters,created_by,created_at) VALUES($1,$2,'yara_scan','queued',$3,$4,now())")
+            .bind(id.0).bind(quelle.fall.0).bind(Json(json!({"evidence_id":quelle.evidence,"volume":volume,"mft":mft,"regeln":regeln,"regel_sha256":regel_hash}))).bind(akteur.0).execute(&mut *tx).await?;
+        let audit_id = audit::schreiben(&mut tx, &e).await?;
+        crate::war_room::anhaengen(&mut tx, crate::war_room::Neu { fall:quelle.fall, akteur, art:WarRoomEntryKind::SystemEvent, refs:&[ObjectRef::Evidence(quelle.evidence)], payload:json!({"event":"job_queued", "job_id":id, "job_kind":"yara_scan", "regel_sha256":regel_hash}), parent:None, audit:Some(audit_id) }).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
+    /// Ausdrücklich gewählte externe Abfragen als Job festhalten.
+    pub async fn netzwerk_job(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        host: &str,
+        dns: bool,
+        whois: bool,
+    ) -> Result<JobId, StoreError> {
+        let id = JobId::new();
+        let parameters = json!({"host":host, "dns":dns, "whois":whois});
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion: AuditAction::JobCreate,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({"art":"network_enrichment", "host":host, "dns":dns, "whois":whois}),
+        };
+        self.verlangen(akteur, Permission::CaseView, e.clone())
+            .await?;
+        self.verlangen(akteur, Permission::ConnectorUse, e.clone())
+            .await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("INSERT INTO job(id,case_id,kind,status,parameters,created_by,created_at) VALUES($1,$2,'network_enrichment','queued',$3,$4,now())")
+          .bind(id.0).bind(fall.0).bind(Json(parameters)).bind(akteur.0).execute(&mut *tx).await?;
+        let audit_id = audit::schreiben(&mut tx, &e).await?;
+        crate::war_room::anhaengen(&mut tx, crate::war_room::Neu { fall, akteur, art:WarRoomEntryKind::SystemEvent, refs:&[], payload:json!({"event":"job_queued", "job_id":id,"job_kind":"network_enrichment","host":host}), parent:None, audit:Some(audit_id) }).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
     /// Fallordner eines Falls, falls einer festgelegt ist.
     pub async fn fall_ordner(&self, fall: CaseId) -> Result<Option<String>, StoreError> {
         Ok(sqlx::query_scalar::<_, Option<String>>(
@@ -549,5 +614,7 @@ pub fn art_text(k: JobKind) -> &'static str {
     match k {
         JobKind::Analysis => "analysis",
         JobKind::EvidenceImport => "evidence_import",
+        JobKind::YaraScan => "yara_scan",
+        JobKind::NetworkEnrichment => "network_enrichment",
     }
 }

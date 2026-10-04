@@ -22,6 +22,7 @@ doc = false
 bench = false
 
 [dependencies]
+stratum-connectors = { path = "../connectors" }
 libfuzzer-sys = "0.4.13"
 stratum-core = { path = "../core" }
 stratum-registry = { path = "../registry" }
@@ -162,6 +163,13 @@ bench = false
 [[bin]]
 name = "ewf"
 path = "fuzz_targets/ewf.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "yara_output"
+path = "fuzz_targets/yara_output.rs"
 test = false
 doc = false
 bench = false

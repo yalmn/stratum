@@ -76,6 +76,24 @@ struct AnalyseParameter {
     optionen: AnalyseOptionen,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct YaraParameter {
+    evidence_id: EvidenceId,
+    volume: i64,
+    mft: i64,
+    regeln: String,
+    regel_sha256: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetzwerkParameter {
+    host: String,
+    dns: bool,
+    whois: bool,
+}
+
 /// Ein Worker.
 pub struct Worker {
     db: Datenbank,
@@ -142,6 +160,20 @@ impl Worker {
                 }
                 Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
             },
+            JobKind::NetworkEnrichment => match self.netzwerk(&job, &r) {
+                Ok(e) => (JobStatus::Completed, None, Some(e)),
+                Err(LaufFehler::Abgebrochen) => {
+                    (JobStatus::Cancelled, Some("abgebrochen".into()), None)
+                }
+                Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
+            },
+            JobKind::YaraScan => match self.yara(&job, &r) {
+                Ok(e) => (JobStatus::Completed, None, Some(e)),
+                Err(LaufFehler::Abgebrochen) => {
+                    (JobStatus::Cancelled, Some("abgebrochen".into()), None)
+                }
+                Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
+            },
             JobKind::EvidenceImport => match self.import(&job, &r) {
                 Ok(e) => (JobStatus::Completed, None, Some(e)),
                 Err(LaufFehler::Abgebrochen) => {
@@ -158,6 +190,126 @@ impl Worker {
             ergebnis.as_ref(),
         ))?;
         Ok(status)
+    }
+
+    fn netzwerk(&self, job: &Job, r: &JobRueckmeldung<'_>) -> Result<Value, LaufFehler> {
+        let p: NetzwerkParameter = serde_json::from_value(job.parameters.clone())?;
+        let audit = stratum_store::AuditEintrag {
+            akteur: job.created_by,
+            case_id: Some(job.case_id),
+            aktion: stratum_model::AuditAction::ConnectorUse,
+            objekt_typ: "job",
+            objekt_id: Some(job.id.to_string()),
+            ergebnis: stratum_model::AuditResult::Success,
+            details: json!({"connector":"dns-whois-v1", "host":p.host, "dns":p.dns,"whois":p.whois}),
+        };
+        self.handle.block_on(self.db.verlangen(
+            job.created_by,
+            stratum_model::Permission::CaseView,
+            audit.clone(),
+        ))?;
+        self.handle.block_on(self.db.verlangen(
+            job.created_by,
+            stratum_model::Permission::ConnectorUse,
+            audit.clone(),
+        ))?;
+        let zeit = chrono::Utc::now();
+        r.meldung("Externe DNS-/WHOIS-Abfragen ausführen");
+        let result = stratum_connectors::netzwerk::abfragen(&p.host, p.dns, p.whois, &|| {
+            r.abbruch_angefordert()
+        });
+        let success = result
+            .as_ref()
+            .is_ok_and(|results| results.iter().all(|r| r.erfolgreich));
+        self.handle
+            .block_on(self.db.audit(&stratum_store::AuditEintrag {
+                ergebnis: if success {
+                    stratum_model::AuditResult::Success
+                } else {
+                    stratum_model::AuditResult::Failure
+                },
+                ..audit
+            }))?;
+        let antworten = result.map_err(|e| match e {
+            stratum_connectors::ConnectorFehler::Abgebrochen => LaufFehler::Abgebrochen,
+            e => LaufFehler::Eingabe(e.to_string()),
+        })?;
+        Ok(
+            json!({"werkzeug":"DNS/WHOIS", "connector":"dns-whois-v1", "host":p.host, "abgefragt_am":zeit, "beendet_am":chrono::Utc::now(), "ableitung":stratum_model::DerivationKind::ExternalIntel, "alle_erfolgreich":success, "antworten":antworten}),
+        )
+    }
+
+    fn yara(&self, job: &Job, r: &JobRueckmeldung<'_>) -> Result<Value, LaufFehler> {
+        use stratum_connectors::yara::{regeln_pruefen, scannen, YaraFehler};
+        let p: YaraParameter = serde_json::from_value(job.parameters.clone())?;
+        self.handle.block_on(self.db.verlangen(
+            job.created_by,
+            stratum_model::Permission::AnalysisStart,
+            stratum_store::AuditEintrag {
+                akteur: job.created_by,
+                case_id: Some(job.case_id),
+                aktion: stratum_model::AuditAction::ConnectorUse,
+                objekt_typ: "job",
+                objekt_id: Some(job.id.to_string()),
+                ergebnis: stratum_model::AuditResult::Success,
+                details: json!({"connector":"yara-v1"}),
+            },
+        ))?;
+        regeln_pruefen(&p.regeln).map_err(|e| LaufFehler::Eingabe(e.to_string()))?;
+        if stratum_core::hash_bytes(p.regeln.as_bytes()).sha256 != p.regel_sha256 {
+            return Err(LaufFehler::Eingabe(
+                "Regelhash stimmt nicht mit Auftrag überein".into(),
+            ));
+        }
+        let q = self.handle.block_on(self.db.datei_quelle(
+            job.created_by,
+            p.evidence_id,
+            p.volume,
+            p.mft,
+            stratum_store::dateien::Zugriff::Suchen,
+        ))?;
+        if q.fall != job.case_id {
+            return Err(LaufFehler::Eingabe(
+                "Datei gehört nicht zum Job-Fall".into(),
+            ));
+        }
+        if q.groesse.is_some_and(|size| size > 256 * 1024 * 1024) {
+            return Err(LaufFehler::Eingabe(
+                "Datei größer als YARA-Limit von 256 MiB".into(),
+            ));
+        }
+        stratum_connectors::yara::bereitschaft(&|| r.abbruch_angefordert()).map_err(
+            |e| match e {
+                YaraFehler::Abgebrochen => LaufFehler::Abgebrochen,
+                e => LaufFehler::Eingabe(e.to_string()),
+            },
+        )?;
+        let dir =
+            tempfile::tempdir().map_err(|e| LaufFehler::Eingabe(format!("Arbeitsordner: {e}")))?;
+        std::fs::write(dir.path().join("rules.yar"), &p.regeln)
+            .map_err(|e| LaufFehler::Eingabe(format!("Regelkopie: {e}")))?;
+        let out = std::fs::File::create(dir.path().join("target.bin"))
+            .map_err(|e| LaufFehler::Eingabe(format!("Dateikopie: {e}")))?;
+        let o = stratum_lauf::datei::DateiOrt {
+            image: std::path::Path::new(&q.image),
+            bdp: q.bdp.as_deref().map(std::path::Path::new),
+            volume_offset: u64::try_from(p.volume)
+                .map_err(|_| LaufFehler::Eingabe("Volume ungültig".into()))?,
+            mft: u64::try_from(p.mft).map_err(|_| LaufFehler::Eingabe("MFT ungültig".into()))?,
+        };
+        r.phase_beginn(Phase::Suche);
+        r.meldung("Datei für lokalen YARA-Scan bereitstellen");
+        let bytes = stratum_lauf::datei::inhalt_kopieren(&o, out, 256 * 1024 * 1024, r)?;
+        r.meldung("YARA-Regeln ausführen");
+        let ergebnis =
+            scannen(dir.path(), bytes, &|| r.abbruch_angefordert()).map_err(|e| match e {
+                YaraFehler::Abgebrochen => LaufFehler::Abgebrochen,
+                e => LaufFehler::Eingabe(e.to_string()),
+            })?;
+        r.phase_ende(Phase::Suche);
+        Ok(
+            json!({"werkzeug":"YARA", "regel_sha256":p.regel_sha256, "quelle":{"evidence":q.evidence,"volume":p.volume,"mft":p.mft,"pfad":q.pfad,"offset_basis":"logical_file"}, "ableitung":stratum_model::DerivationKind::Derived, "bytes":bytes, "ergebnis":ergebnis}),
+        )
     }
 
     fn import(&self, job: &Job, r: &JobRueckmeldung<'_>) -> Result<Value, LaufFehler> {

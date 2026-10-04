@@ -86,7 +86,7 @@ export const CASE_NAV: NavGroup[] = [
     items: [
       { id: "search", label: "Search", icon: <FileSearch />, key: "s", planned: INVESTIGATION },
       { id: "timeline", label: "Timeline", icon: <Activity />, path: "timeline", key: "t" },
-      { id: "graph", label: "Graph", icon: <Waypoints />, key: "g", planned: INVESTIGATION },
+      { id: "graph", label: "Graph", icon: <Waypoints />, key: "g", path: "graph" },
       { id: "entities", label: "Entities", icon: <Users />, path: "entities", key: "n" },
       { id: "findings", label: "Findings", icon: <Flag />, key: "f", planned: INVESTIGATION },
     ],
@@ -95,11 +95,12 @@ export const CASE_NAV: NavGroup[] = [
     id: "tools",
     label: "Tools",
     items: [
+      { id: "network", label: "Network enrichment", icon: <Globe />, path: "network" },
       { id: "reconstruction", label: "Reconstruction", icon: <FlaskConical />, planned: ADVANCED },
       { id: "case-playbooks", label: "Playbooks", icon: <Workflow />, planned: OPERATIONS },
       { id: "case-intel", label: "Threat Intelligence", icon: <Globe />, planned: INTELLIGENCE },
       { id: "reports", label: "Reports", icon: <FileText />, planned: OPERATIONS },
-      { id: "audit", label: "Audit", icon: <ScrollText />, key: "a", planned: OPERATIONS },
+      { id: "audit", label: "Audit", icon: <ScrollText />, key: "a", path: "audit" },
     ],
   },
 ];

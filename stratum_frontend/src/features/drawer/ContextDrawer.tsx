@@ -23,8 +23,11 @@ import { useSession } from "../../lib/permissions";
 import { useDetail, type Detail } from "../../app/detail";
 import { jobTitle } from "../jobs/JobsCenter";
 import { useLiveJob } from "../jobs/live";
+import { RelationshipDrawer } from "./RelationshipDrawer";
 import { EntityDrawer } from "./EntityDrawer";
 import { EventDrawer } from "./EventDrawer";
+import { NetworkResult } from "./NetworkResult";
+import { YaraResult } from "./YaraResult";
 import { FileDrawer } from "./FileDrawer";
 
 export function ContextDrawer({ detail, caseNumber }: { detail: Detail; caseNumber?: string }) {
@@ -44,6 +47,8 @@ export function ContextDrawer({ detail, caseNumber }: { detail: Detail; caseNumb
       return <FileDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
     case "event":
       return <EventDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
+    case "relationship":
+      return <RelationshipDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
     case "entity":
       return <EntityDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
   }
@@ -276,6 +281,8 @@ function JobView({ job, number, onClose }: { job: Job; number: string; onClose: 
           />
         </DrawerSection>
       )}
+      {u.status === "completed" && <NetworkResult value={r} />}
+      {u.status === "completed" && <YaraResult value={r} caseNumber={number} />}
       <DrawerSection title="Parameters">
         <CodeBlock>{JSON.stringify(job.parameters, null, 2)}</CodeBlock>
       </DrawerSection>

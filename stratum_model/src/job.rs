@@ -16,6 +16,10 @@ pub enum JobKind {
     Analysis,
     /// Datei aus dem Fallordner hashen und als Evidence registrieren.
     EvidenceImport,
+    /// Lokaler YARA-Scan einer katalogisierten Datei.
+    YaraScan,
+    /// DNS-/WHOIS-Anreicherung zur Untersuchungszeit.
+    NetworkEnrichment,
 }
 
 /// Stand eines Jobs.

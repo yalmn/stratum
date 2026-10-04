@@ -75,6 +75,63 @@ pub fn pruefen(o: &DateiOrt<'_>) -> Result<(), LaufFehler> {
     oeffnen(&img, o).map(|_| ())
 }
 
+/// Kopiert höchstens `limit` Bytes einer Datei ohne Hashing in eine Arbeitskopie.
+/// Teilkopien werden bei Fehler oder Abbruch nicht als Ergebnis zurückgegeben.
+pub fn inhalt_kopieren<W: Write>(
+    o: &DateiOrt<'_>,
+    out: W,
+    limit: u64,
+    r: &dyn crate::Rueckmeldung,
+) -> Result<u64, LaufFehler> {
+    struct Begrenzt<'a, W> {
+        out: W,
+        limit: u64,
+        bytes: u64,
+        r: &'a dyn crate::Rueckmeldung,
+    }
+    impl<W: Write> Write for Begrenzt<'_, W> {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.r.abbruch_angefordert() {
+                return Err(std::io::Error::other("abgebrochen"));
+            }
+            if bytes.len() as u64 > self.limit.saturating_sub(self.bytes) {
+                return Err(std::io::Error::other("Datei größer als Scanlimit"));
+            }
+            let n = self.out.write(bytes)?;
+            self.bytes += n as u64;
+            Ok(n)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.out.flush()
+        }
+    }
+    let img =
+        ImageReader::open(o.image).kontext(|| "Image für Arbeitskopie nicht lesbar".into())?;
+    let mut vol = oeffnen(&img, o)?;
+    let mut writer = Begrenzt {
+        out,
+        limit,
+        bytes: 0,
+        r,
+    };
+    let result = vol.write_file_by_record(
+        o.mft,
+        "",
+        &|offset, len| img.prefetch(offset, len),
+        &mut writer,
+    );
+    if r.abbruch_angefordert() {
+        return Err(LaufFehler::Abgebrochen);
+    }
+    result
+        .kontext(|| "Arbeitskopie nicht vollständig lesbar".into())?
+        .ok_or_else(|| LaufFehler::Eingabe("Datei ohne lesbaren Inhalt".into()))?;
+    writer
+        .flush()
+        .kontext(|| "Arbeitskopie nicht schreibbar".into())?;
+    Ok(writer.bytes)
+}
+
 /// Schreibt den Inhalt der Datei nach `out` und liefert die Hashes.
 pub fn schreiben<W: Write>(o: &DateiOrt<'_>, out: W) -> Result<(W, DateiHashes), LaufFehler> {
     let img = ImageReader::open(o.image)

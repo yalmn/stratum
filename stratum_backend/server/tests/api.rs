@@ -819,6 +819,97 @@ async fn ablauf(db: Datenbank) {
         .unwrap()
         .iter()
         .any(|b| b["kind"] == "BELONGS_TO" && b["gegenueber"]["name"] == "VBoxService"));
+    // Graph: gleicher Fall, gerichtete Kanten, Ableitung und Herkunft.
+    let (status, _, graph) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-1/graph/{id}?anzahl=1"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{graph}");
+    assert_eq!(graph["wurzel"], id);
+    assert_eq!(graph["kanten"].as_array().unwrap().len(), 1);
+    assert!(!graph.to_string().contains("Dienstkennwort1"));
+    let edge = graph["kanten"][0]["id"].as_str().unwrap();
+    let (status, _, rel) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-1/beziehungen/{edge}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{rel}");
+    assert_eq!(rel["beziehung"]["kind"], "BELONGS_TO");
+    assert!(rel["herkunft"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|p| !p["source_locator"].is_null() && !p["parser"].is_null()));
+    assert!(!rel.to_string().contains("Dienstkennwort1"));
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-1/graph/{id}"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/graph/01a0fdd9-8410-7011-a689-f51d5bd3b3a5",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-1/graph/{id}?nach=ungueltig"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    if let Some(cursor) = graph["naechste"].as_str() {
+        let (status, _, next) = anfrage(
+            &app,
+            "GET",
+            &format!("/api/v1/faelle/API-1/graph/{id}?anzahl=1&nach={cursor}"),
+            Some(&t_tom),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(next["kanten"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|r| r["id"] != edge));
+    }
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-2/graph/{id}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-2/beziehungen/{edge}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
     // Klartext nur mit credential.view_sensitive (Analyst nicht, Forensic
     // Examiner ja), beides im Audit.
     let (s, _, _) = anfrage(
@@ -1281,6 +1372,102 @@ async fn ablauf(db: Datenbank) {
     let (status, _, _) = anfrage(&app, "GET", &datei(101, "vorschau"), Some(&t_tom), None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
+    // YARA: keine Includes, Auftrag speichert unveränderte Regeln mit Hash.
+    let rules = "rule Fixture { strings: $a = \"abc\" condition: $a }";
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        &datei(101, "yara"),
+        None,
+        Some(json!({"regeln":rules})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        &datei(101, "yara"),
+        Some(&t_mia),
+        Some(json!({"regeln":"include \"/etc/passwd\""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, response) = anfrage(
+        &app,
+        "POST",
+        &datei(101, "yara"),
+        Some(&t_mia),
+        Some(json!({"regeln":rules})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let id: uuid::Uuid = response["job_id"].as_str().unwrap().parse().unwrap();
+    let (_, _, job) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(job["kind"], "yara_scan");
+    assert_eq!(job["parameters"]["regeln"], rules);
+    assert_eq!(
+        job["parameters"]["regel_sha256"],
+        stratum_core::hash_bytes(rules.as_bytes()).sha256
+    );
+    // Anreicherung braucht connector.use. Nur der Host landet im Auftrag.
+    let request =
+        json!({"ziel":"https://Example.org/private?token=not-stored", "dns":true, "whois":false});
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-1/netzwerk",
+        None,
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-1/netzwerk",
+        Some(&t_mia),
+        Some(request.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, response) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-1/netzwerk",
+        Some(&t_chef),
+        Some(request),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["host"], "example.org");
+    let id = response["job_id"].as_str().unwrap();
+    let (_, _, job) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/jobs/{id}"),
+        Some(&t_chef),
+        None,
+    )
+    .await;
+    assert_eq!(job["kind"], "network_enrichment");
+    assert_eq!(job["parameters"]["host"], "example.org");
+    assert!(!job.to_string().contains("not-stored"));
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-1/netzwerk",
+        Some(&t_chef),
+        Some(json!({"ziel":"-version", "dns":true, "whois":false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
     // Registrierung über die API, Freigabe und Passwortpflicht.
     let lea = json!({"name": "lea", "anzeigename": "Lea L.", "passwort": "lea-passwort-1234"});
     let (s, _, v) = anfrage(&app, "POST", "/api/v1/registrierung", None, Some(lea)).await;

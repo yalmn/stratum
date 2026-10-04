@@ -19,6 +19,9 @@ import { EntitiesPage } from "../entities/EntitiesPage";
 import { ExplorerPage } from "../explorer/ExplorerPage";
 import { TimelinePage } from "../timeline/TimelinePage";
 import { WarRoomPage } from "../war-room/WarRoomPage";
+import { NetworkPage } from "../network/NetworkPage";
+import { GraphPage } from "../graph/GraphPage";
+import { AuditPage } from "../audit/AuditPage";
 import { EditCase } from "./EditCase";
 
 function Metric({ label, value, tip }: { label: string; value: string; tip?: string }) {
@@ -186,6 +189,9 @@ export function CaseLayout() {
           <Route path="evidence" element={<EvidencePage number={number} />} />
           <Route path="explorer" element={<ExplorerPage number={number} />} />
           <Route path="timeline" element={<TimelinePage number={number} />} />
+          <Route path="network" element={<NetworkPage key={number} number={number} />} />
+          <Route path="graph" element={<GraphPage key={number} number={number} />} />
+          <Route path="audit" element={<AuditPage key={number} number={number} />} />
           <Route path="entities" element={<EntitiesPage number={number} />} />
           <Route path="war-room" element={<WarRoomPage number={number} />} />
           <Route path=":view" element={<PlannedView />} />

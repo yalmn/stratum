@@ -853,6 +853,36 @@ npm ci
 npm run build
 ```
 
+Im Fall sind Graph, Audit und Network enrichment erreichbar. Der Graph lädt
+jeweils direkte, gespeicherte Beziehungen einer Entität. Jede Kante zeigt ihre
+Ableitung und öffnet die Herkunft; Anheften, Ausblenden und Rücknahme betreffen
+nur die Ansicht. Die Anzeige ist auf 120 Knoten und 240 Kanten begrenzt.
+Audit zeigt Analystenaktionen zur Untersuchungszeit, getrennt von der Timeline.
+Filter gelten für die geladenen Audit-Seiten; die Kettenprüfung prüft alle Fälle.
+
+In den Explorer-Dateidetails lässt sich ein lokaler YARA-Scan einreihen. Der
+Linux-Worker benötigt `/usr/bin/yara` (Version 4.5 oder neuer innerhalb Version 4)
+und `/usr/bin/prlimit`. Regeltext und SHA-256 der Regeln bleiben im Job erhalten.
+`include` ist ausgeschlossen, auch als Wort in Kommentaren oder Strings. Es wird
+nur die gewählte Datei gelesen, ohne Datei- oder Image-Hashing. Limits: 256 MiB
+Datei, 1 GiB Adressraum des YARA-Prozesses, 60 CPU-/Scansekunden, 65 Sekunden
+Gesamtzeit des Prozesses, 1 MiB pro Ausgabekanal und 500 zutreffende Regeln.
+Match-Offsets sind logische Dateioffsets; die gespeicherte Matchlänge kann kürzer
+als das gesamte Match sein. Treffer sind Indikatoren, keine Malware-Bewertung.
+Die private Arbeitskopie wird nach dem Job entfernt. Diese Prozessgrenzen sind
+keine Sandbox für die Ausführung von Malware; Dateiinhalte werden nie gestartet.
+CLI-Ausgabe und Optionen folgen der [YARA-Dokumentation](https://yara.readthedocs.io/en/latest/commandline.html).
+
+Network enrichment benötigt `connector.use` und einen Linux-Worker mit
+`/usr/bin/nslookup` und optional `/usr/bin/whois`. Die ausgewählten DNS-/WHOIS-
+Abfragen laufen als abbrechbarer Job. HTTP(S)-URLs werden auf ihren Host reduziert,
+Pfade werden nicht abgerufen; URLs mit Zugangsdaten sind unzulässig. Toolversion,
+Abfragezeit und Antworten bleiben im Ergebnis, begrenzt auf 1 MiB je Ausgabekanal
+und 20 Sekunden je Abfrage. Einzelne Fehler
+werden getrennt ausgewiesen. Die Abfragen senden den Host an den Resolver bzw.
+WHOIS-Dienst, erst nach bewusstem Einreihen des Jobs. Antworten sind heutige externe
+Anreicherung und belegen keine historische Auflösung oder Kommunikation.
+
 `stratum server` liefert danach `stratum_frontend/dist` unter
 `http://127.0.0.1:8080/` aus (anderer Ort mit `--oberflaeche`,
 `[server] oberflaeche` in `stratum.toml` oder `STRATUM_OBERFLAECHE`).
@@ -886,7 +916,7 @@ Details öffnen im Drawer, ohne die Ansicht zu verlassen; der Drawer steht
 in der Adresse (`?detail=evidence:<id>`), Ansichten sind damit teilbar.
 Formulare wie Analyse und Import erscheinen im Workspace statt in
 Dialogen. Beschriftungen sind englisch, Zeiten immer UTC. Ansichten, die
-noch kein Backend haben (Timeline, Graph, Findings, War Room …), stehen
+noch kein Backend haben (Findings, Playbooks, Threat Intelligence …), stehen
 gesperrt in der Navigation und nennen ihre Ausbaustufe.
 
 | Taste | Wirkung |

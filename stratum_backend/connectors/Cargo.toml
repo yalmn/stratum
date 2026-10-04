@@ -1,0 +1,15 @@
+[package]
+name = "stratum-connectors"
+description = "Begrenzte Anbindung lokaler Analysewerkzeuge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+url = "2.5.8"
+chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

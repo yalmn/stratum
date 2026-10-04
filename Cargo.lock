@@ -2687,6 +2687,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "stratum-connectors"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "url",
+]
+
+[[package]]
 name = "stratum-core"
 version = "0.1.0"
 dependencies = [
@@ -2750,6 +2761,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "stratum-connectors",
  "stratum-core",
  "stratum-lauf",
  "stratum-model",
@@ -2854,6 +2866,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "stratum-analysis",
+ "stratum-connectors",
  "stratum-core",
  "stratum-jobs",
  "stratum-lauf",

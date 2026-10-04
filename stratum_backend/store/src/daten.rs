@@ -174,6 +174,109 @@ fn marke_lesen(m: &str) -> Result<(DateTime<Utc>, uuid::Uuid), StoreError> {
 }
 
 impl Datenbank {
+    /// Direkte Beziehungen einer Entität, seitenweise und auf den Fall begrenzt.
+    /// Attribute werden nicht geliefert; Geheimwerte gehören nicht in den Graph.
+    pub async fn graph_umgebung(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        wurzel: EntityId,
+        nach: Option<uuid::Uuid>,
+        anzahl: i64,
+    ) -> Result<Value, StoreError> {
+        let audit = self
+            .lesen_erlaubt(
+                akteur,
+                Some(fall),
+                json!({"art":"graph", "wurzel":wurzel, "nach":nach}),
+            )
+            .await?;
+        let root: Option<Json<Value>> = sqlx::query_scalar(
+            "SELECT jsonb_build_object('id', id, 'kind', kind, 'name', display_name) \
+             FROM entity WHERE id = $1 AND case_id = $2",
+        )
+        .bind(wurzel.0)
+        .bind(fall.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let root = root
+            .ok_or_else(|| StoreError::NichtGefunden("Entität gehört nicht zum Fall".into()))?
+            .0;
+        let anzahl = anzahl.clamp(1, 100);
+        let mut zeilen: Vec<(uuid::Uuid, Json<Value>, Json<Value>)> = sqlx::query_as(
+            "SELECT r.id, jsonb_build_object('id', r.id, 'kind', r.kind, \
+               'source', r.source_entity_id, 'target', r.target_entity_id, 'derivation', r.derivation), \
+               jsonb_build_object('id', o.id, 'kind', o.kind, 'name', o.display_name) \
+             FROM relationship r JOIN entity o ON o.id = CASE WHEN r.source_entity_id = $1 \
+               THEN r.target_entity_id ELSE r.source_entity_id END \
+             WHERE r.case_id = $2 AND o.case_id = $2 \
+               AND (r.source_entity_id = $1 OR r.target_entity_id = $1) \
+               AND ($3::uuid IS NULL OR r.id > $3) ORDER BY r.id LIMIT $4",
+        ).bind(wurzel.0).bind(fall.0).bind(nach).bind(anzahl + 1).fetch_all(&self.pool).await?;
+        let mehr = zeilen.len() as i64 > anzahl;
+        zeilen.truncate(anzahl as usize);
+        let naechste = if mehr {
+            zeilen.last().map(|z| z.0)
+        } else {
+            None
+        };
+        let mut knoten = std::collections::BTreeMap::from([(wurzel.0, root)]);
+        let mut kanten = Vec::with_capacity(zeilen.len());
+        for (_, edge, node) in zeilen {
+            let id = node.0["id"]
+                .as_str()
+                .and_then(|s| s.parse::<uuid::Uuid>().ok())
+                .ok_or(StoreError::Wert("Graph-Knoten ohne ID"))?;
+            knoten.insert(id, node.0);
+            kanten.push(edge.0);
+        }
+        self.audit(&AuditEintrag { details: json!({"art":"graph", "wurzel":wurzel, "knoten":knoten.len(), "kanten":kanten.len(), "nach":nach}), ..audit }).await?;
+        Ok(
+            json!({"wurzel":wurzel, "knoten":knoten.into_values().collect::<Vec<_>>(), "kanten":kanten, "naechste":naechste}),
+        )
+    }
+
+    /// Beziehung mit beiden Endpunkten und höchstens 100 Herkunftsangaben.
+    pub async fn beziehung_detail(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        id: uuid::Uuid,
+    ) -> Result<Value, StoreError> {
+        let audit = self
+            .lesen_erlaubt(akteur, Some(fall), json!({"art":"beziehung", "id":id}))
+            .await?;
+        let beziehung: Option<Json<Value>> = sqlx::query_scalar(
+            "SELECT jsonb_build_object('id', r.id, 'kind', r.kind, 'derivation', r.derivation, \
+              'source', jsonb_build_object('id', s.id, 'kind', s.kind, 'name', s.display_name), \
+              'target', jsonb_build_object('id', t.id, 'kind', t.kind, 'name', t.display_name), \
+              'valid_from', r.valid_from, 'valid_until', r.valid_until) \
+             FROM relationship r JOIN entity s ON s.id = r.source_entity_id \
+             JOIN entity t ON t.id = r.target_entity_id \
+             WHERE r.id = $1 AND r.case_id = $2 AND s.case_id = $2 AND t.case_id = $2",
+        )
+        .bind(id)
+        .bind(fall.0)
+        .fetch_optional(&self.pool)
+        .await?;
+        let beziehung = beziehung
+            .ok_or_else(|| StoreError::NichtGefunden("Beziehung gehört nicht zum Fall".into()))?;
+        let mut herkunft: Vec<Json<Value>> = sqlx::query_scalar(
+            "SELECT jsonb_build_object('role', p.role, 'evidence_id', p.evidence_id, \
+              'artifact_id', p.artifact_id, 'observation_id', p.observation_id, \
+              'source_locator', p.source_locator, 'parser', p.parser, 'analysis_run_id', p.analysis_run_id) \
+             FROM provenance_full p JOIN evidence e ON e.id = p.evidence_id \
+             WHERE p.object_type = 'relationship' AND p.object_id = $1 AND e.case_id = $2 \
+             ORDER BY p.evidence_id, p.artifact_id, p.observation_id, p.role LIMIT 101",
+        ).bind(id).bind(fall.0).fetch_all(&self.pool).await?;
+        let vollstaendig = herkunft.len() <= 100;
+        herkunft.truncate(100);
+        self.audit(&audit).await?;
+        Ok(
+            json!({"beziehung":beziehung.0, "herkunft":herkunft.into_iter().map(|v|v.0).collect::<Vec<_>>(), "herkunft_vollstaendig":vollstaendig}),
+        )
+    }
+
     async fn lesen_erlaubt(
         &self,
         akteur: ActorId,

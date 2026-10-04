@@ -2,14 +2,14 @@
 // Hashes, Inhalt als Hex und Strings. Lesen des Inhalts steht im Audit.
 
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Activity, ChevronLeft, ChevronRight, Download, Fingerprint } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { CodeBlock, CopyButton, ErrorState, HashValue, PropertyList, Skeleton, Tabs, Timestamp } from "../../components/ui/Display";
 import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
 import { HexViewer, strings } from "../../components/forensic/HexViewer";
-import { fileExportUrl, useFileEntry, useHashFile, useHexWindow, useFileSearch, useFilePreview, useFileIps } from "../../lib/api/queries";
-import { Input, Select } from "../../components/ui/Input";
+import { fileExportUrl, useFileEntry, useHashFile, useHexWindow, useFileSearch, useFilePreview, useFileIps, useYaraScan } from "../../lib/api/queries";
+import { Input, Select, Textarea } from "../../components/ui/Input";
 import { bytes, count, fileAttributes } from "../../lib/format";
 import { useSession } from "../../lib/permissions";
 
@@ -56,8 +56,12 @@ function FileView({
   const [view, setView] = useState<"hex" | "strings" | "text" | "preview" | null>("hex");
   const search = useFileSearch(evidence, volume, record);
   const ips = useFileIps(evidence, volume, record);
+  const yara = useYaraScan(evidence, volume, record);
+  const [rules, setRules] = useState('rule Text_indicator {\n  strings: $a = "suspicious text" nocase\n  condition: $a\n}');
+  const [params] = useSearchParams();
   const [word, setWord] = useState("");
-  const [offset, setOffset] = useState(0);
+  const start = Number(params.get("pos") ?? "0");
+  const [offset, setOffset] = useState(Number.isSafeInteger(start) && start >= 0 ? start : 0);
 
   if (entry.isPending) {
     return (
@@ -132,10 +136,21 @@ function FileView({
                 <Button size="sm" variant="ghost" title={`Original: ${t.original}. Show surrounding logical bytes.`} onClick={() => { setOffset(Math.max(0, t.offset - 64)); setView("hex"); }}>
                   {t.art} {t.adresse} · 0x{t.offset.toString(16).toUpperCase()} · {t.kodierung}
                 </Button>
+                {can("connector.use") && <Button size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/network?target=${encodeURIComponent(t.adresse)}`)}>DNS / WHOIS</Button>}
                 <CopyButton value={t.adresse} label="Copy IP address" />
               </div>
             ))}</div>
           </>}
+        </DrawerSection>
+      )}
+      {!f.is_directory && can("analysis.start") && can("search.run") && (
+        <DrawerSection title="Local YARA scan">
+          <p className="muted">Scan this file with your rules. Linux worker with YARA 4.5 required. Maximum 256 MiB, 60 scan seconds and 500 matching rules. A match is an indicator, not a malware verdict.</p>
+          <Textarea aria-label="YARA rules" className="mono" value={rules} onChange={(e) => setRules(e.target.value)} rows={6} maxLength={65536} />
+          <p className="muted">Rules are stored with the job and a SHA256 reference. Include directives are rejected.</p>
+          <Button size="sm" disabled={yara.isPending || !rules.trim()} onClick={() => yara.mutate(rules)}>Queue YARA scan</Button>
+          {yara.error && <ErrorState title="YARA job could not be created" reason={yara.error.message} />}
+          {yara.data && <div className="stack"><HashValue algo="Rules SHA256" value={yara.data.regel_sha256} /><Button size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/explorer?detail=job:${yara.data!.job_id}`)}>Open scan job</Button></div>}
         </DrawerSection>
       )}
       {!f.is_directory && view && (

@@ -48,6 +48,17 @@ fn dateiinhalt_suche_und_vorschau() {
         volume_offset: 0,
         mft: record,
     };
+    struct Still;
+    impl stratum_lauf::Rueckmeldung for Still {
+        fn meldung(&self, _: &str) {}
+        fn fortschritt(&self, _: stratum_lauf::Phase, _: u64, _: u64) {}
+    }
+    let mut copy = Vec::new();
+    let copied =
+        stratum_lauf::datei::inhalt_kopieren(&o, &mut copy, bytes.len() as u64, &Still).unwrap();
+    assert_eq!(copied, bytes.len() as u64);
+    assert_eq!(copy, bytes);
+    assert!(stratum_lauf::datei::inhalt_kopieren(&o, Vec::new(), 1, &Still).is_err());
     let result = wort_suchen(&o, "Grüße").unwrap();
     assert!(result.vollstaendig);
     assert_eq!(result.gelesen, bytes.len() as u64);

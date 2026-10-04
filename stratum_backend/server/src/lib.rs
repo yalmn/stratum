@@ -209,6 +209,8 @@ pub fn router(db: Datenbank) -> Router {
         )
         .route("/api/v1/faelle/{nummer}/entitaeten", get(entitaeten))
         .route("/api/v1/entitaeten/{id}", get(entitaet))
+        .route("/api/v1/faelle/{nummer}/graph/{id}", get(graph))
+        .route("/api/v1/faelle/{nummer}/beziehungen/{id}", get(beziehung))
         .route("/api/v1/ereignisse/{id}", get(ereignis))
         .route(
             "/api/v1/faelle/{nummer}/warroom",
@@ -246,6 +248,11 @@ pub fn router(db: Datenbank) -> Router {
         .route("/api/v1/evidence/{id}/dateien", get(dateien))
         .route("/api/v1/evidence/{id}/dateisuche", get(dateisuche))
         .route("/api/v1/artefakte/{id}/rohfund", get(rohfund))
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/yara",
+            post(datei_yara),
+        )
+        .route("/api/v1/faelle/{nummer}/netzwerk", post(netzwerk_job))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/audit/pruefen", post(audit_pruefen))
         .with_state(Zustand { db })
@@ -931,6 +938,40 @@ struct KlartextAnfrage {
     klartext: bool,
 }
 
+#[derive(Deserialize)]
+struct GraphAnfrage {
+    nach: Option<uuid::Uuid>,
+    anzahl: Option<i64>,
+}
+
+async fn graph(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((nummer, id)): Path<(String, uuid::Uuid)>,
+    Query(q): Query<GraphAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(
+        z.db.graph_umgebung(
+            u.id,
+            fall,
+            stratum_model::EntityId(id),
+            q.nach,
+            q.anzahl.unwrap_or(30),
+        )
+        .await?,
+    ))
+}
+
+async fn beziehung(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((nummer, id)): Path<(String, uuid::Uuid)>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(z.db.beziehung_detail(u.id, fall, id).await?))
+}
+
 async fn entitaet(
     State(z): State<Zustand>,
     Angemeldet(u): Angemeldet,
@@ -1263,6 +1304,65 @@ async fn datei_suche(
     z.db.dateisuche_protokollieren(u.id, &quelle, &wort, details, v.is_ok())
         .await?;
     Ok(Json(serde_json::to_value(v?).map_err(StoreError::from)?))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct YaraAnfrage {
+    regeln: String,
+}
+
+async fn datei_yara(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+    Json(q): Json<YaraAnfrage>,
+) -> Antwort<Json<Value>> {
+    let quelle =
+        z.db.datei_quelle(
+            u.id,
+            stratum_model::EvidenceId(id),
+            volume,
+            record,
+            stratum_store::dateien::Zugriff::Suchen,
+        )
+        .await?;
+    stratum_connectors::yara::regeln_pruefen(&q.regeln)
+        .map_err(|e| ApiFehler::Anfrage(e.to_string()))?;
+    if quelle.groesse.is_some_and(|size| size > 256 * 1024 * 1024) {
+        return Err(ApiFehler::Anfrage(
+            "Datei größer als YARA-Limit von 256 MiB".into(),
+        ));
+    }
+    let hash = stratum_core::hash_bytes(q.regeln.as_bytes()).sha256;
+    let job =
+        z.db.yara_job(u.id, &quelle, volume, record, &q.regeln, &hash)
+            .await?;
+    Ok(Json(json!({"job_id":job, "regel_sha256":hash})))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NetzwerkAnfrage {
+    ziel: String,
+    dns: bool,
+    whois: bool,
+}
+
+async fn netzwerk_job(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Json(q): Json<NetzwerkAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    let host = stratum_connectors::netzwerk::host_eingabe(&q.ziel)
+        .map_err(|e| ApiFehler::Anfrage(e.to_string()))?;
+    if !q.dns && !q.whois {
+        return Err(ApiFehler::Anfrage("DNS oder WHOIS auswählen".into()));
+    }
+    let job = z.db.netzwerk_job(u.id, fall, &host, q.dns, q.whois).await?;
+    Ok(Json(json!({"job_id":job,"host":host})))
 }
 
 async fn datei_ips(
