@@ -22,6 +22,7 @@ pub mod entity;
 pub mod event;
 pub mod evidence;
 pub mod finding;
+pub mod http_lab;
 pub mod ids;
 pub mod job;
 pub mod observation;

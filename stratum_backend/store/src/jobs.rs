@@ -206,6 +206,69 @@ impl Datenbank {
         Ok(id)
     }
 
+    /// Einzelnen Offline-HTTP-Versuch mit überprüftem Quellenverweis einreihen.
+    pub async fn http_replay_job(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        request: &stratum_model::http_lab::HttpReplayRequest,
+    ) -> Result<JobId, StoreError> {
+        request.pruefen().map_err(StoreError::Eingabe)?;
+        let id = JobId::new();
+        let e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion: AuditAction::ReplayRequest,
+            objekt_typ: "job",
+            objekt_id: Some(id.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({"art":"http_replay","direction":request.direction,"method":request.method,"source":request.source,"network_policy":"none"}),
+        };
+        for permission in [
+            Permission::CaseView,
+            Permission::FileView,
+            Permission::AnalysisStart,
+            Permission::ConnectorUse,
+        ] {
+            self.verlangen(akteur, permission, e.clone()).await?;
+        }
+        let mut tx = self.pool.begin().await?;
+        if let Some(source) = &request.source {
+            let sql = if source.kind == "entity" {
+                "SELECT EXISTS(SELECT 1 FROM entity WHERE case_id=$1 AND id=$2)"
+            } else {
+                "SELECT EXISTS(SELECT 1 FROM artifact WHERE case_id=$1 AND id=$2)"
+            };
+            let exists: bool = sqlx::query_scalar(sql)
+                .bind(fall.0)
+                .bind(source.id)
+                .fetch_one(&mut *tx)
+                .await?;
+            if !exists {
+                return Err(StoreError::NichtGefunden(
+                    "HTTP-Quelle gehört nicht zum Fall".into(),
+                ));
+            }
+        }
+        sqlx::query("INSERT INTO job(id,case_id,kind,status,parameters,created_by,created_at) VALUES($1,$2,'http_replay','queued',$3,$4,now())").bind(id.0).bind(fall.0).bind(Json(json!(request))).bind(akteur.0).execute(&mut *tx).await?;
+        let audit_id = audit::schreiben(&mut tx, &e).await?;
+        let refs: Vec<ObjectRef> = request
+            .source
+            .as_ref()
+            .map(|s| {
+                if s.kind == "entity" {
+                    ObjectRef::Entity(stratum_model::EntityId(s.id))
+                } else {
+                    ObjectRef::Artifact(stratum_model::ArtifactId(s.id))
+                }
+            })
+            .into_iter()
+            .collect();
+        crate::war_room::anhaengen(&mut tx,crate::war_room::Neu {fall,akteur,art:WarRoomEntryKind::ReconstructionStarted,refs:&refs,payload:json!({"event":"http_replay_queued","job_id":id,"network_policy":"none","direction":request.direction}),parent:None,audit:Some(audit_id)}).await?;
+        tx.commit().await?;
+        Ok(id)
+    }
+
     /// Fallordner eines Falls, falls einer festgelegt ist.
     pub async fn fall_ordner(&self, fall: CaseId) -> Result<Option<String>, StoreError> {
         Ok(sqlx::query_scalar::<_, Option<String>>(
@@ -534,6 +597,10 @@ impl Datenbank {
         };
         self.verlangen(akteur, Permission::CaseView, e.clone())
             .await?;
+        if job.kind == JobKind::HttpReplay {
+            self.verlangen(akteur, Permission::FileView, e.clone())
+                .await?;
+        }
         self.audit(&e).await?;
         Ok(job)
     }
@@ -567,13 +634,15 @@ impl Datenbank {
         };
         self.verlangen(akteur, Permission::CaseView, e.clone())
             .await?;
+        let file_view = self.rechte(akteur).await?.contains(&Permission::FileView);
         let sql = format!(
-            "SELECT {SPALTEN} FROM job WHERE $1::uuid IS NULL OR case_id = $1 \
+            "SELECT {SPALTEN} FROM job WHERE ($1::uuid IS NULL OR case_id = $1) AND ($3 OR kind <> 'http_replay') \
              ORDER BY created_at DESC LIMIT $2"
         );
         let zeilen: Vec<Zeile> = sqlx::query_as(sqlx::AssertSqlSafe(sql))
             .bind(fall.map(|c| c.0))
             .bind(anzahl.clamp(0, 10_000))
+            .bind(file_view)
             .fetch_all(&self.pool)
             .await?;
         self.audit(&AuditEintrag {
@@ -616,5 +685,6 @@ pub fn art_text(k: JobKind) -> &'static str {
         JobKind::EvidenceImport => "evidence_import",
         JobKind::YaraScan => "yara_scan",
         JobKind::NetworkEnrichment => "network_enrichment",
+        JobKind::HttpReplay => "http_replay",
     }
 }

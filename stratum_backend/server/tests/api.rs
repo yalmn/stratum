@@ -1615,6 +1615,158 @@ async fn ablauf(db: Datenbank) {
     .unwrap();
     assert!(count >= 6);
 
+    // HTTP-Rekonstruktion ist ausdrücklich offline und vom Quellenfall getrennt geprüft.
+    let replay_path = "/api/v1/faelle/API-1/http-lab";
+    let replay = json!({"direction":"incoming","url":"http://web01.invalid/admin/export?fixture=1","method":"POST","headers":[["Content-Type","application/json"]],"body":"HTTPFixtureOnly","simulated_status":200,"simulated_body":"Synthetic response","hypothesis":"Eingehenden Request nachstellen","source":{"kind":"entity","id":entity}});
+    let (status, _, _) = anfrage(&app, "POST", replay_path, None, Some(replay.clone())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        replay_path,
+        Some(&t_mia),
+        Some(replay.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, created) = anfrage(
+        &app,
+        "POST",
+        replay_path,
+        Some(&t_chef),
+        Some(replay.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{created}");
+    assert_eq!(created["network_policy"], "none");
+    let replay_id = created["job_id"].as_str().unwrap();
+    let (status, _, job) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/jobs/{replay_id}"),
+        Some(&t_chef),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(job["kind"], "http_replay");
+    assert_eq!(job["parameters"]["direction"], "incoming");
+    assert_eq!(job["parameters"]["source"]["id"], entity);
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-2/http-lab",
+        Some(&t_chef),
+        Some(replay.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    for (field, value) in [
+        ("method", json!("CONNECT")),
+        ("headers", json!([["Host", "127.0.0.1"]])),
+        ("headers", json!([["X-Test", "x\r\ny"]])),
+        ("body", json!("x".repeat(65537))),
+        ("direction", json!("live")),
+        ("network_policy", json!("host")),
+    ] {
+        let mut invalid = replay.clone();
+        invalid[field] = value;
+        let (status, _, _) = anfrage(&app, "POST", replay_path, Some(&t_chef), Some(invalid)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{field}");
+    }
+    let mut outgoing = replay.clone();
+    outgoing["direction"] = json!("outgoing");
+    outgoing["source"] = Value::Null;
+    let (status, _, _) = anfrage(&app, "POST", replay_path, Some(&t_chef), Some(outgoing)).await;
+    assert_eq!(status, StatusCode::OK);
+    let viewer_role = db
+        .rolle_anlegen(
+            chef.id,
+            "HTTP list viewer",
+            None,
+            &[stratum_model::Permission::CaseView],
+        )
+        .await
+        .unwrap();
+    let viewer = db
+        .registrieren("http_viewer", "HTTP Viewer", "fixture-viewer-123")
+        .await
+        .unwrap();
+    db.freigeben(chef.id, viewer.id, &[viewer_role.id])
+        .await
+        .unwrap();
+    let (status, _, session) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/sitzung",
+        None,
+        Some(json!({"name":"http_viewer","passwort":"fixture-viewer-123"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let viewer_token = session["token"].as_str().unwrap();
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/jobs/{replay_id}"),
+        Some(viewer_token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, visible) = anfrage(&app, "GET", "/api/v1/jobs", Some(viewer_token), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!visible.to_string().contains("HTTPFixtureOnly"));
+    // Auch ein bereits geöffneter HTTP-Strom endet nach Rechteentzug.
+    db.rolle_aendern(
+        chef.id,
+        viewer_role.id,
+        "HTTP list viewer",
+        None,
+        &[
+            stratum_model::Permission::CaseView,
+            stratum_model::Permission::FileView,
+        ],
+    )
+    .await
+    .unwrap();
+    let stream_reply = app
+        .clone()
+        .oneshot(
+            Request::get(format!("/api/v1/jobs/{replay_id}/fortschritt"))
+                .header(header::AUTHORIZATION, format!("Bearer {viewer_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(stream_reply.status(), StatusCode::OK);
+    db.rolle_aendern(
+        chef.id,
+        viewer_role.id,
+        "HTTP list viewer",
+        None,
+        &[stratum_model::Permission::CaseView],
+    )
+    .await
+    .unwrap();
+    let mut http_stream = stream_reply.into_body().into_data_stream();
+    let frame = tokio::time::timeout(Duration::from_secs(5), http_stream.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let frame = String::from_utf8_lossy(&frame);
+    assert!(frame.contains("event: fehler"), "{frame}");
+    assert!(!frame.contains("HTTPFixtureOnly"));
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_event WHERE action='REPLAY_REQUEST' AND result='success'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 2);
+
     // Registrierung über die API, Freigabe und Passwortpflicht.
     let lea = json!({"name": "lea", "anzeigename": "Lea L.", "passwort": "lea-passwort-1234"});
     let (s, _, v) = anfrage(&app, "POST", "/api/v1/registrierung", None, Some(lea)).await;

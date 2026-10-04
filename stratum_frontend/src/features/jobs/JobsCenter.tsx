@@ -14,6 +14,7 @@ export function jobTitle(job: Job): string {
   const p = job.parameters as Record<string, unknown> | null;
   if (job.kind === "network_enrichment") return "DNS / WHOIS";
   if (job.kind === "yara_scan") return "YARA scan";
+  if (job.kind === "http_replay") return "HTTP reconstruction";
   if (job.kind === "evidence_import") {
     const datei = typeof p?.datei === "string" ? p.datei.split("/").pop() : "";
     return `Import ${datei}`;

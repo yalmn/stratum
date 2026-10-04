@@ -20,6 +20,8 @@ pub enum JobKind {
     YaraScan,
     /// DNS-/WHOIS-Anreicherung zur Untersuchungszeit.
     NetworkEnrichment,
+    /// HTTP-Versuch gegen einen isolierten simulierten Server.
+    HttpReplay,
 }
 
 /// Stand eines Jobs.

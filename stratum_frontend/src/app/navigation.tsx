@@ -51,7 +51,6 @@ export interface NavGroup {
 const INVESTIGATION = "Planned: Investigation Core";
 const OPERATIONS = "Planned: Operational Layer";
 const INTELLIGENCE = "Planned: Intelligence";
-const ADVANCED = "Planned: Advanced Forensics";
 
 export const GLOBAL_NAV: NavItem[] = [
   { id: "cases", label: "Cases", icon: <Briefcase />, path: "/cases", key: "c" },
@@ -98,7 +97,7 @@ export const CASE_NAV: NavGroup[] = [
     label: "Tools",
     items: [
       { id: "network", label: "Network enrichment", icon: <Globe />, path: "network" },
-      { id: "reconstruction", label: "Reconstruction", icon: <FlaskConical />, planned: ADVANCED },
+      { id: "reconstruction", label: "Reconstruction", icon: <FlaskConical />, path: "reconstruction" },
       { id: "case-playbooks", label: "Playbooks", icon: <Workflow />, planned: OPERATIONS },
       { id: "case-intel", label: "Threat Intelligence", icon: <Globe />, planned: INTELLIGENCE },
       { id: "reports", label: "Reports", icon: <FileText />, planned: OPERATIONS },

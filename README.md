@@ -869,6 +869,51 @@ unverändert. Entfernen betrifft nur die Liste; Wiederaufnahme erhält ID und No
 `bookmark.edit`, Lesen `case.view` und `file.view`. Bestehende Rollen erhalten das
 neue Recht erst durch ausdrückliche Vergabe in der Administration.
 
+Unter `Reconstruction` lassen sich eingehende Angreifer-Requests und ausgehende
+verdächtige Verbindungen als Offline-HTTP-Versuche nachstellen. Methode, Header,
+UTF-8-Body, Quellenverweis und Hypothese werden gespeichert. Der simulierte Server
+antwortet mit einem ausdrücklich vorgegebenen Status und Body. Das Ergebnis ist
+`Reconstructed`: kein Nachweis für Exploitation, Persistenz oder den damaligen
+Serverzustand. HTTPS-URLs werden nur in ihrer HTTP-Semantik nachgebildet, ohne TLS.
+Webanwendungen, Datenbanken, PCAP-Replay und rekonstruierte Systemkopien folgen
+als eigene Lab-Umgebungen. Authentifizierungsheader und Cookies sind in diesem
+ersten Simulator nicht unterstützt; synthetische Werte verwenden.
+
+Der HTTP-Runner liegt in `stratum_lab/` und läuft als eigener Prozess in einem
+kurzlebigen Container. Netzwerk `none`, read-only Root-Dateisystem, unprivilegierter
+Benutzer, keine Linux-Capabilities, kein Zugriff auf Evidence oder Host-Verzeichnisse.
+128 MiB RAM, eine CPU, höchstens 32 Prozesse und begrenzte Ein-/Ausgabe.
+Die HTTP-Ausführung ist auf 30 Sekunden begrenzt; Vorbereitung und Bereinigung
+haben zusätzliche eigene Zeitlimits. Internetzugriff, Redirect-Folgen
+und ein unisolierter Fallback sind nicht vorgesehen. Die Runtime wird über den
+HTTP-Lab-Connector angesprochen. Container teilen den Kernel der Lab-VM; dies ist
+keine Umgebung zum Ausführen von Schadsoftware. Der Worker braucht Zugriff auf
+das lokale Docker und das zuvor gebaute Image:
+
+```sh
+docker build --pull -t stratum-http-lab:v1 stratum_lab
+cargo test -p stratum-connectors --test http_lab -- --ignored --nocapture
+```
+
+Der Linux-Test erwartet einen echten isolierten HTTP-Austausch mit Status 403,
+ursprünglichem Host `web01.invalid` und tatsächlichem Peer `127.0.0.1`. Das Image
+wird vor jeder Ausführung auf seine lokale SHA-256-ID festgelegt; ID und Runtime
+stehen im Ergebnis. Automatisches Nachladen beim Versuch ist gesperrt. Fehlendes
+Docker, Image oder Isolation beendet den Job mit einem Fehler.
+
+Die Protokolltests ohne Docker verwenden ausschließlich synthetische Loopback-
+Verbindungen und prüfen keine Containerisolation:
+
+```sh
+python3 -B -m unittest discover -s stratum_lab/tests -v
+```
+
+Anlegen braucht `case.view`, `file.view`, `analysis.start` und `connector.use`.
+Lesen der Requests/Responses braucht zusätzlich zu `case.view` auch `file.view`,
+selbst über Jobliste und Ereignisstrom. Die ursprüngliche Quelle muss zum selben
+Fall gehören. Replay-Anforderung, Ausführungsbeginn und Ergebnis stehen im Audit;
+die Investigation-Timeline wird nicht durch simulierte Ereignisse erweitert.
+
 In den Explorer-Dateidetails lässt sich ein lokaler YARA-Scan einreihen. Der
 Linux-Worker benötigt `/usr/bin/yara` (Version 4.5 oder neuer innerhalb Version 4)
 und `/usr/bin/prlimit`. Regeltext und SHA-256 der Regeln bleiben im Job erhalten.

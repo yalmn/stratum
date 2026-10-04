@@ -23,7 +23,7 @@ const useLive = create<LiveState>((set) => ({
 export function useLiveJob(job: Job): JobUpdate {
   const live = useLive((s) => s.updates[job.id]);
   return (
-    live ?? {
+    (!isFinished(job.status) && live) || {
       status: job.status,
       progress: (job.progress ?? {}) as JobUpdate["progress"],
       error: job.error,
@@ -37,7 +37,7 @@ function Stream({ job, caseNumber }: { job: Job; caseNumber?: string }) {
   const store = useLive((s) => s.set);
   const notify = useWorkspace((s) => s.notify);
   const u = useJobStream(job, (fin) => {
-    const what = job.kind === "evidence_import" ? "Import" : "Analysis";
+    const what = job.kind === "evidence_import" ? "Import" : job.kind === "http_replay" ? "HTTP reconstruction" : "Analysis";
     notify({
       title: `${what} ${fin.status === "completed" ? "completed" : fin.status}`,
       text: caseNumber ?? job.case_id,

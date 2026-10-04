@@ -167,6 +167,13 @@ impl Worker {
                 }
                 Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
             },
+            JobKind::HttpReplay => match self.http_replay(&job, &r) {
+                Ok(e) => (JobStatus::Completed, None, Some(e)),
+                Err(LaufFehler::Abgebrochen) => {
+                    (JobStatus::Cancelled, Some("abgebrochen".into()), None)
+                }
+                Err(f) => (JobStatus::Failed, Some(fehlerkette(&f)), None),
+            },
             JobKind::YaraScan => match self.yara(&job, &r) {
                 Ok(e) => (JobStatus::Completed, None, Some(e)),
                 Err(LaufFehler::Abgebrochen) => {
@@ -236,6 +243,51 @@ impl Worker {
         })?;
         Ok(
             json!({"werkzeug":"DNS/WHOIS", "connector":"dns-whois-v1", "host":p.host, "abgefragt_am":zeit, "beendet_am":chrono::Utc::now(), "ableitung":stratum_model::DerivationKind::ExternalIntel, "alle_erfolgreich":success, "antworten":antworten}),
+        )
+    }
+
+    fn http_replay(&self, job: &Job, r: &JobRueckmeldung<'_>) -> Result<Value, LaufFehler> {
+        let p: stratum_model::http_lab::HttpReplayRequest =
+            serde_json::from_value(job.parameters.clone())?;
+        p.pruefen().map_err(LaufFehler::Eingabe)?;
+        let audit = stratum_store::AuditEintrag {
+            akteur: job.created_by,
+            case_id: Some(job.case_id),
+            aktion: stratum_model::AuditAction::ReconstructionStart,
+            objekt_typ: "job",
+            objekt_id: Some(job.id.to_string()),
+            ergebnis: stratum_model::AuditResult::Success,
+            details: json!({"connector":"http-offline-v1","network_policy":"none","direction":p.direction,"method":p.method,"source":p.source}),
+        };
+        for permission in [
+            stratum_model::Permission::CaseView,
+            stratum_model::Permission::FileView,
+            stratum_model::Permission::AnalysisStart,
+            stratum_model::Permission::ConnectorUse,
+        ] {
+            self.handle
+                .block_on(self.db.verlangen(job.created_by, permission, audit.clone()))?;
+        }
+        let started = chrono::Utc::now();
+        r.meldung("HTTP-Rekonstruktion im Offline-Lab ausführen");
+        self.handle.block_on(self.db.audit(&audit))?;
+        let result = stratum_connectors::http_lab::replay(&p, &|| r.abbruch_angefordert());
+        self.handle
+            .block_on(self.db.audit(&stratum_store::AuditEintrag {
+                aktion: stratum_model::AuditAction::ConnectorUse,
+                ergebnis: if result.is_ok() {
+                    stratum_model::AuditResult::Success
+                } else {
+                    stratum_model::AuditResult::Failure
+                },
+                ..audit
+            }))?;
+        let exchange = result.map_err(|e| match e {
+            stratum_connectors::ConnectorFehler::Abgebrochen => LaufFehler::Abgebrochen,
+            e => LaufFehler::Eingabe(e.to_string()),
+        })?;
+        Ok(
+            json!({"werkzeug":"HTTP Lab","ableitung":stratum_model::DerivationKind::Reconstructed,"started_at":started,"finished_at":chrono::Utc::now(),"direction":p.direction,"source":p.source,"hypothesis":p.hypothesis,"simulation":true,"lab":exchange}),
         )
     }
 

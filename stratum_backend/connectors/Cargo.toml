@@ -9,6 +9,9 @@ license.workspace = true
 url = "2.5.8"
 chrono = { version = "0.4.45", default-features = false, features = ["std", "now"] }
 serde.workspace = true
+serde_json = "1.0.151"
+stratum-model = { path = "../../stratum_model" }
+uuid = { version = "1.26.1", features = ["v7"] }
 thiserror.workspace = true
 
 [dev-dependencies]

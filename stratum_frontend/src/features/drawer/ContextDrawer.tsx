@@ -26,6 +26,7 @@ import { useLiveJob } from "../jobs/live";
 import { RelationshipDrawer } from "./RelationshipDrawer";
 import { EntityDrawer } from "./EntityDrawer";
 import { EventDrawer } from "./EventDrawer";
+import { HttpLabResult } from "../reconstruction/HttpLabResult";
 import { NetworkResult } from "./NetworkResult";
 import { YaraResult } from "./YaraResult";
 import { ArtifactDrawer } from "./ArtifactDrawer";
@@ -202,7 +203,7 @@ function JobView({ job, number, onClose }: { job: Job; number: string; onClose: 
   );
   return (
     <DrawerFrame
-      kind={job.kind === "evidence_import" ? "Import job" : "Analysis job"}
+      kind={job.kind === "evidence_import" ? "Import job" : job.kind === "http_replay" ? "Reconstruction experiment" : "Analysis job"}
       title={jobTitle(job)}
       onClose={onClose}
       badges={<JobStatusBadge status={u.status} />}
@@ -284,6 +285,7 @@ function JobView({ job, number, onClose }: { job: Job; number: string; onClose: 
           />
         </DrawerSection>
       )}
+      {u.status === "completed" && <HttpLabResult value={r} />}
       {u.status === "completed" && <NetworkResult value={r} />}
       {u.status === "completed" && <YaraResult value={r} caseNumber={number} />}
       <DrawerSection title="Parameters">

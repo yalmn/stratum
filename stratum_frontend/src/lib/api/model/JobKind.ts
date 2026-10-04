@@ -3,4 +3,4 @@
 /**
  * Art eines Jobs.
  */
-export type JobKind = "analysis" | "evidence_import" | "yara_scan" | "network_enrichment";
+export type JobKind = "analysis" | "evidence_import" | "yara_scan" | "network_enrichment" | "http_replay";

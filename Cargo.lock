@@ -2692,9 +2692,12 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
+ "stratum-model",
  "tempfile",
  "thiserror 2.0.21",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -2810,6 +2813,7 @@ dependencies = [
  "serde",
  "serde_json",
  "ts-rs",
+ "url",
  "uuid",
 ]
 

@@ -19,6 +19,7 @@ import { EntitiesPage } from "../entities/EntitiesPage";
 import { ExplorerPage } from "../explorer/ExplorerPage";
 import { TimelinePage } from "../timeline/TimelinePage";
 import { WarRoomPage } from "../war-room/WarRoomPage";
+import { HttpLabPage } from "../reconstruction/HttpLabPage";
 import { NetworkPage } from "../network/NetworkPage";
 import { GraphPage } from "../graph/GraphPage";
 import { BookmarksPage } from "../bookmarks/BookmarksPage";
@@ -192,6 +193,7 @@ export function CaseLayout() {
           <Route path="timeline" element={<TimelinePage number={number} />} />
           <Route path="network" element={<NetworkPage key={number} number={number} />} />
           <Route path="graph" element={<GraphPage key={number} number={number} />} />
+          <Route path="reconstruction" element={<HttpLabPage key={number} number={number} />} />
           <Route path="bookmarks" element={<BookmarksPage number={number} />} />
           <Route path="audit" element={<AuditPage key={number} number={number} />} />
           <Route path="entities" element={<EntitiesPage number={number} />} />

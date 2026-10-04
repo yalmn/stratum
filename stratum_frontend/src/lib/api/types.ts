@@ -273,3 +273,8 @@ export interface CaseBookmark {
   id:string; case_id:string; kind:BookmarkKind; target:string; title:string;
   note:string; reviewed:boolean; created_at:string; updated_at:string; updated_by:string;
 }
+
+export interface HttpReplayRequest {
+  direction:"incoming"|"outgoing"; url:string; method:string; headers:[string,string][]; body:string;
+  simulated_status:number; simulated_body:string; hypothesis:string; source:{kind:"artifact"|"entity";id:string}|null;
+}

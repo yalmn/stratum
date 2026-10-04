@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod http_lab;
 pub mod netzwerk;
 mod prozess;
 pub mod yara;

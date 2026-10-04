@@ -1,5 +1,5 @@
 use crate::ConnectorFehler as YaraFehler;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -9,11 +9,20 @@ pub(crate) fn ausfuehren(
     timeout: Duration,
     abbruch: &dyn Fn() -> bool,
 ) -> Result<String, YaraFehler> {
-    ausgabe(cmd, timeout, abbruch, false)
+    ausgabe(cmd, timeout, abbruch, false, None)
+}
+
+pub(crate) fn mit_eingabe(
+    cmd: Command,
+    input: &[u8],
+    timeout: Duration,
+    abbruch: &dyn Fn() -> bool,
+) -> Result<String, YaraFehler> {
+    ausgabe(cmd, timeout, abbruch, false, Some(input))
 }
 
 pub(crate) fn version(cmd: Command, abbruch: &dyn Fn() -> bool) -> Result<String, YaraFehler> {
-    ausgabe(cmd, Duration::from_secs(5), abbruch, true)
+    ausgabe(cmd, Duration::from_secs(5), abbruch, true, None)
 }
 
 fn ausgabe(
@@ -21,11 +30,17 @@ fn ausgabe(
     timeout: Duration,
     abbruch: &dyn Fn() -> bool,
     versionsabfrage: bool,
+    input: Option<&[u8]>,
 ) -> Result<String, YaraFehler> {
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     let mut child = cmd.spawn()?;
+    let stdin = child.stdin.take();
     let stdout = child
         .stdout
         .take()
@@ -36,6 +51,9 @@ fn ausgabe(
         .ok_or_else(|| YaraFehler::Eingabe("stderr fehlt".into()))?;
     let zu_gross = AtomicBool::new(false);
     std::thread::scope(|scope| {
+        let writer = input
+            .zip(stdin)
+            .map(|(data, mut pipe)| scope.spawn(move || pipe.write_all(data)));
         let lesen = |mut pipe: Box<dyn Read + Send>| -> Result<Vec<u8>, std::io::Error> {
             let mut data = Vec::new();
             pipe.by_ref().take(1024 * 1024 + 1).read_to_end(&mut data)?;
@@ -76,6 +94,11 @@ fn ausgabe(
             .join()
             .map_err(|_| YaraFehler::Eingabe("Fehlerleser abgebrochen".into()))??;
         let status = status?;
+        if let Some(writer) = writer {
+            writer
+                .join()
+                .map_err(|_| YaraFehler::Eingabe("Eingabeschreiber abgebrochen".into()))??;
+        }
         if out.len() > 1024 * 1024 || err.len() > 1024 * 1024 {
             return Err(YaraFehler::Eingabe("Ausgabelimit überschritten".into()));
         }
@@ -111,6 +134,24 @@ fn ausgabe(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    #[test]
+    fn begrenzte_eingabe_und_abbruch() {
+        let data = vec![b'x'; 128 * 1024];
+        let out = mit_eingabe(
+            Command::new("/bin/cat"),
+            &data,
+            Duration::from_secs(5),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(out.as_bytes(), data);
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("10");
+        assert!(matches!(
+            mit_eingabe(cmd, &data, Duration::from_secs(5), &|| true),
+            Err(YaraFehler::Abgebrochen)
+        ));
+    }
     #[test]
     fn prozessgrenzen_und_abbruch() {
         let mut cmd = Command::new("/bin/sleep");

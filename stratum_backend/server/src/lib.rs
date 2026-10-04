@@ -257,6 +257,7 @@ pub fn router(db: Datenbank) -> Router {
             get(bookmark_status),
         )
         .route("/api/v1/faelle/{nummer}/netzwerk", post(netzwerk_job))
+        .route("/api/v1/faelle/{nummer}/http-lab", post(http_replay_job))
         .route(
             "/api/v1/faelle/{nummer}/bookmarks",
             get(bookmarks).put(bookmark_schreiben),
@@ -763,6 +764,28 @@ async fn job_fortschritt(
                         return Some((Ok(ev), (alt, true, false)));
                     }
                 };
+                if j.kind == stratum_model::JobKind::HttpReplay {
+                    let audit = stratum_store::AuditEintrag {
+                        akteur: u.id,
+                        case_id: Some(j.case_id),
+                        aktion: stratum_model::AuditAction::JobList,
+                        objekt_typ: "job",
+                        objekt_id: Some(id.to_string()),
+                        ergebnis: stratum_model::AuditResult::Success,
+                        details: json!({"art":"http_replay_stream"}),
+                    };
+                    for permission in [
+                        stratum_model::Permission::CaseView,
+                        stratum_model::Permission::FileView,
+                    ] {
+                        if let Err(error) = db.verlangen(u.id, permission, audit.clone()).await {
+                            let ev = Event::default()
+                                .event("fehler")
+                                .data(json!({"fehler":error.to_string()}).to_string());
+                            return Some((Ok(ev), (alt, true, false)));
+                        }
+                    }
+                }
                 let neu = json!({
                     "status": j.status,
                     "progress": j.progress,
@@ -1679,6 +1702,19 @@ async fn bookmark_schreiben(
 struct BookmarkZiel {
     kind: stratum_model::bookmark::BookmarkKind,
     target: String,
+}
+
+async fn http_replay_job(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Koerper(request): Koerper<stratum_model::http_lab::HttpReplayRequest>,
+) -> Antwort<Json<Value>> {
+    let case = fall_id(&z, &nummer).await?;
+    let id = z.db.http_replay_job(u.id, case, &request).await?;
+    Ok(Json(
+        json!({"job_id":id,"network_policy":"none","mode":"offline_simulation"}),
+    ))
 }
 async fn bookmark_status(
     State(z): State<Zustand>,

@@ -471,3 +471,8 @@ export function useSaveBookmark(number:string) {
   const client=useQueryClient();
   return useMutation({mutationFn:(body:{kind:import("./types").BookmarkKind;target:string;note?:string;reviewed?:boolean;removed?:boolean;expected_updated_at?:string})=>api<import("./types").CaseBookmark>(`/faelle/${encodeURIComponent(number)}/bookmarks`,{method:"PUT",body}),onSuccess:()=>client.invalidateQueries({queryKey:["bookmarks",number]})});
 }
+
+export function useHttpReplay(number:string) {
+  const client=useQueryClient();
+  return useMutation({mutationFn:(body:import("./types").HttpReplayRequest)=>api<{job_id:string;network_policy:"none";mode:"offline_simulation"}>(`/faelle/${enc(number)}/http-lab`,{method:"POST",body}),onSuccess:()=>{client.invalidateQueries({queryKey:["jobs"]});client.invalidateQueries({queryKey:["war-room",number]});}});
+}
