@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import {
   Activity,
   BookOpen,
+  Bookmark,
   Boxes,
   Briefcase,
   FileSearch,
@@ -88,6 +89,7 @@ export const CASE_NAV: NavGroup[] = [
       { id: "timeline", label: "Timeline", icon: <Activity />, path: "timeline", key: "t" },
       { id: "graph", label: "Graph", icon: <Waypoints />, key: "g", path: "graph" },
       { id: "entities", label: "Entities", icon: <Users />, path: "entities", key: "n" },
+      { id: "bookmarks", label: "Investigation selection", icon: <Bookmark />, path: "bookmarks" },
       { id: "findings", label: "Findings", icon: <Flag />, key: "f", planned: INVESTIGATION },
     ],
   },

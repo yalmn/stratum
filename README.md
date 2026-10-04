@@ -860,6 +860,15 @@ nur die Ansicht. Die Anzeige ist auf 120 Knoten und 240 Kanten begrenzt.
 Audit zeigt Analystenaktionen zur Untersuchungszeit, getrennt von der Timeline.
 Filter gelten für die geladenen Audit-Seiten; die Kettenprüfung prüft alle Fälle.
 
+Dateien, Ereignisse, Entitäten, Beziehungen und Rohartefakte lassen sich mit
+`Add to investigation` in die gemeinsame Fallmerkliste aufnehmen. Unter
+`Investigation selection` stehen Notizen, Prüfstatus und Links zurück zur Quelle.
+`Reviewed` ist eine Analystenangabe, kein bestätigtes Finding. Die Quelle bleibt
+unverändert. Entfernen betrifft nur die Liste; Wiederaufnahme erhält ID und Notiz.
+Änderungen stehen mit vorherigem und neuem Stand im Audit. Schreiben braucht
+`bookmark.edit`, Lesen `case.view` und `file.view`. Bestehende Rollen erhalten das
+neue Recht erst durch ausdrückliche Vergabe in der Administration.
+
 In den Explorer-Dateidetails lässt sich ein lokaler YARA-Scan einreihen. Der
 Linux-Worker benötigt `/usr/bin/yara` (Version 4.5 oder neuer innerhalb Version 4)
 und `/usr/bin/prlimit`. Regeltext und SHA-256 der Regeln bleiben im Job erhalten.

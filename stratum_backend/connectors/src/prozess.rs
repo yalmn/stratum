@@ -5,9 +5,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 pub(crate) fn ausfuehren(
+    cmd: Command,
+    timeout: Duration,
+    abbruch: &dyn Fn() -> bool,
+) -> Result<String, YaraFehler> {
+    ausgabe(cmd, timeout, abbruch, false)
+}
+
+pub(crate) fn version(cmd: Command, abbruch: &dyn Fn() -> bool) -> Result<String, YaraFehler> {
+    ausgabe(cmd, Duration::from_secs(5), abbruch, true)
+}
+
+fn ausgabe(
     mut cmd: Command,
     timeout: Duration,
     abbruch: &dyn Fn() -> bool,
+    versionsabfrage: bool,
 ) -> Result<String, YaraFehler> {
     cmd.stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -66,7 +79,7 @@ pub(crate) fn ausfuehren(
         if out.len() > 1024 * 1024 || err.len() > 1024 * 1024 {
             return Err(YaraFehler::Eingabe("Ausgabelimit überschritten".into()));
         }
-        if !status.success() || !err.is_empty() {
+        if !status.success() || (!versionsabfrage && !err.is_empty()) {
             return Err(YaraFehler::Eingabe(format!(
                 "Werkzeugfehler: {}",
                 format!(
@@ -80,7 +93,18 @@ pub(crate) fn ausfuehren(
                 .collect::<String>()
             )));
         }
-        String::from_utf8(out).map_err(|_| YaraFehler::Eingabe("Ausgabe nicht UTF-8".into()))
+        let mut text = String::from_utf8(out)
+            .map_err(|_| YaraFehler::Eingabe("Ausgabe nicht UTF-8".into()))?;
+        if versionsabfrage && !err.is_empty() {
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(
+                &String::from_utf8(err)
+                    .map_err(|_| YaraFehler::Eingabe("Versionsausgabe nicht UTF-8".into()))?,
+            );
+        }
+        Ok(text)
     })
 }
 
@@ -100,5 +124,22 @@ mod tests {
         ));
         let cmd = Command::new("/usr/bin/yes");
         assert!(ausfuehren(cmd, Duration::from_secs(3), &|| false).is_err());
+    }
+
+    #[test]
+    fn version_auf_stderr_ist_kein_abfragefehler() {
+        let command = || {
+            let mut c = Command::new("/bin/sh");
+            c.args(["-c", "printf 'nslookup 9.18.39\\n' >&2"]);
+            c
+        };
+        assert_eq!(
+            version(command(), &|| false).unwrap().trim(),
+            "nslookup 9.18.39"
+        );
+        assert!(ausfuehren(command(), Duration::from_secs(5), &|| false).is_err());
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", "printf 'Fehler' >&2; exit 1"]);
+        assert!(version(c, &|| false).is_err());
     }
 }

@@ -28,6 +28,7 @@ import { EntityDrawer } from "./EntityDrawer";
 import { EventDrawer } from "./EventDrawer";
 import { NetworkResult } from "./NetworkResult";
 import { YaraResult } from "./YaraResult";
+import { ArtifactDrawer } from "./ArtifactDrawer";
 import { FileDrawer } from "./FileDrawer";
 
 export function ContextDrawer({ detail, caseNumber }: { detail: Detail; caseNumber?: string }) {
@@ -45,6 +46,8 @@ export function ContextDrawer({ detail, caseNumber }: { detail: Detail; caseNumb
       return <JobDetail number={caseNumber} id={detail.id} onClose={close} />;
     case "file":
       return <FileDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
+    case "artifact":
+      return <ArtifactDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
     case "event":
       return <EventDrawer key={detail.id} id={detail.id} caseNumber={caseNumber} onClose={close} />;
     case "relationship":

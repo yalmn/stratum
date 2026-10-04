@@ -84,6 +84,8 @@ pub enum AuditAction {
     FileDownload,
     /// Zugangsdaten angesehen.
     CredentialView,
+    /// Merkliste geändert, ohne Quellobjekte zu verändern.
+    BookmarkEdit,
     /// Finding angelegt.
     FindingCreate,
     /// Finding geändert.

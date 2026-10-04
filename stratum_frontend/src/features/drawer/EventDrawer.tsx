@@ -1,3 +1,4 @@
+import { BookmarkButton } from "../bookmarks/BookmarkButton";
 // Ereignis im Context Drawer: Zeit, Art, Herkunftsstatus, Beteiligte,
 // Attribute und Herkunft bis zur Fundstelle (Vorgabe Abschnitt 41), auf
 // Wunsch mit dem Rohfund aus dem geprüften Report.
@@ -25,7 +26,7 @@ function Value({ v }: { v: unknown }) {
   return <span className="mono">{String(v)}</span>;
 }
 
-function Source({ p }: { p: EventProvenance }) {
+function Source({ p, caseNumber }: { p: EventProvenance; caseNumber:string }) {
   const [show, setShow] = useState(false);
   const [clear, setClear] = useState(false);
   const { can } = useSession();
@@ -51,7 +52,7 @@ function Source({ p }: { p: EventProvenance }) {
         ]}
       />
       {p.artifact_id && (
-        <div className="drawer-actions">
+        <div className="drawer-actions"><BookmarkButton number={caseNumber} kind="artifact" target={p.artifact_id!} />
           <Button size="sm" icon={<FileSearch />} onClick={() => setShow(!show)}>
             {show ? "Hide raw finding" : "Show raw finding"}
           </Button>
@@ -99,7 +100,7 @@ export function EventDrawer({ id, caseNumber, onClose }: { id: string; caseNumbe
   const e = d.data.ereignis;
   return (
     <DrawerFrame kind="Event" title={label(e.kind)} onClose={onClose} badges={<DerivationBadge kind={e.derivation} />}>
-      <div className="drawer-actions">
+      <div className="drawer-actions"><BookmarkButton number={caseNumber} kind="event" target={e.id} />
         <Button
           size="sm"
           icon={<Activity />}
@@ -141,7 +142,7 @@ export function EventDrawer({ id, caseNumber, onClose }: { id: string; caseNumbe
       </DrawerSection>
       <DrawerSection title={`Evidence provenance (${d.data.herkunft.length})`}>
         {d.data.herkunft.map((p, i) => (
-          <Source key={i} p={p} />
+          <Source key={i} p={p} caseNumber={caseNumber} />
         ))}
         {d.data.herkunft.length === 0 && <span className="muted">No provenance recorded.</span>}
       </DrawerSection>

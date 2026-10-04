@@ -909,3 +909,8 @@
 
 .graph-edge.inferred { color: var(--warning); }
 .network-page { overflow: auto; max-width: 1000px; }
+
+.bookmark-entry { padding: 16px; border: 1px solid var(--border); border-radius: 6px; margin: 12px 0; background: var(--bg-surface); }
+.bookmark-entry textarea { min-height: 72px; }
+.bookmark-entry p.mono { overflow-wrap: anywhere; }
+.bookmark-entry .row { flex-wrap: wrap; }

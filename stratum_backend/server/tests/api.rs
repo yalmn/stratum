@@ -252,7 +252,7 @@ async fn ablauf(db: Datenbank) {
     assert!(
         cookie.starts_with(&format!("stratum_sitzung={t_chef};")) && cookie.contains("HttpOnly")
     );
-    assert_eq!(v["rechte"].as_array().unwrap().len(), 23);
+    assert_eq!(v["rechte"].as_array().unwrap().len(), 24);
     // Auch über das Cookie.
     let antwort = app
         .clone()
@@ -1468,6 +1468,153 @@ async fn ablauf(db: Datenbank) {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    // Fallmerkliste: stabile Referenzen, keine Duplikate, Notiz und reversibles Entfernen.
+    let bookmarks = "/api/v1/faelle/API-1/bookmarks";
+    let target = format!("{}|122683392|101", ev.id);
+    let selection = json!({"kind":"file","target":target,"note":"Für spätere Prüfung"});
+    let (s, _, _) = anfrage(&app, "PUT", bookmarks, None, Some(selection.clone())).await;
+    assert_eq!(s, StatusCode::UNAUTHORIZED);
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_mia),
+        Some(selection.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, saved) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(selection.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{saved}");
+    assert_eq!(saved["note"], "Für spätere Prüfung");
+    let (s, _, again) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(json!({"kind":"file","target":target})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(saved["id"], again["id"]);
+    assert_eq!(again["note"], saved["note"]);
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-2/bookmarks",
+        Some(&t_chef),
+        Some(selection.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(json!({"kind":"file","target":target,"note":"x".repeat(8001)})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let entity: String =
+        sqlx::query_scalar("SELECT id::text FROM entity WHERE case_id=$1 ORDER BY id LIMIT 1")
+            .bind(ev.case_id.0)
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    let (s, _, other) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(json!({"kind":"entity","target":entity})),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{other}");
+    let (_, _, page) = anfrage(
+        &app,
+        "GET",
+        &format!("{bookmarks}?anzahl=1"),
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(page["eintraege"].as_array().unwrap().len(), 1);
+    assert!(!page.to_string().contains("Dienstkennwort1"));
+    let cursor = page["naechste"].as_str().unwrap();
+    let (_, _, page2) = anfrage(
+        &app,
+        "GET",
+        &format!("{bookmarks}?anzahl=1&vor={cursor}"),
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_ne!(page["eintraege"][0]["id"], page2["eintraege"][0]["id"]);
+    assert!(page2["naechste"].is_null());
+    let (_, _, reviewed) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(json!({"kind":"file","target":target,"reviewed":true})),
+    )
+    .await;
+    assert_eq!(reviewed["reviewed"], true);
+    let (s,_,_)=anfrage(&app,"PUT",bookmarks,Some(&t_chef),Some(json!({"kind":"file","target":target,"note":"veralteter Editor","expected_updated_at":saved["updated_at"]}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+
+    let (_, _, removed) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(json!({"kind":"file","target":target,"removed":true})),
+    )
+    .await;
+    assert_eq!(removed["removed"], true);
+    let status_url = format!(
+        "{bookmarks}/status?kind=file&target={}",
+        target.replace('|', "%7C")
+    );
+    let (_, _, status) = anfrage(&app, "GET", &status_url, Some(&t_mia), None).await;
+    assert!(status["bookmark"].is_null());
+    let (_, _, restored) = anfrage(
+        &app,
+        "PUT",
+        bookmarks,
+        Some(&t_chef),
+        Some(json!({"kind":"file","target":target})),
+    )
+    .await;
+    assert_eq!(restored["id"], saved["id"]);
+    assert_eq!(restored["note"], saved["note"]);
+    assert_eq!(restored["reviewed"], true);
+    let (_, _, status) = anfrage(&app, "GET", &status_url, Some(&t_mia), None).await;
+    assert_eq!(status["bookmark"]["id"], saved["id"]);
+    let (_, _, foreign) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-2/bookmarks",
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert!(foreign["eintraege"].as_array().unwrap().is_empty());
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_event WHERE action='BOOKMARK_EDIT' AND result='success'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert!(count >= 6);
+
     // Registrierung über die API, Freigabe und Passwortpflicht.
     let lea = json!({"name": "lea", "anzeigename": "Lea L.", "passwort": "lea-passwort-1234"});
     let (s, _, v) = anfrage(&app, "POST", "/api/v1/registrierung", None, Some(lea)).await;

@@ -1,3 +1,4 @@
+import { BookmarkButton } from "../bookmarks/BookmarkButton";
 import { Button } from "../../components/ui/Button";
 import { CodeBlock, ErrorState, PropertyList, Skeleton, Timestamp } from "../../components/ui/Display";
 import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
@@ -13,6 +14,7 @@ export function RelationshipDrawer({ id, caseNumber, onClose }: { id: string; ca
     {query.isPending && <Skeleton lines={6} />}
     {query.error && <ErrorState title="Relationship could not be loaded" reason={query.error.message} />}
     {r && <>
+      <BookmarkButton number={caseNumber} kind="relationship" target={r.id} />
       <DrawerSection title="Direction and derivation">
         <Button onClick={() => open("entity", r.source.id)}>{r.source.name}</Button><p className="muted">{r.kind} →</p><Button onClick={() => open("entity", r.target.id)}>{r.target.name}</Button>
         <p><DerivationBadge kind={r.derivation} /></p>

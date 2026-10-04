@@ -57,7 +57,8 @@ fn rechtekatalog_ohne_datenbank() {
     let o = stratum(&["rechte"], None);
     assert!(o.status.success(), "{}", text(&o));
     let t = String::from_utf8(o.stdout).unwrap();
-    assert_eq!(t.lines().count(), 23);
+    assert_eq!(t.lines().count(), 24);
+    assert!(t.contains("bookmark.edit"));
     assert!(t.contains("credential.view_sensitive"));
 }
 

@@ -16,6 +16,7 @@
 
 pub mod artifact;
 pub mod audit;
+pub mod bookmark;
 pub mod case;
 pub mod entity;
 pub mod event;

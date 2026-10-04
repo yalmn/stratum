@@ -51,6 +51,9 @@ pub enum Permission {
     /// Sensible Zugangsdaten (Passwörter, Hashes, Schlüssel) im Klartext sehen.
     #[serde(rename = "credential.view_sensitive")]
     CredentialViewSensitive,
+    /// Fallmerkliste bearbeiten.
+    #[serde(rename = "bookmark.edit")]
+    BookmarkEdit,
     /// Findings anlegen.
     #[serde(rename = "finding.create")]
     FindingCreate,
@@ -88,7 +91,7 @@ pub enum Permission {
 
 impl Permission {
     /// Der ganze Katalog.
-    pub const ALL: [Permission; 23] = [
+    pub const ALL: [Permission; 24] = [
         Permission::CaseCreate,
         Permission::CaseView,
         Permission::CaseEdit,
@@ -101,6 +104,7 @@ impl Permission {
         Permission::FileExtract,
         Permission::SearchRun,
         Permission::CredentialViewSensitive,
+        Permission::BookmarkEdit,
         Permission::FindingCreate,
         Permission::FindingEdit,
         Permission::RelationEdit,
@@ -129,6 +133,7 @@ impl Permission {
             Permission::FileExtract => "file.extract",
             Permission::SearchRun => "search.run",
             Permission::CredentialViewSensitive => "credential.view_sensitive",
+            Permission::BookmarkEdit => "bookmark.edit",
             Permission::FindingCreate => "finding.create",
             Permission::FindingEdit => "finding.edit",
             Permission::RelationEdit => "relation.edit",
@@ -160,6 +165,7 @@ impl Permission {
             Permission::CredentialViewSensitive => {
                 "Sensible Zugangsdaten (Passwörter, Hashes, Schlüssel) im Klartext sehen"
             }
+            Permission::BookmarkEdit => "Fallmerkliste bearbeiten",
             Permission::FindingCreate => "Findings anlegen",
             Permission::FindingEdit => "Findings bearbeiten und bewerten",
             Permission::RelationEdit => "Beziehungen anlegen und entfernen",
@@ -219,6 +225,7 @@ pub fn role_templates() -> Vec<(&'static str, &'static str, Vec<Permission>)> {
                 AnalysisCancel,
                 FileView,
                 SearchRun,
+                BookmarkEdit,
                 FindingCreate,
                 FindingEdit,
                 RelationEdit,
@@ -240,6 +247,7 @@ pub fn role_templates() -> Vec<(&'static str, &'static str, Vec<Permission>)> {
                 FileExtract,
                 SearchRun,
                 CredentialViewSensitive,
+                BookmarkEdit,
                 FindingCreate,
                 FindingEdit,
                 RelationEdit,
@@ -255,6 +263,7 @@ pub fn role_templates() -> Vec<(&'static str, &'static str, Vec<Permission>)> {
                 EvidenceView,
                 FileView,
                 SearchRun,
+                BookmarkEdit,
                 FindingCreate,
                 FindingEdit,
                 RelationEdit,
@@ -269,6 +278,7 @@ pub fn role_templates() -> Vec<(&'static str, &'static str, Vec<Permission>)> {
                 EvidenceView,
                 SearchRun,
                 TiManage,
+                BookmarkEdit,
                 FindingCreate,
                 ReportCreate,
             ],
@@ -300,6 +310,7 @@ pub fn role_templates() -> Vec<(&'static str, &'static str, Vec<Permission>)> {
                 EvidenceImport,
                 EvidenceView,
                 AnalysisStart,
+                BookmarkEdit,
                 FindingCreate,
                 RelationEdit,
                 ReportCreate,

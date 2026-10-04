@@ -870,13 +870,14 @@ async fn rollen_registrierung_freigabe() {
     };
     use stratum_model::{role_templates, Permission, RoleId, UserStatus};
 
-    // Mitgelieferte Vorlagen genau wie im Modell.
+    // Migrationen erweitern bestehende Rollen nicht ungefragt um neue Rechte.
     let rollen = db.rollen().await.unwrap();
     assert_eq!(rollen.len(), 8);
     for (n, _, rechte) in role_templates() {
         let r = rollen.iter().find(|r| r.name == n).unwrap();
         assert_eq!(r.id, RoleId::template(n));
         let mut soll = rechte.clone();
+        soll.retain(|recht| *recht != Permission::BookmarkEdit);
         soll.sort();
         let mut ist = r.permissions.clone();
         ist.sort();

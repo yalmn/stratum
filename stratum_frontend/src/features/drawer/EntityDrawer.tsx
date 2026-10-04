@@ -1,3 +1,4 @@
+import { BookmarkButton } from "../bookmarks/BookmarkButton";
 // Entität im Context Drawer: Attribute (Geheimwerte maskiert), Beziehungen,
 // letzte Ereignisse; Klartext nur mit credential.view_sensitive.
 
@@ -38,7 +39,7 @@ export function EntityDrawer({ id, caseNumber, onClose }: { id: string; caseNumb
   const masked = attrs.some(([, v]) => v === "[maskiert]");
   return (
     <DrawerFrame kind={label(e.kind)} title={e.display_name} onClose={onClose}>
-      <div className="drawer-actions">
+      <div className="drawer-actions"><BookmarkButton number={caseNumber} kind="entity" target={e.id} />
         {["ip_address", "domain_name", "url"].includes(e.kind) && can("connector.use") && <Button size="sm" icon={<Globe />} onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/network?target=${encodeURIComponent(e.canonical_key.replace(/^(ip|domain|url):/, ""))}`)}>DNS / WHOIS</Button>}
         <Button size="sm" icon={<Waypoints />} onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/graph?entity=${e.id}&detail=entity:${e.id}`)}>Show in graph</Button>
         <Button

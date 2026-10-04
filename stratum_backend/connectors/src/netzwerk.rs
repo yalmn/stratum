@@ -90,7 +90,7 @@ pub fn abfragen(
             }
             let mut v = Command::new(tool);
             v.arg(version_arg);
-            let version = match ausfuehren(v, Duration::from_secs(5), abbruch) {
+            let version = match crate::prozess::version(v, abbruch) {
                 Ok(v) => v.trim().to_string(),
                 Err(YaraFehler::Abgebrochen) => return Err(YaraFehler::Abgebrochen),
                 Err(e) => {

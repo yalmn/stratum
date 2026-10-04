@@ -267,3 +267,9 @@ export interface AuditRow {
   timestamp: string; action: string; object_type: string; object_id: string | null;
   result: string; details: Record<string, unknown>; previous_hash: string | null; hash: string;
 }
+
+export type BookmarkKind = "file" | "event" | "entity" | "relationship" | "artifact";
+export interface CaseBookmark {
+  id:string; case_id:string; kind:BookmarkKind; target:string; title:string;
+  note:string; reviewed:boolean; created_at:string; updated_at:string; updated_by:string;
+}

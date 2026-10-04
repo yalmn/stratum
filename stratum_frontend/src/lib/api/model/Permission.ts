@@ -3,4 +3,4 @@
 /**
  * Eine einzelne Berechtigung.
  */
-export type Permission = "case.create" | "case.view" | "case.edit" | "case.close" | "evidence.import" | "evidence.view" | "analysis.start" | "analysis.cancel" | "file.view" | "file.extract" | "search.run" | "credential.view_sensitive" | "finding.create" | "finding.edit" | "relation.edit" | "report.create" | "report.export" | "audit.view" | "audit.verify" | "ti.manage" | "playbook.run" | "ai.query" | "connector.use";
+export type Permission = "case.create" | "case.view" | "case.edit" | "case.close" | "evidence.import" | "evidence.view" | "analysis.start" | "analysis.cancel" | "file.view" | "file.extract" | "search.run" | "credential.view_sensitive" | "bookmark.edit" | "finding.create" | "finding.edit" | "relation.edit" | "report.create" | "report.export" | "audit.view" | "audit.verify" | "ti.manage" | "playbook.run" | "ai.query" | "connector.use";

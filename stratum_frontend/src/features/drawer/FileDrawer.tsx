@@ -1,3 +1,4 @@
+import { BookmarkButton } from "../bookmarks/BookmarkButton";
 // Datei im Context Drawer: Überblick, Zeitstempel (SI und FN), NTFS,
 // Hashes, Inhalt als Hex und Strings. Lesen des Inhalts steht im Audit.
 
@@ -85,7 +86,7 @@ function FileView({
 
   return (
     <DrawerFrame kind={f.is_directory ? "Folder" : "File"} title={f.name || "(root)"} onClose={onClose}>
-      <div className="drawer-actions">
+      <div className="drawer-actions"><BookmarkButton number={caseNumber} kind="file" target={`${evidence}|${volume}|${record}`} />
         {!f.is_directory && (
           <>
             <Button size="sm" icon={<Fingerprint />} onClick={() => setView(view ? null : "hex")}>

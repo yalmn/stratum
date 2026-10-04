@@ -460,3 +460,14 @@ export function useNetworkLookup(number: string) {
   return useMutation({ mutationFn: (body: { ziel: string; dns: boolean; whois: boolean }) => api<{ job_id: string; host: string }>(`/faelle/${enc(number)}/netzwerk`, { method: "POST", body }),
     onSuccess: () => client.invalidateQueries({ queryKey: ["jobs"] }) });
 }
+
+export function useBookmarks(number: string) {
+  return useInfiniteQuery({queryKey:["bookmarks",number,"list"],initialPageParam:"",queryFn:({pageParam})=>api<{eintraege:import("./types").CaseBookmark[];naechste:string|null}>(`/faelle/${encodeURIComponent(number)}/bookmarks?anzahl=100${pageParam ? `&vor=${pageParam}` : ""}`),getNextPageParam:(p)=>p.naechste??undefined});
+}
+export function useBookmarkStatus(number:string,kind:import("./types").BookmarkKind,target:string) {
+  return useQuery({queryKey:["bookmarks",number,kind,target],queryFn:()=>api<{bookmark:import("./types").CaseBookmark|null}>(`/faelle/${encodeURIComponent(number)}/bookmarks/status?kind=${kind}&target=${encodeURIComponent(target)}`)});
+}
+export function useSaveBookmark(number:string) {
+  const client=useQueryClient();
+  return useMutation({mutationFn:(body:{kind:import("./types").BookmarkKind;target:string;note?:string;reviewed?:boolean;removed?:boolean;expected_updated_at?:string})=>api<import("./types").CaseBookmark>(`/faelle/${encodeURIComponent(number)}/bookmarks`,{method:"PUT",body}),onSuccess:()=>client.invalidateQueries({queryKey:["bookmarks",number]})});
+}

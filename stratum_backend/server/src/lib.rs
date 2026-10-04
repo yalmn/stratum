@@ -252,7 +252,15 @@ pub fn router(db: Datenbank) -> Router {
             "/api/v1/evidence/{id}/dateien/{volume}/{record}/yara",
             post(datei_yara),
         )
+        .route(
+            "/api/v1/faelle/{nummer}/bookmarks/status",
+            get(bookmark_status),
+        )
         .route("/api/v1/faelle/{nummer}/netzwerk", post(netzwerk_job))
+        .route(
+            "/api/v1/faelle/{nummer}/bookmarks",
+            get(bookmarks).put(bookmark_schreiben),
+        )
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/audit/pruefen", post(audit_pruefen))
         .with_state(Zustand { db })
@@ -1643,4 +1651,43 @@ mod tests {
         );
         assert_eq!(token(&h).as_deref(), Some("xyz"));
     }
+}
+
+async fn bookmarks(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<WarRoomAnfrage>,
+) -> Antwort<Json<Value>> {
+    let case = fall_id(&z, &nummer).await?;
+    Ok(Json(
+        z.db.bookmarks(u.id, case, q.vor, q.anzahl.unwrap_or(100))
+            .await?,
+    ))
+}
+async fn bookmark_schreiben(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Koerper(s): Koerper<stratum_store::bookmarks::Auswahl>,
+) -> Antwort<Json<Value>> {
+    let case = fall_id(&z, &nummer).await?;
+    Ok(Json(z.db.bookmark_schreiben(u.id, case, &s).await?))
+}
+
+#[derive(Deserialize)]
+struct BookmarkZiel {
+    kind: stratum_model::bookmark::BookmarkKind,
+    target: String,
+}
+async fn bookmark_status(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<BookmarkZiel>,
+) -> Antwort<Json<Value>> {
+    let case = fall_id(&z, &nummer).await?;
+    Ok(Json(
+        z.db.bookmark_status(u.id, case, q.kind, &q.target).await?,
+    ))
 }
