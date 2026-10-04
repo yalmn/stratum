@@ -131,6 +131,7 @@ impl Worker {
             stand: Mutex::new(Stand {
                 gesendet: Instant::now() - Duration::from_secs(10),
                 fortschritt: json!({}),
+                phasenbeginn: std::collections::HashMap::new(),
             }),
         };
         let (status, fehler, ergebnis) = match job.kind {
@@ -303,6 +304,7 @@ fn phase_name(p: Phase) -> &'static str {
 struct Stand {
     gesendet: Instant,
     fortschritt: Value,
+    phasenbeginn: std::collections::HashMap<&'static str, Instant>,
 }
 
 /// Rückmeldung eines Jobs: schreibt Fortschritt gedrosselt in die
@@ -360,10 +362,25 @@ impl Rueckmeldung for JobRueckmeldung<'_> {
     }
 
     fn phase_beginn(&self, phase: Phase) {
-        self.aendern(|v| {
-            v["phase"] = json!(phase);
-            v["phasen"][phase_name(phase)] = json!({"erledigt": 0, "gesamt": 0});
-        });
+        {
+            let mut s = self.stand.lock().unwrap_or_else(|v| v.into_inner());
+            s.phasenbeginn.insert(phase_name(phase), Instant::now());
+            s.fortschritt["phase"] = json!(phase);
+            s.fortschritt["phasen"][phase_name(phase)] = json!({"erledigt": 0, "gesamt": 0});
+        }
+        self.senden(true);
+    }
+
+    fn phase_ende(&self, phase: Phase) {
+        {
+            let mut s = self.stand.lock().unwrap_or_else(|v| v.into_inner());
+            if let Some(beginn) = s.phasenbeginn.remove(phase_name(phase)) {
+                let dauer_ms = u64::try_from(beginn.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let stand = &mut s.fortschritt["phasen"][phase_name(phase)];
+                stand["dauer_ms"] = json!(dauer_ms);
+                stand["abgeschlossen"] = json!(true);
+            }
+        }
         self.senden(true);
     }
 

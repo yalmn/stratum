@@ -167,14 +167,17 @@ pub(crate) async fn liste(
     pool: &PgPool,
     case_id: Option<CaseId>,
     anzahl: i64,
+    vor: Option<i64>,
 ) -> Result<Vec<stratum_model::AuditEvent>, StoreError> {
     let zeilen: Vec<Zeile> = sqlx::query_as(
         "SELECT sequence, id, actor_id, case_id, occurred_at, action, object_type, \
          object_id, result, details, payload, previous_hash, hash FROM audit_event \
-         WHERE $1::uuid IS NULL OR case_id = $1 ORDER BY sequence DESC LIMIT $2",
+         WHERE ($1::uuid IS NULL OR case_id = $1) \
+         AND ($3::bigint IS NULL OR sequence < $3) ORDER BY sequence DESC LIMIT $2",
     )
     .bind(case_id.map(|c| c.0))
     .bind(anzahl.clamp(0, 100_000))
+    .bind(vor)
     .fetch_all(pool)
     .await?;
     zeilen

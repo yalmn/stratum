@@ -15,7 +15,7 @@ import {
   JobStatusBadge,
   SupportBadge,
 } from "../../components/forensic/Badges";
-import { JobProgress } from "../../components/forensic/JobProgress";
+import { JobProgress, phaseLabel } from "../../components/forensic/JobProgress";
 import { useCancelJob, useCase, useCases, useJobs } from "../../lib/api/queries";
 import { isFinished, type Evidence, type Job } from "../../lib/api/types";
 import { bytes, count, duration } from "../../lib/format";
@@ -189,6 +189,9 @@ function JobView({ job, number, onClose }: { job: Job; number: string; onClose: 
   const p = (job.parameters ?? {}) as Record<string, unknown>;
   const r = (u.result ?? {}) as Record<string, unknown>;
   const ev = c.data?.evidence.find((e) => e.id === p.evidence_id || e.id === r.evidence_id);
+  const timings = Object.entries(u.progress.phasen ?? {}).filter(
+    ([, phase]) => phase.abgeschlossen && typeof phase.dauer_ms === "number",
+  );
   return (
     <DrawerFrame
       kind={job.kind === "evidence_import" ? "Import job" : "Analysis job"}
@@ -239,6 +242,17 @@ function JobView({ job, number, onClose }: { job: Job; number: string; onClose: 
           ]}
         />
       </DrawerSection>
+      {timings.length > 0 && (
+        <DrawerSection title="Phase timings">
+          <PropertyList
+            items={timings.map(([name, phase]) => [
+              phaseLabel(name),
+              <span className="mono">{((phase.dauer_ms ?? 0) / 1000).toLocaleString("en-US", { maximumFractionDigits: 3 })} s</span>,
+            ])}
+          />
+          <p className="muted">Completed phases only. Overlapping phases cannot be added to get the total duration.</p>
+        </DrawerSection>
+      )}
       {u.status === "completed" && (
         <DrawerSection title="Result">
           <PropertyList

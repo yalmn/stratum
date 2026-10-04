@@ -226,6 +226,21 @@ impl Datenbank {
         case_id: Option<stratum_model::CaseId>,
         anzahl: i64,
     ) -> Result<Vec<AuditZeile>, StoreError> {
+        self.audit_seite(akteur, case_id, anzahl, None).await
+    }
+
+    /// Audit-Ereignisse vor einer globalen Sequenznummer, neueste zuerst.
+    /// Fallbezogenes Lesen verlangt zusätzlich `case.view`.
+    pub async fn audit_seite(
+        &self,
+        akteur: ActorId,
+        case_id: Option<stratum_model::CaseId>,
+        anzahl: i64,
+        vor: Option<i64>,
+    ) -> Result<Vec<AuditZeile>, StoreError> {
+        if vor.is_some_and(|v| v <= 0) {
+            return Err(StoreError::Eingabe("Audit-Seitenmarke ungültig".into()));
+        }
         let e = AuditEintrag {
             akteur,
             case_id,
@@ -233,11 +248,15 @@ impl Datenbank {
             objekt_typ: "audit",
             objekt_id: None,
             ergebnis: AuditResult::Success,
-            details: json!({"anzahl": anzahl}),
+            details: json!({"anzahl": anzahl, "vor": vor}),
         };
         self.verlangen(akteur, Permission::AuditView, e.clone())
             .await?;
-        let liste = audit::liste(&self.pool, case_id, anzahl).await?;
+        if case_id.is_some() {
+            self.verlangen(akteur, Permission::CaseView, e.clone())
+                .await?;
+        }
+        let liste = audit::liste(&self.pool, case_id, anzahl, vor).await?;
         let mut ids: Vec<uuid::Uuid> = liste.iter().map(|e| e.actor_id.0).collect();
         ids.sort_unstable();
         ids.dedup();

@@ -175,6 +175,11 @@ fn worker_ablauf() {
     );
     let an = &job.progress["phasen"]["analyzer"];
     assert_eq!(an["erledigt"], an["gesamt"]);
+    for phase in ["hashing", "katalog", "analyzer"] {
+        let stand = &job.progress["phasen"][phase];
+        assert_eq!(stand["abgeschlossen"], true);
+        assert!(stand["dauer_ms"].as_u64().is_some());
+    }
     assert!(job.progress["meldung"]
         .as_str()
         .unwrap()

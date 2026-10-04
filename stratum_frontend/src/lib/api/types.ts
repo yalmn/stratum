@@ -60,6 +60,8 @@ export interface EventKindCount {
 export interface PhaseProgress {
   erledigt: number;
   gesamt: number;
+  dauer_ms?: number;
+  abgeschlossen?: boolean;
 }
 
 /** job.progress (stratum-jobs, JobRueckmeldung). */

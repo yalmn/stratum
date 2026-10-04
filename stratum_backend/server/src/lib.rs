@@ -1389,16 +1389,23 @@ async fn datei_export(
 async fn audit(
     State(z): State<Zustand>,
     Angemeldet(u): Angemeldet,
-    Query(q): Query<Auswahl>,
+    Query(q): Query<AuditAuswahl>,
 ) -> Antwort<Json<Value>> {
     let fall = match &q.fall {
         Some(n) => Some(fall_id(&z, n).await?),
         None => None,
     };
     let liste =
-        z.db.audit_liste(u.id, fall, q.anzahl.unwrap_or(100))
+        z.db.audit_seite(u.id, fall, q.anzahl.unwrap_or(100).clamp(1, 1000), q.vor)
             .await?;
     Ok(Json(serde_json::to_value(liste).map_err(StoreError::from)?))
+}
+
+#[derive(Deserialize)]
+struct AuditAuswahl {
+    fall: Option<String>,
+    anzahl: Option<i64>,
+    vor: Option<i64>,
 }
 
 async fn audit_pruefen(

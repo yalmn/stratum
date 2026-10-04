@@ -619,6 +619,25 @@ async fn ablauf(db: Datenbank) {
     ] {
         assert!(aktionen.contains(&a), "{a} fehlt");
     }
+    let cursor = v.as_array().unwrap().first().unwrap()["sequence"]
+        .as_i64()
+        .unwrap();
+    let (s, _, page) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/audit?fall=API-1&anzahl=2&vor={cursor}"),
+        Some(&t_chef),
+        None,
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(page.as_array().unwrap().len(), 2);
+    for event in page.as_array().unwrap() {
+        assert!(event["sequence"].as_i64().unwrap() < cursor);
+        assert_eq!(event["case_id"], fall_id.to_string());
+    }
+    let (s, _, _) = anfrage(&app, "GET", "/api/v1/audit?vor=0", Some(&t_chef), None).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     let (_, _, v) = anfrage(&app, "POST", "/api/v1/audit/pruefen", Some(&t_chef), None).await;
     assert_eq!(v["fehler_gesamt"], 0);
 
