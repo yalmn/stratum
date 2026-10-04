@@ -3,4 +3,4 @@
 /**
  * Bearbeitungsstand eines Falls.
  */
-export type CaseStatus = "new" | "active" | "review" | "suspended" | "closed" | "archived";
+export type CaseStatus = "new" | "active" | "review" | "suspended" | "closed" | "archived" | "retained";

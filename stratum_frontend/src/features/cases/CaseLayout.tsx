@@ -1,6 +1,6 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { Navigate, Route, Routes, useNavigate, useParams } from "react-router-dom";
-import { Copy, Ellipsis, Link2, Play, Upload, Workflow } from "lucide-react";
+import { Copy, Ellipsis, Link2, Pencil, Play, Upload, Workflow } from "lucide-react";
 import { Button, IconButton } from "../../components/ui/Button";
 import { ErrorState, Skeleton, Tabs } from "../../components/ui/Display";
 import { Menu, Popover } from "../../components/ui/Overlay";
@@ -19,6 +19,7 @@ import { EntitiesPage } from "../entities/EntitiesPage";
 import { ExplorerPage } from "../explorer/ExplorerPage";
 import { TimelinePage } from "../timeline/TimelinePage";
 import { WarRoomPage } from "../war-room/WarRoomPage";
+import { EditCase } from "./EditCase";
 
 function Metric({ label, value, tip }: { label: string; value: string; tip?: string }) {
   const m = (
@@ -31,6 +32,7 @@ function Metric({ label, value, tip }: { label: string; value: string; tip?: str
 }
 
 function CaseHeader({ number }: { number: string }) {
+  const [editing, setEditing] = useState(false);
   const c = useCase(number);
   const kinds = useEventKinds(number);
   const jobs = useJobs(number);
@@ -61,6 +63,7 @@ function CaseHeader({ number }: { number: string }) {
           <ClassificationBadge value={f.classification} />
         </div>
         <span className="spacer" />
+        {can("case.edit") && <Button icon={<Pencil />} onClick={() => setEditing(!editing)}>Edit case</Button>}
         {can("analysis.start") && (
           <Popover
             align="right"
@@ -137,6 +140,7 @@ function CaseHeader({ number }: { number: string }) {
           )}
         </Popover>
       </div>
+      {editing && can("case.edit") && <EditCase key={f.id} value={f} onClose={() => setEditing(false)} />}
       <div className="case-metrics">
         <Metric label="Evidence" value={count(c.data?.evidence.length ?? 0)} />
         <Metric label="Analysis runs" value={count(runs)} tip="Analysis jobs in this case" />

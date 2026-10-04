@@ -22,6 +22,8 @@ pub enum CaseStatus {
     Closed,
     /// Archiviert.
     Archived,
+    /// Als Asservat aufbewahrt, aus der aktiven Fallübersicht ausgeblendet.
+    Retained,
 }
 
 /// Einstufung eines Falls. Die Stufen sind ein Vorschlag; die Zielarchitektur

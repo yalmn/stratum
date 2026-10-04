@@ -189,7 +189,10 @@ pub fn router(db: Datenbank) -> Router {
         .route("/api/v1/rollen", get(rollen))
         .route("/api/v1/rechte", get(rechte))
         .route("/api/v1/faelle", get(faelle).post(fall_neu))
-        .route("/api/v1/faelle/{nummer}", get(fall_zeigen))
+        .route(
+            "/api/v1/faelle/{nummer}",
+            get(fall_zeigen).put(fall_bearbeiten),
+        )
         .route("/api/v1/faelle/{nummer}/analysen", post(analyse))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job).delete(job_abbrechen))
@@ -578,6 +581,55 @@ async fn fall_neu(
     };
     z.db.fall_anlegen(u.id, &c).await?;
     Ok((StatusCode::CREATED, Json(c)))
+}
+
+async fn fall_bearbeiten(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Koerper(mut a): Koerper<stratum_store::faelle::FallAenderung>,
+) -> Antwort<Json<Case>> {
+    let id = fall_id(&z, &nummer).await?;
+    let zugriff = stratum_store::AuditEintrag {
+        akteur: u.id,
+        case_id: Some(id),
+        aktion: stratum_model::AuditAction::CaseEdit,
+        objekt_typ: "case",
+        objekt_id: Some(id.to_string()),
+        ergebnis: stratum_model::AuditResult::Success,
+        details: json!({}),
+    };
+    z.db.verlangen(u.id, Permission::CaseEdit, zugriff.clone())
+        .await?;
+    z.db.verlangen(u.id, Permission::CaseView, zugriff).await?;
+    if let Some(ordner) = a.ordner.take().filter(|o| !o.trim().is_empty()) {
+        let pfad = std::path::PathBuf::from(ordner.trim());
+        if !pfad.is_absolute() {
+            return Err(ApiFehler::Anfrage(
+                "Fallordner muss ein absoluter Serverpfad sein".into(),
+            ));
+        }
+        let pfad = tokio::task::spawn_blocking(move || {
+            let p = std::fs::canonicalize(&pfad)?;
+            if !p.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "kein Verzeichnis",
+                ));
+            }
+            std::fs::read_dir(&p)?;
+            Ok(p)
+        })
+        .await
+        .map_err(|_| ApiFehler::NichtVerfuegbar("Ordnerprüfung abgebrochen".into()))?
+        .map_err(|e| ApiFehler::Anfrage(format!("Fallordner nicht lesbar: {e}")))?;
+        a.ordner = Some(
+            pfad.to_str()
+                .ok_or_else(|| ApiFehler::Anfrage("Fallordner ist kein UTF-8-Pfad".into()))?
+                .to_string(),
+        );
+    }
+    Ok(Json(z.db.fall_bearbeiten(u.id, id, &a).await?))
 }
 
 async fn fall_zeigen(

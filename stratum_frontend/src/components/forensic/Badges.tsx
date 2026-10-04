@@ -45,10 +45,11 @@ const CASE_STATUS: Record<CaseStatus, Tone> = {
   suspended: "neutral",
   closed: "neutral",
   archived: "neutral",
+  retained: "neutral",
 };
 
 export function CaseStatusBadge({ status }: { status: CaseStatus }) {
-  return <StatusBadge tone={CASE_STATUS[status]} label={label(status)} />;
+  return <StatusBadge tone={CASE_STATUS[status]} label={status === "retained" ? "Asservat" : label(status)} />;
 }
 
 const CLASSIFICATION: Record<CaseClassification, Tone> = {

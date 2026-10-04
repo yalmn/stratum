@@ -76,6 +76,19 @@ export function useCreateCase() {
   });
 }
 
+export function useEditCase(number: string) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: (d: Record<string, string | null>) => api<Case>(`/faelle/${enc(number)}`, { method: "PUT", body: d }),
+    onSuccess: async () => {
+      await Promise.all([
+        client.invalidateQueries({ queryKey: keys.case(number) }),
+        client.invalidateQueries({ queryKey: keys.cases }),
+      ]);
+    },
+  });
+}
+
 /** Jobs eines Falls oder (ohne Nummer) alle sichtbaren. */
 export function useJobs(number?: string) {
   const path = number ? `/jobs?fall=${enc(number)}&anzahl=100` : "/jobs?anzahl=100";

@@ -4,7 +4,7 @@ import { ArrowRight, Copy, Plus } from "lucide-react";
 import { DataTable, columnHelper } from "../../components/data-table/DataTable";
 import { Button } from "../../components/ui/Button";
 import { EmptyState, ErrorState, Skeleton, Timestamp } from "../../components/ui/Display";
-import { Field, Input, Select, Textarea } from "../../components/ui/Input";
+import { Checkbox, Field, Input, Select, Textarea } from "../../components/ui/Input";
 import { useContextMenu } from "../../components/ui/Overlay";
 import { CaseStatusBadge, ClassificationBadge } from "../../components/forensic/Badges";
 import { useCases, useCreateCase } from "../../lib/api/queries";
@@ -39,7 +39,8 @@ export function CasesPage() {
   const menu = useContextMenu();
   const creating = params.get("new") === "1";
   const openCase = (c: CaseRow) => navigate(`/cases/${encodeURIComponent(c.case_number)}/overview`);
-  const data = useMemo(() => cases.data ?? [], [cases.data]);
+  const retained = params.get("retained") === "1";
+  const data = useMemo(() => (cases.data ?? []).filter((c) => retained || c.status !== "retained"), [cases.data, retained]);
 
   return (
     <div className="page page-fill">
@@ -49,6 +50,11 @@ export function CasesPage() {
           <span className="muted">Select a case to see its summary, double-click or press Enter to open it.</span>
         </div>
         <span className="spacer" />
+        <Checkbox label="Show Asservate" checked={retained} onChange={(event) => setParams((p) => {
+          const n = new URLSearchParams(p);
+          if (event.target.checked) n.set("retained", "1"); else n.delete("retained");
+          return n;
+        })} />
         {can("case.create") && !creating && (
           <Button variant="primary" icon={<Plus />} onClick={() => setParams({ new: "1" })}>
             New Case
@@ -60,8 +66,8 @@ export function CasesPage() {
       {cases.error && <ErrorState title="Cases could not be loaded." reason={cases.error.message} />}
       {cases.data && data.length === 0 && (
         <EmptyState
-          title="No cases yet."
-          text={can("case.create") ? "Create the first case to start an investigation." : "Ask an administrator to create a case."}
+          title={cases.data.length > 0 ? "No cases in this view." : "No cases yet."}
+          text={cases.data.length > 0 ? "Enable Show Asservate to see retained cases." : can("case.create") ? "Create the first case to start an investigation." : "Ask an administrator to create a case."}
         />
       )}
       {data.length > 0 && (

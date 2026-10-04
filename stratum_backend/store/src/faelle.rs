@@ -6,7 +6,8 @@
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use stratum_model::{
-    ActorId, AuditAction, AuditResult, Case, CaseId, Evidence, EvidenceId, EvidenceKind, Permission,
+    ActorId, AuditAction, AuditResult, Case, CaseClassification, CaseId, CaseStatus, Evidence,
+    EvidenceId, EvidenceKind, Permission,
 };
 
 use sqlx::types::Json;
@@ -22,6 +23,22 @@ pub struct FallZeile {
     pub fall: Case,
     /// Anzahl der Evidence.
     pub evidence: i64,
+}
+
+/// Vollständige bearbeitbare Fallangaben. Identität und Evidence bleiben erhalten.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FallAenderung {
+    /// Titel des Falls.
+    pub titel: String,
+    /// Beschreibung, leer zum Entfernen.
+    pub beschreibung: Option<String>,
+    /// Fallordner für zukünftige Importe.
+    pub ordner: Option<String>,
+    /// Einstufung des Falls.
+    pub einstufung: CaseClassification,
+    /// Bearbeitungs- oder Aufbewahrungsstatus.
+    pub status: CaseStatus,
 }
 
 fn aus_text<T: serde::de::DeserializeOwned>(t: String) -> Result<T, StoreError> {
@@ -66,6 +83,78 @@ fn fall_aus(z: Fallzeile) -> Result<Case, StoreError> {
 }
 
 impl Datenbank {
+    /// Ändert Fallangaben und protokolliert vorher/nachher atomar.
+    pub async fn fall_bearbeiten(
+        &self,
+        akteur: ActorId,
+        fall: CaseId,
+        a: &FallAenderung,
+    ) -> Result<Case, StoreError> {
+        let mut e = AuditEintrag {
+            akteur,
+            case_id: Some(fall),
+            aktion: AuditAction::CaseEdit,
+            objekt_typ: "case",
+            objekt_id: Some(fall.to_string()),
+            ergebnis: AuditResult::Success,
+            details: json!({}),
+        };
+        self.verlangen(akteur, Permission::CaseEdit, e.clone())
+            .await?;
+        self.verlangen(akteur, Permission::CaseView, e.clone())
+            .await?;
+        if a.status == CaseStatus::Closed {
+            self.verlangen(akteur, Permission::CaseClose, e.clone())
+                .await?;
+        }
+        if a.titel.trim().is_empty() {
+            return Err(StoreError::Eingabe("Falltitel darf nicht leer sein".into()));
+        }
+        if a.ordner
+            .as_ref()
+            .is_some_and(|p| !std::path::Path::new(p).is_absolute())
+        {
+            return Err(StoreError::Eingabe(
+                "Fallordner muss ein absoluter Serverpfad sein".into(),
+            ));
+        }
+        let mut tx = self.pool.begin().await?;
+        let sql = format!("SELECT {FALL_SPALTEN} FROM case_file WHERE id = $1 FOR UPDATE");
+        let z: Fallzeile = sqlx::query_as(sqlx::AssertSqlSafe(sql))
+            .bind(fall.0)
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::NichtGefunden(format!("kein Fall {fall}")))?;
+        let vorher = fall_aus(z)?;
+        let mut nachher = vorher.clone();
+        nachher.title = a.titel.trim().to_string();
+        nachher.description = a.beschreibung.clone();
+        nachher.case_folder = a.ordner.clone();
+        nachher.classification = a.einstufung;
+        nachher.status = a.status;
+        if a.status == CaseStatus::Closed && vorher.status != CaseStatus::Closed {
+            nachher.closed_at = Some(Utc::now());
+        } else if !matches!(
+            a.status,
+            CaseStatus::Closed | CaseStatus::Archived | CaseStatus::Retained
+        ) {
+            nachher.closed_at = None;
+        }
+        sqlx::query("UPDATE case_file SET title = $2, description = $3, case_folder = $4, classification = $5, status = $6, closed_at = $7 WHERE id = $1")
+            .bind(fall.0)
+            .bind(&nachher.title)
+            .bind(&nachher.description)
+            .bind(&nachher.case_folder)
+            .bind(serde_json::to_value(nachher.classification)?.as_str().ok_or(StoreError::Wert("Einstufung ohne Text"))?)
+            .bind(serde_json::to_value(nachher.status)?.as_str().ok_or(StoreError::Wert("Status ohne Text"))?)
+            .bind(nachher.closed_at)
+            .execute(&mut *tx).await?;
+        e.details = json!({"vorher": vorher, "nachher": nachher});
+        crate::audit::schreiben(&mut tx, &e).await?;
+        tx.commit().await?;
+        Ok(nachher)
+    }
+
     /// Fall-ID zu einer Fallnummer (ohne Audit; für die Auswahl vor einer
     /// Aktion, die ihre Berechtigung selbst prüft).
     pub async fn fall_id(&self, nummer: &str) -> Result<Option<CaseId>, StoreError> {

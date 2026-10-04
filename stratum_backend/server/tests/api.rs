@@ -350,6 +350,64 @@ async fn ablauf(db: Datenbank) {
     let tmp = tempfile::tempdir().unwrap();
     let bild = tmp.path().join("leer.dd");
     std::fs::write(&bild, vec![0u8; 1 << 16]).unwrap();
+    let aenderung = json!({"titel": "API-Test geändert", "beschreibung": "Ordner nachgetragen", "ordner": tmp.path().to_str().unwrap(), "einstufung": "confidential", "status": "active"});
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_mia),
+        Some(aenderung.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    let (s, _, bearbeitet) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_chef),
+        Some(aenderung.clone()),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{bearbeitet}");
+    assert_eq!(bearbeitet["id"], fall_id.to_string());
+    assert_eq!(bearbeitet["title"], "API-Test geändert");
+    assert_eq!(
+        bearbeitet["case_folder"],
+        tmp.path().canonicalize().unwrap().to_str().unwrap()
+    );
+    let mut falsch = aenderung.clone();
+    falsch["ordner"] = json!("relativ");
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_chef),
+        Some(falsch),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let mut falsch = aenderung.clone();
+    falsch["ordner"] = json!(bild);
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_chef),
+        Some(falsch),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let mut falsch = aenderung.clone();
+    falsch["titel"] = json!(" ");
+    let (s, _, _) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_chef),
+        Some(falsch),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
     let h = stratum_core::hash_bytes(&std::fs::read(&bild).unwrap());
     let ev = Evidence {
         id: EvidenceId::new(),
@@ -374,6 +432,38 @@ async fn ablauf(db: Datenbank) {
     db.evidence_registrieren(cli, &ev).await.unwrap();
     let (_, _, v) = anfrage(&app, "GET", "/api/v1/faelle/API-1", Some(&t_mia), None).await;
     assert_eq!(v["evidence"][0]["name"], "leer.dd");
+    let mut aufbewahrung = aenderung.clone();
+    aufbewahrung["status"] = json!("retained");
+    let (s, _, v) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_chef),
+        Some(aufbewahrung),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "retained");
+    let (_, _, v) = anfrage(&app, "GET", "/api/v1/faelle/API-1", Some(&t_chef), None).await;
+    assert_eq!(v["evidence"][0]["id"], ev.id.to_string());
+    assert_eq!(v["evidence"][0]["source_uri"], ev.source_uri);
+    let protokoll: serde_json::Value = sqlx::query_scalar("SELECT details FROM audit_event WHERE case_id = $1 AND action = 'CASE_EDIT' AND result = 'success' ORDER BY sequence DESC LIMIT 1")
+        .bind(fall_id.0).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(protokoll["vorher"]["status"], "active");
+    assert_eq!(protokoll["nachher"]["status"], "retained");
+    let mut wiederherstellen = aenderung;
+    wiederherstellen["ordner"] = serde_json::Value::Null;
+    let (s, _, v) = anfrage(
+        &app,
+        "PUT",
+        "/api/v1/faelle/API-1",
+        Some(&t_chef),
+        Some(wiederherstellen),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "active");
+    assert!(v["case_folder"].is_null());
 
     // Analyse als Job, Fortschritt als Server-Sent Events.
     let analyse = json!({"evidence": "leer.dd", "optionen": {"katalog": true}});
@@ -613,6 +703,7 @@ async fn ablauf(db: Datenbank) {
     for a in [
         "LOGIN",
         "CASE_CREATE",
+        "CASE_EDIT",
         "JOB_CREATE",
         "ANALYSIS_START",
         "ANALYSIS_COMPLETE",
