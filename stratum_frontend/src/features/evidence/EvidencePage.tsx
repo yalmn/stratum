@@ -170,7 +170,7 @@ const OPTIONS: [keyof AnalysisOptions, string, string][] = [
   ["katalog", "File catalog", "Directory tree for the explorer, written to the database."],
   ["mft_timeline", "MFT timeline", "SI and FN timestamps of all MFT records."],
   ["usn_journal", "USN journal", "Create, rename and delete records from $UsnJrnl:$J."],
-  ["datei_hashes", "File hashes", "SHA-256 and signature of every file. Reads all content; slow."],
+  ["datei_hashes", "File hashes and formats", "SHA-256 and format identification by signature. Reads every file's content; slow."],
   ["raw_sweep", "Raw keyword sweep", "Search the whole image, including unallocated space."],
   ["ohne_begriffe", "Skip bundled keyword list", "Only analyzers, no keyword search."],
   ["bdp", "Use recorded bdp.info", "Only the partition described by the bdp.info next to the image."],

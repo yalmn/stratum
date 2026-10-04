@@ -181,7 +181,7 @@ export function useVolumes(evidence: string | undefined) {
 const PAGE = 500;
 
 /** Inhalt eines Verzeichnisses, seitenweise nachgeladen. */
-export function useDirectory(evidence: string | undefined, volume: number | undefined, dir: number) {
+export function useDirectory(evidence: string | undefined, volume: number | undefined, dir: number, enabled = true) {
   return useInfiniteQuery({
     queryKey: ["dir", evidence, volume, dir],
     queryFn: ({ pageParam }) =>
@@ -192,7 +192,7 @@ export function useDirectory(evidence: string | undefined, volume: number | unde
       ),
     initialPageParam: "",
     getNextPageParam: (last) => last.naechste ?? undefined,
-    enabled: !!evidence && volume !== undefined,
+    enabled: enabled && !!evidence && volume !== undefined,
     staleTime: 60_000,
   });
 }
@@ -222,8 +222,39 @@ export function useHexWindow(evidence: string, volume: number, record: number, o
     queryKey: ["hex", evidence, volume, record, offset],
     queryFn: () => apiBytes(`/evidence/${evidence}/dateien/${volume}/${record}/inhalt?offset=${offset}&laenge=4096`),
     enabled,
-    placeholderData: keepPreviousData,
-    staleTime: Infinity,
+    staleTime: 0,
+  });
+}
+
+export function useFileSearch(evidence: string, volume: number, record: number) {
+  return useMutation({
+    mutationFn: (wort: string) => api<{ treffer: { offset: number; kodierung: string }[]; gelesen: number; vollstaendig: boolean }>(
+      `/evidence/${evidence}/dateien/${volume}/${record}/suche`, { method: "POST", body: { wort } },
+    ),
+  });
+}
+
+export function useFilePreview(evidence: string, volume: number, record: number, enabled: boolean) {
+  return useQuery({
+    queryKey: ["preview", evidence, volume, record],
+    queryFn: () => apiBytes(`/evidence/${evidence}/dateien/${volume}/${record}/vorschau`),
+    enabled,
+    gcTime: 0,
+  });
+}
+
+export function useCatalogSearch(evidence: string, volume: number, filter: { suche: string; endung: string; format: string }, enabled: boolean) {
+  return useInfiniteQuery({
+    queryKey: ["file-search", evidence, volume, filter],
+    queryFn: ({ pageParam }) => {
+      const q = new URLSearchParams({ volume: String(volume), anzahl: String(PAGE) });
+      for (const [k, v] of Object.entries(filter)) if (v) q.set(k, v);
+      if (pageParam) q.set("nach", pageParam);
+      return api<Page<FileEntry>>(`/evidence/${evidence}/dateisuche?${q}`);
+    },
+    initialPageParam: "",
+    getNextPageParam: (last) => last.naechste ?? undefined,
+    enabled,
   });
 }
 

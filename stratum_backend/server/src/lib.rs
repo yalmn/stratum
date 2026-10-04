@@ -227,8 +227,17 @@ pub fn router(db: Datenbank) -> Router {
             "/api/v1/evidence/{id}/dateien/{volume}/{record}/export",
             get(datei_export),
         )
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/suche",
+            post(datei_suche),
+        )
+        .route(
+            "/api/v1/evidence/{id}/dateien/{volume}/{record}/vorschau",
+            get(datei_vorschau),
+        )
         .route("/api/v1/evidence/{id}/volumes", get(volumes))
         .route("/api/v1/evidence/{id}/dateien", get(dateien))
+        .route("/api/v1/evidence/{id}/dateisuche", get(dateisuche))
         .route("/api/v1/artefakte/{id}/rohfund", get(rohfund))
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/audit/pruefen", post(audit_pruefen))
@@ -262,7 +271,7 @@ async fn sicherheitskoepfe(mut r: Response) -> Response {
     h.insert(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
-            "default-src 'self'; img-src 'self' data:; object-src 'none'; \
+            "default-src 'self'; img-src 'self' data: blob:; object-src 'none'; \
              base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
         ),
     );
@@ -914,6 +923,18 @@ async fn dateien(
     Ok(Json(serde_json::to_value(seite).map_err(StoreError::from)?))
 }
 
+async fn dateisuche(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(id): Path<uuid::Uuid>,
+    Query(q): Query<stratum_store::dateien::DateiFilter>,
+) -> Antwort<Json<Value>> {
+    let seite =
+        z.db.dateien_suchen(u.id, stratum_model::EvidenceId(id), &q)
+            .await?;
+    Ok(Json(serde_json::to_value(seite).map_err(StoreError::from)?))
+}
+
 /// Rohfund zu einem Artefakt aus dem Report des Laufs. Der Report wird vor
 /// dem Lesen gegen seinen SHA-256 aus der Datenbank geprüft, die
 /// Fundkennung gegen den Inhalt nachgerechnet.
@@ -1139,6 +1160,93 @@ async fn datei_inhalt(
     if let Some(g) = groesse {
         h.insert("x-stratum-groesse", HeaderValue::from(g));
     }
+    Ok(r)
+}
+
+#[derive(Deserialize)]
+struct DateiSuchtext {
+    wort: String,
+}
+
+async fn datei_suche(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+    Koerper(a): Koerper<DateiSuchtext>,
+) -> Antwort<Json<Value>> {
+    if a.wort.is_empty() || a.wort.len() > 1024 {
+        return Err(
+            StoreError::Eingabe("Suchtext muss 1 bis 1024 UTF-8-Bytes lang sein".into()).into(),
+        );
+    }
+    let q =
+        z.db.datei_quelle(
+            u.id,
+            stratum_model::EvidenceId(id),
+            volume,
+            record,
+            stratum_store::dateien::Zugriff::Suchen,
+        )
+        .await?;
+    let quelle = q.clone();
+    let wort = a.wort.clone();
+    let v = tokio::task::spawn_blocking(move || {
+        let o = ort(&q, volume, record)?;
+        stratum_lauf::datei::wort_suchen(&o, &a.wort)
+            .map_err(|e| ApiFehler::NichtVerfuegbar(e.to_string()))
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("Suche abgebrochen".into()))
+    .and_then(|v| v);
+    let details = match &v {
+        Ok(v) => {
+            json!({"treffer": v.treffer.len(), "gelesen": v.gelesen, "vollstaendig": v.vollstaendig})
+        }
+        Err(_) => json!({"status": "fehlgeschlagen"}),
+    };
+    z.db.dateisuche_protokollieren(u.id, &quelle, &wort, details, v.is_ok())
+        .await?;
+    Ok(Json(serde_json::to_value(v?).map_err(StoreError::from)?))
+}
+
+async fn datei_vorschau(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((id, volume, record)): DateiPfad,
+) -> Antwort<Response> {
+    let q =
+        z.db.datei_quelle(
+            u.id,
+            stratum_model::EvidenceId(id),
+            volume,
+            record,
+            stratum_store::dateien::Zugriff::Ansehen,
+        )
+        .await?;
+    let groesse = q
+        .groesse
+        .and_then(|g| u64::try_from(g).ok())
+        .ok_or_else(|| StoreError::Eingabe("Dateigröße unbekannt".into()))?;
+    if groesse > 8 * 1024 * 1024 {
+        return Err(StoreError::Eingabe("Vorschau auf 8 MiB begrenzt".into()).into());
+    }
+    let daten = tokio::task::spawn_blocking(move || {
+        let o = ort(&q, volume, record)?;
+        stratum_lauf::datei::vorschau(&o, groesse)
+            .map_err(|e| ApiFehler::NichtVerfuegbar(e.to_string()))
+    })
+    .await
+    .map_err(|_| ApiFehler::NichtVerfuegbar("Lesen abgebrochen".into()))??;
+    if daten.len() as u64 != groesse {
+        return Err(ApiFehler::NichtVerfuegbar(
+            "Dateigröße weicht vom Katalog ab".into(),
+        ));
+    }
+    let mut r = daten.into_response();
+    r.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
     Ok(r)
 }
 

@@ -2,19 +2,20 @@
 // filterbar nach Evidence, Zeitraum, Ereignisart, Entität und Text; Details
 // im Drawer. Filter stehen in der Adresse und sind teilbar.
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { X } from "lucide-react";
 import { DataTable, columnHelper } from "../../components/data-table/DataTable";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
-import { EmptyState, ErrorState, Skeleton, Timestamp } from "../../components/ui/Display";
+import { EmptyState, ErrorState, Skeleton, Timestamp, Tabs } from "../../components/ui/Display";
 import { Input, Select } from "../../components/ui/Input";
 import { Popover } from "../../components/ui/Overlay";
 import { DerivationBadge } from "../../components/forensic/Badges";
 import { useCase, useEventKinds, useTimeline } from "../../lib/api/queries";
 import type { TimelineEvent } from "../../lib/api/types";
 import { count, label } from "../../lib/format";
+import { VisualTimeline } from "../../components/timeline/VisualTimeline";
 import { useDetail } from "../../app/detail";
 
 /** Kurzbeschreibung: Beteiligte nach Rolle, sonst wichtige Attribute. */
@@ -51,11 +52,15 @@ const columns = [
 
 /** `datetime-local` gilt hier als UTC, nie als Zeit des Rechners. */
 function toUtcIso(local: string): string | undefined {
-  return local ? new Date(`${local}:00Z`).toISOString() : undefined;
+  if (!local) return undefined;
+  const date = new Date(`${local.length === 16 ? `${local}:00` : local}Z`);
+  return Number.isFinite(date.getTime()) ? date.toISOString() : undefined;
 }
 
 function fromIso(iso: string | null): string {
-  return iso ? iso.slice(0, 16) : "";
+  if (!iso) return "";
+  const date = new Date(iso);
+  return Number.isFinite(date.getTime()) ? date.toISOString().slice(0, 23) : "";
 }
 
 export function TimelinePage({ number }: { number: string }) {
@@ -72,6 +77,7 @@ export function TimelinePage({ number }: { number: string }) {
     suche: params.get("q") ?? undefined,
   };
   const [text, setText] = useState(filter.suche ?? "");
+  useEffect(() => setText(filter.suche ?? ""), [filter.suche]);
   const tl = useTimeline(number, filter);
   const rows = useMemo(() => tl.data?.pages.flatMap((p) => p.eintraege) ?? [], [tl.data]);
   const loadMore = useCallback(() => {
@@ -109,11 +115,11 @@ export function TimelinePage({ number }: { number: string }) {
         </Select>
         <label className="filter-field">
           <span className="muted">From (UTC)</span>
-          <Input type="datetime-local" value={fromIso(filter.von ?? null)} onChange={(e) => set({ von: toUtcIso(e.target.value) })} />
+          <Input type="datetime-local" step="0.001" value={fromIso(filter.von ?? null)} onChange={(e) => set({ von: toUtcIso(e.target.value) })} />
         </label>
         <label className="filter-field">
           <span className="muted">To (UTC)</span>
-          <Input type="datetime-local" value={fromIso(filter.bis ?? null)} onChange={(e) => set({ bis: toUtcIso(e.target.value) })} />
+          <Input type="datetime-local" step="0.001" value={fromIso(filter.bis ?? null)} onChange={(e) => set({ bis: toUtcIso(e.target.value) })} />
         </label>
         <Popover
           trigger={({ toggle }) => (
@@ -168,6 +174,7 @@ export function TimelinePage({ number }: { number: string }) {
           </Button>
         )}
       </div>
+      <Tabs active={params.get("view") ?? "visual"} onSelect={(view) => set({ view })} items={[{ id: "visual", label: "Visual timeline" }, { id: "table", label: "Table" }]} />
       <div className="timeline-body">
         {tl.isPending && <Skeleton lines={10} />}
         {tl.error && <ErrorState title="Timeline could not be loaded." reason={tl.error.message} />}
@@ -177,7 +184,8 @@ export function TimelinePage({ number }: { number: string }) {
             text={active ? "Widen the time range or clear filters." : "Run an analysis; parsed artifacts become events here."}
           />
         )}
-        {rows.length > 0 && (
+        {rows.length > 0 && params.get("view") !== "table" && <VisualTimeline events={rows} selected={detail?.kind === "event" ? detail.id : null} onSelect={(e) => open("event", e.id)} onRange={(von, bis) => set({ von, bis })} onMore={loadMore} hasMore={!!tl.hasNextPage} loading={tl.isFetchingNextPage} />}
+        {rows.length > 0 && params.get("view") === "table" && (
           <DataTable
             label="Timeline"
             data={rows}

@@ -1058,6 +1058,112 @@ async fn ablauf(db: Datenbank) {
     let (s, _, _) = anfrage(&app, "POST", &datei(101, "hash"), Some(&t_tom), None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 
+    // Katalogsuche umfasst das Volume, nicht nur das aktuelle Verzeichnis.
+    let suchen = format!("/api/v1/evidence/{}/dateisuche?volume=122683392", ev.id);
+    let (status, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{suchen}&endung=exe"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["eintraege"].as_array().unwrap().len(), 1);
+    assert_eq!(v["eintraege"][0]["name"], "calc.exe");
+    let (status, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{suchen}&suche=%25"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["eintraege"].as_array().unwrap().is_empty());
+    let (status, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{suchen}&format=pe"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["eintraege"].as_array().unwrap().is_empty());
+    let (status, _, v) = anfrage(
+        &app,
+        "GET",
+        &format!("{suchen}&anzahl=1"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    let mut next = v["naechste"].as_str().unwrap().to_string();
+    let mut names = vec![v["eintraege"][0]["name"].as_str().unwrap().to_string()];
+    loop {
+        let encoded: String = next
+            .as_bytes()
+            .iter()
+            .map(|b| format!("%{b:02X}"))
+            .collect();
+        let (status, _, v) = anfrage(
+            &app,
+            "GET",
+            &format!("{suchen}&anzahl=1&nach={encoded}"),
+            Some(&t_tom),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{v}");
+        names.push(v["eintraege"][0]["name"].as_str().unwrap().to_string());
+        match v["naechste"].as_str() {
+            Some(n) => next = n.to_string(),
+            None => break,
+        }
+    }
+    assert_eq!(names.len(), 3);
+    names.sort();
+    names.dedup();
+    assert_eq!(names.len(), 3);
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("{suchen}&nach=kaputt"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = anfrage(&app, "GET", &suchen, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    // Inhaltssuche: leere Anfrage wird abgelehnt; defektes Image wird als Fehler protokolliert.
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        &datei(101, "suche"),
+        Some(&t_tom),
+        Some(json!({"wort": ""})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        &datei(101, "suche"),
+        Some(&t_tom),
+        Some(json!({"wort": "Geheimwort"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let result: (String, String) = sqlx::query_as("SELECT result, details::text FROM audit_event WHERE action = 'SEARCH_RUN' ORDER BY sequence DESC LIMIT 1").fetch_one(db.pool()).await.unwrap();
+    assert_eq!(result.0, "failure");
+    assert!(!result.1.contains("Geheimwort"));
+    assert!(result.1.contains("suchtext_sha256"));
+    let (status, _, _) = anfrage(&app, "GET", &datei(101, "vorschau"), Some(&t_tom), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
     // Registrierung über die API, Freigabe und Passwortpflicht.
     let lea = json!({"name": "lea", "anzeigename": "Lea L.", "passwort": "lea-passwort-1234"});
     let (s, _, v) = anfrage(&app, "POST", "/api/v1/registrierung", None, Some(lea)).await;

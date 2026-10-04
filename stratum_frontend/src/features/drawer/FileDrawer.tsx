@@ -1,24 +1,27 @@
 // Datei im Context Drawer: Überblick, Zeitstempel (SI und FN), NTFS,
 // Hashes, Inhalt als Hex und Strings. Lesen des Inhalts steht im Audit.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Activity, ChevronLeft, ChevronRight, Download, Fingerprint } from "lucide-react";
 import { Button } from "../../components/ui/Button";
 import { CodeBlock, CopyButton, ErrorState, HashValue, PropertyList, Skeleton, Tabs, Timestamp } from "../../components/ui/Display";
 import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
 import { HexViewer, strings } from "../../components/forensic/HexViewer";
-import { fileExportUrl, useFileEntry, useHashFile, useHexWindow } from "../../lib/api/queries";
+import { fileExportUrl, useFileEntry, useHashFile, useHexWindow, useFileSearch, useFilePreview } from "../../lib/api/queries";
+import { Input, Select } from "../../components/ui/Input";
 import { bytes, count, fileAttributes } from "../../lib/format";
 import { useSession } from "../../lib/permissions";
 
 const WINDOW = 4096;
 
 function parse(id: string): [string, number, number] | null {
-  const [ev, vol, rec] = id.split("|");
+  const parts = id.split("|");
+  if (parts.length !== 3) return null;
+  const [ev, vol, rec] = parts;
   const v = Number(vol);
   const r = Number(rec);
-  return ev && Number.isFinite(v) && Number.isFinite(r) ? [ev, v, r] : null;
+  return ev && vol && rec && Number.isSafeInteger(v) && v >= 0 && Number.isSafeInteger(r) && r >= 0 ? [ev, v, r] : null;
 }
 
 export function FileDrawer({ id, caseNumber, onClose }: { id: string; caseNumber: string; onClose: () => void }) {
@@ -30,7 +33,7 @@ export function FileDrawer({ id, caseNumber, onClose }: { id: string; caseNumber
       </DrawerFrame>
     );
   }
-  return <FileView evidence={p[0]} volume={p[1]} record={p[2]} caseNumber={caseNumber} onClose={onClose} />;
+  return <FileView key={id} evidence={p[0]} volume={p[1]} record={p[2]} caseNumber={caseNumber} onClose={onClose} />;
 }
 
 function FileView({
@@ -50,7 +53,9 @@ function FileView({
   const { can } = useSession();
   const navigate = useNavigate();
   const hash = useHashFile(evidence, volume, record);
-  const [view, setView] = useState<"hex" | "strings" | null>(null);
+  const [view, setView] = useState<"hex" | "strings" | "text" | "preview" | null>("hex");
+  const search = useFileSearch(evidence, volume, record);
+  const [word, setWord] = useState("");
   const [offset, setOffset] = useState(0);
 
   if (entry.isPending) {
@@ -100,6 +105,32 @@ function FileView({
           Show in timeline
         </Button>
       </div>
+      {!f.is_directory && can("search.run") && (
+        <DrawerSection title="Find words in this file">
+          <form className="row" onSubmit={(e) => { e.preventDefault(); if (word) search.mutate(word); }}>
+            <Input aria-label="Word to find" placeholder="Word or phrase" value={word} onChange={(e) => setWord(e.target.value)} maxLength={1024} />
+            <Button type="submit" size="sm" disabled={!word || search.isPending}>{search.isPending ? "Searching…" : "Search"}</Button>
+          </form>
+          <p className="muted">Literal, case-sensitive UTF-8 and UTF-16LE. Up to 256 MiB and 500 matches. Offsets refer to the logical file content.</p>
+          {search.error && <ErrorState title="Search failed" reason={search.error.message} />}
+          {search.data && <>
+            <p role="status">Search for “{search.variables}”: {count(search.data.treffer.length)} matches in {bytes(search.data.gelesen)}. {search.data.vollstaendig ? "Whole file searched." : "Search limit reached; results are incomplete."}</p>
+            <div className="file-matches">{search.data.treffer.map((t) => <Button key={`${t.offset}-${t.kodierung}`} size="sm" variant="ghost" onClick={() => { setOffset(Math.floor(t.offset / WINDOW) * WINDOW); setView("hex"); }}>0x{t.offset.toString(16).toUpperCase()} · {t.kodierung}</Button>)}</div>
+          </>}
+        </DrawerSection>
+      )}
+      {!f.is_directory && view && (
+        <ContentSection
+          evidence={evidence}
+          volume={volume}
+          record={record}
+          size={size}
+          offset={offset}
+          setOffset={setOffset}
+          view={view}
+          setView={setView}
+        />
+      )}
       <DrawerSection title="Overview">
         <PropertyList
           items={[
@@ -112,7 +143,10 @@ function FileView({
             ],
             ["Size", f.is_directory ? null : <span className="mono" title={`${count(size)} bytes`}>{bytes(size)}</span>],
             ["Valid length", f.valid_length !== null ? <span className="mono">{count(f.valid_length)}</span> : null],
-            ["Type", f.file_type ?? f.mime],
+            ["Detected format", f.file_type ?? "Not identified; extension is not proof of format"],
+            ["MIME", f.mime],
+            ["Signature bytes", f.signature ? <span className="mono">{f.signature.bytes} at logical offset 0x{f.signature.offset.toString(16)}</span> : null],
+            ["Evidence", <span className="mono">{evidence}</span>],
             ["Other names", others.length > 0 ? others.map((o) => o.path).join(", ") : null],
           ]}
         />
@@ -195,18 +229,6 @@ function FileView({
           {hash.error && <ErrorState title="Hash failed." reason={hash.error.message} />}
         </DrawerSection>
       )}
-      {!f.is_directory && view && (
-        <ContentSection
-          evidence={evidence}
-          volume={volume}
-          record={record}
-          size={size}
-          offset={offset}
-          setOffset={setOffset}
-          view={view}
-          setView={setView}
-        />
-      )}
     </DrawerFrame>
   );
 }
@@ -227,10 +249,14 @@ function ContentSection({
   size: number;
   offset: number;
   setOffset: (o: number) => void;
-  view: "hex" | "strings";
-  setView: (v: "hex" | "strings") => void;
+  view: "hex" | "strings" | "text" | "preview";
+  setView: (v: "hex" | "strings" | "text" | "preview") => void;
 }) {
-  const win = useHexWindow(evidence, volume, record, offset, true);
+  const win = useHexWindow(evidence, volume, record, offset, view !== "preview");
+  const preview = useFilePreview(evidence, volume, record, view === "preview" && size <= 8 * 1024 * 1024);
+  const [jump, setJump] = useState(String(offset));
+  const [encoding, setEncoding] = useState("utf-8");
+  useEffect(() => setJump(String(offset)), [offset]);
   const end = Math.min(size, offset + WINDOW);
   return (
     <DrawerSection
@@ -247,20 +273,56 @@ function ContentSection({
     >
       <Tabs
         active={view}
-        onSelect={(v) => setView(v as "hex" | "strings")}
+        onSelect={(v) => setView(v as "hex" | "strings" | "text" | "preview")}
         items={[
-          { id: "hex", label: "Hex" },
+          { id: "hex", label: "Raw / Hex" },
+          { id: "text", label: "Text" },
+          { id: "preview", label: "Image preview" },
           { id: "strings", label: "Strings" },
         ]}
       />
-      {win.isPending && <Skeleton lines={8} />}
-      {win.error && <ErrorState title="Content could not be read." reason={win.error.message} />}
-      {win.data &&
+      <p className="muted">Logical file bytes. NTFS compression and WOF are decoded; the displayed offset is not a physical image offset.</p>
+      {view === "text" && <Select value={encoding} onChange={(e) => setEncoding(e.target.value)} aria-label="Text encoding"><option value="utf-8">UTF-8</option><option value="utf-16le">UTF-16LE</option><option value="utf-16be">UTF-16BE</option></Select>}
+      {view !== "preview" && <form className="row" onSubmit={(e) => { e.preventDefault(); const n = Number(jump); if (Number.isSafeInteger(n) && n >= 0 && n <= size) setOffset(n); }}>
+        <Input aria-label="Logical byte offset, decimal or hexadecimal" value={jump} onChange={(e) => setJump(e.target.value)} placeholder="Byte offset or 0x…" />
+        <Button size="sm" type="submit">Go to offset</Button>
+      </form>}
+      {view === "preview" && <>
+        <p className="muted">PNG, JPEG and GIF only, up to 8 MiB. Preview is decoded from file content.</p>
+        {size > 8 * 1024 * 1024 && <ErrorState title="File exceeds the 8 MiB preview limit." />}
+        {preview.isFetching && <Skeleton lines={6} />}
+        {preview.error && <ErrorState title="Preview could not be read." reason={preview.error.message} />}
+        {preview.data && <ImagePreview data={preview.data.bytes} />}
+      </>}
+      {view !== "preview" && win.isPending && <Skeleton lines={8} />}
+      {view !== "preview" && win.error && <ErrorState title="Content could not be read." reason={win.error.message} />}
+      {view !== "preview" && win.data &&
         (view === "hex" ? (
           <HexViewer bytes={win.data.bytes} offset={offset} />
+        ) : view === "text" ? (
+          <CodeBlock>{new TextDecoder(encoding).decode(win.data.bytes).replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, "·") || "(empty)"}</CodeBlock>
         ) : (
           <CodeBlock>{strings(win.data.bytes).join("\n") || "(no strings of 4 or more characters in this block)"}</CodeBlock>
         ))}
     </DrawerSection>
   );
+}
+
+function ImagePreview({ data }: { data: Uint8Array }) {
+  const png = [137, 80, 78, 71, 13, 10, 26, 10].every((v, i) => data[i] === v);
+  const jpeg = data[0] === 255 && data[1] === 216 && data[2] === 255;
+  const gif = ["GIF87a", "GIF89a"].includes(new TextDecoder().decode(data.subarray(0, 6)));
+  const mime = png ? "image/png" : jpeg ? "image/jpeg" : gif ? "image/gif" : null;
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setFailed(false);
+    if (!mime) { setUrl(null); return; }
+    const u = URL.createObjectURL(new Blob([new Uint8Array(data)], { type: mime }));
+    setUrl(u);
+    return () => URL.revokeObjectURL(u);
+  }, [data, mime]);
+  if (!mime) return <ErrorState title="No supported raster image signature." reason="Use Raw / Hex or export the file for another viewer." />;
+  if (failed) return <ErrorState title="The browser could not decode this image." />;
+  return url ? <img className="file-preview" src={url} alt="Preview of evidence file" onError={() => setFailed(true)} /> : null;
 }

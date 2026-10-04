@@ -138,6 +138,7 @@ export interface FileEntry {
   mft_record_offset: number | null;
   sha256: string | null;
   file_type: string | null;
+  signature: { offset: number; bytes: string } | null;
   mime: string | null;
   hash_error: string | null;
   error: string | null;

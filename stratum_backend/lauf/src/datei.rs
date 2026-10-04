@@ -103,7 +103,18 @@ pub fn schreiben<W: Write>(o: &DateiOrt<'_>, out: W) -> Result<(W, DateiHashes),
 /// Liefert höchstens [`FENSTER_MAX`] Bytes ab `offset`. Gelesen wird ab dem
 /// Anfang der Datei; nach dem Fenster bricht das Lesen ab.
 pub fn ausschnitt(o: &DateiOrt<'_>, offset: u64, laenge: u64) -> Result<Vec<u8>, LaufFehler> {
-    let laenge = laenge.min(FENSTER_MAX);
+    fenster_lesen(o, offset, laenge.min(FENSTER_MAX))
+}
+
+/// Vollständige Vorschau bis 8 MiB; größere Dateien werden abgelehnt.
+pub fn vorschau(o: &DateiOrt<'_>, groesse: u64) -> Result<Vec<u8>, LaufFehler> {
+    if groesse > 8 * 1024 * 1024 {
+        return Err(LaufFehler::Eingabe("Vorschau auf 8 MiB begrenzt".into()));
+    }
+    fenster_lesen(o, 0, groesse.saturating_add(1))
+}
+
+fn fenster_lesen(o: &DateiOrt<'_>, offset: u64, laenge: u64) -> Result<Vec<u8>, LaufFehler> {
     let img = ImageReader::open(o.image)
         .kontext(|| format!("Image nicht lesbar: {}", o.image.display()))?;
     let mut vol = oeffnen(&img, o)?;
@@ -123,6 +134,156 @@ pub fn ausschnitt(o: &DateiOrt<'_>, offset: u64, laenge: u64) -> Result<Vec<u8>,
             quelle: Box::new(e),
         }),
     }
+}
+
+/// Höchstens 256 MiB je interaktiver Inhaltssuche.
+pub const SUCHE_MAX: u64 = 256 * 1024 * 1024;
+
+/// Ein wörtlicher Treffer im logischen Dateiinhalt, kein physischer Image-Offset.
+#[derive(Debug, serde::Serialize)]
+pub struct WortTreffer {
+    /// Byte-Offset ab Dateianfang.
+    pub offset: u64,
+    /// UTF-8 oder UTF-16LE.
+    pub kodierung: &'static str,
+}
+
+/// Suchumfang und Treffer; eine begrenzte Suche ist ausdrücklich unvollständig.
+#[derive(Debug, serde::Serialize)]
+pub struct WortSuche {
+    /// Treffer, höchstens 500.
+    pub treffer: Vec<WortTreffer>,
+    /// Tatsächlich geprüfte Bytes.
+    pub gelesen: u64,
+    /// Das Dateiende wurde ohne Begrenzung erreicht.
+    pub vollstaendig: bool,
+}
+
+struct Muster {
+    bytes: Vec<u8>,
+    rueck: Vec<usize>,
+    stand: usize,
+    kodierung: &'static str,
+}
+
+impl Muster {
+    fn neu(bytes: Vec<u8>, kodierung: &'static str) -> Self {
+        let mut rueck = vec![0; bytes.len()];
+        let mut j = 0;
+        for i in 1..bytes.len() {
+            while j > 0 && bytes[i] != bytes[j] {
+                j = rueck[j - 1];
+            }
+            if bytes[i] == bytes[j] {
+                j += 1;
+            }
+            rueck[i] = j;
+        }
+        Self {
+            bytes,
+            rueck,
+            stand: 0,
+            kodierung,
+        }
+    }
+
+    fn byte(&mut self, b: u8) -> bool {
+        while self.stand > 0 && b != self.bytes[self.stand] {
+            self.stand = self.rueck[self.stand - 1];
+        }
+        if b == self.bytes[self.stand] {
+            self.stand += 1;
+        }
+        if self.stand == self.bytes.len() {
+            self.stand = self.rueck[self.stand - 1];
+            true
+        } else {
+            false
+        }
+    }
+}
+
+struct WortScanner {
+    muster: [Muster; 2],
+    ergebnis: WortSuche,
+    gestoppt: bool,
+}
+
+impl WortScanner {
+    fn neu(wort: &str) -> Result<Self, LaufFehler> {
+        if wort.is_empty() || wort.len() > 1024 {
+            return Err(LaufFehler::Eingabe(
+                "Suchtext muss 1 bis 1024 UTF-8-Bytes lang sein".into(),
+            ));
+        }
+        let utf16 = wort.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        Ok(Self {
+            muster: [
+                Muster::neu(wort.as_bytes().to_vec(), "UTF-8"),
+                Muster::neu(utf16, "UTF-16LE"),
+            ],
+            ergebnis: WortSuche {
+                treffer: Vec::new(),
+                gelesen: 0,
+                vollstaendig: false,
+            },
+            gestoppt: false,
+        })
+    }
+}
+
+impl Write for WortScanner {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for &b in buf {
+            if self.ergebnis.gelesen >= SUCHE_MAX || self.ergebnis.treffer.len() >= 500 {
+                self.gestoppt = true;
+                return Err(std::io::Error::other("Suchgrenze erreicht"));
+            }
+            self.ergebnis.gelesen += 1;
+            for m in &mut self.muster {
+                if m.byte(b) {
+                    if self.ergebnis.treffer.len() == 500 {
+                        self.gestoppt = true;
+                        return Err(std::io::Error::other("Suchgrenze erreicht"));
+                    }
+                    self.ergebnis.treffer.push(WortTreffer {
+                        offset: self.ergebnis.gelesen - m.bytes.len() as u64,
+                        kodierung: m.kodierung,
+                    });
+                }
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Sucht wörtlich und mit Beachtung der Groß-/Kleinschreibung in UTF-8 und
+/// UTF-16LE. Der Scanner behält nur Muster und Treffer, auch über Blockgrenzen.
+pub fn wort_suchen(o: &DateiOrt<'_>, wort: &str) -> Result<WortSuche, LaufFehler> {
+    let mut scanner = WortScanner::neu(wort)?;
+    let img = ImageReader::open(o.image).kontext(|| "Image nicht lesbar".into())?;
+    let mut vol = oeffnen(&img, o)?;
+    let prefetch = |offset: u64, len: u64| img.prefetch(offset, len);
+    match vol.write_file_by_record(o.mft, "", &prefetch, &mut scanner) {
+        Ok(Some(_)) => scanner.ergebnis.vollstaendig = true,
+        Ok(None) => {
+            return Err(LaufFehler::Eingabe(
+                "Datei hat keinen lesbaren Datenstrom".into(),
+            ))
+        }
+        Err(_) if scanner.gestoppt => (),
+        Err(e) => {
+            return Err(LaufFehler::Schritt {
+                kontext: "Dateisuche fehlgeschlagen".into(),
+                quelle: Box::new(e),
+            })
+        }
+    }
+    Ok(scanner.ergebnis)
 }
 
 /// Behält nur die Bytes im Bereich `von..bis` und meldet danach einen Fehler,
@@ -158,6 +319,75 @@ impl Write for Fenster {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wortsuche_unicode_ueber_blockgrenzen() {
+        let mut s = WortScanner::neu("Grüße").unwrap();
+        let mut bytes = b"prefix ".to_vec();
+        bytes.extend_from_slice("Grüße".as_bytes());
+        bytes.extend_from_slice(b" xx ");
+        let utf16_offset = bytes.len() as u64;
+        bytes.extend("Grüße".encode_utf16().flat_map(u16::to_le_bytes));
+        for chunk in bytes.chunks(1) {
+            s.write_all(chunk).unwrap();
+        }
+        assert_eq!(s.ergebnis.treffer.len(), 2);
+        assert_eq!(s.ergebnis.treffer[0].offset, 7);
+        assert_eq!(s.ergebnis.treffer[0].kodierung, "UTF-8");
+        assert_eq!(s.ergebnis.treffer[1].offset, utf16_offset);
+        assert_eq!(s.ergebnis.treffer[1].kodierung, "UTF-16LE");
+    }
+
+    #[test]
+    fn wortsuche_ueberlappung_und_grenzen() {
+        let mut s = WortScanner::neu("aba").unwrap();
+        s.write_all(b"ababa").unwrap();
+        assert_eq!(
+            s.ergebnis
+                .treffer
+                .iter()
+                .map(|t| t.offset)
+                .collect::<Vec<_>>(),
+            [0, 2]
+        );
+        assert!(WortScanner::neu("").is_err());
+        assert!(WortScanner::neu(&"a".repeat(1025)).is_err());
+        let mut s = WortScanner::neu("a").unwrap();
+        assert!(s.write_all(&vec![b'a'; 501]).is_err());
+        assert_eq!(s.ergebnis.treffer.len(), 500);
+        assert!(s.gestoppt);
+        let mut s = WortScanner::neu("z").unwrap();
+        s.ergebnis.gelesen = SUCHE_MAX - 1;
+        assert!(s.write_all(b"xy").is_err());
+        assert_eq!(s.ergebnis.gelesen, SUCHE_MAX);
+    }
+
+    #[test]
+    fn wortsuche_entspricht_unabhaengiger_fenstersuche() {
+        let text = b"abacabababcabababacaba";
+        for word in ["a", "aba", "abab", "abac", "x"] {
+            let expected: Vec<u64> = text
+                .windows(word.len())
+                .enumerate()
+                .filter(|(_, b)| *b == word.as_bytes())
+                .map(|(i, _)| i as u64)
+                .collect();
+            for size in 1..=text.len() {
+                let mut s = WortScanner::neu(word).unwrap();
+                for chunk in text.chunks(size) {
+                    s.write_all(chunk).unwrap();
+                }
+                assert_eq!(
+                    s.ergebnis
+                        .treffer
+                        .iter()
+                        .map(|t| t.offset)
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+        }
+    }
 
     #[test]
     fn fenster_schneidet_und_bricht_ab() {

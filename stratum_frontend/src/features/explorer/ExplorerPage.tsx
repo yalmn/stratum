@@ -2,7 +2,7 @@
 // gewählten Verzeichnisses in der Mitte, Datei-Details im Context Drawer.
 // Zustand in der Adresse: Evidence, Volume, Verzeichnis und Pfad dorthin.
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Activity,
@@ -21,10 +21,10 @@ import { DataTable, columnHelper } from "../../components/data-table/DataTable";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { EmptyState, ErrorState, Skeleton, Timestamp } from "../../components/ui/Display";
-import { Select } from "../../components/ui/Input";
+import { Input, Select } from "../../components/ui/Input";
 import { SplitPane } from "../../components/ui/Layout";
 import { useContextMenu } from "../../components/ui/Overlay";
-import { fileExportUrl, useCase, useDirectory, useSubdirs, useVolumes } from "../../lib/api/queries";
+import { fileExportUrl, useCase, useDirectory, useSubdirs, useVolumes, useCatalogSearch } from "../../lib/api/queries";
 import type { Evidence, FileEntry } from "../../lib/api/types";
 import { bytes, count, fileAttributes } from "../../lib/format";
 import { useSession } from "../../lib/permissions";
@@ -197,6 +197,7 @@ function Listing({
   trail,
   onEnter,
   base,
+  filter,
 }: {
   evidence: string;
   volume: number;
@@ -204,8 +205,12 @@ function Listing({
   trail: Crumb[];
   onEnter: (trail: Crumb[]) => void;
   base: string;
+  filter: { suche: string; endung: string; format: string };
 }) {
-  const list = useDirectory(evidence, volume, dir);
+  const searching = !!(filter.suche || filter.endung || filter.format);
+  const directory = useDirectory(evidence, volume, dir, !searching);
+  const found = useCatalogSearch(evidence, volume, filter, searching);
+  const list = searching ? found : directory;
   const { detail, open } = useDetail();
   const { can } = useSession();
   const navigate = useNavigate();
@@ -217,6 +222,8 @@ function Listing({
     }
   }, [list]);
   const id = (e: FileEntry) => fileDetailId(evidence, volume, e.mft_record);
+  const rowId = (e: FileEntry) => JSON.stringify([e.mft_record, e.parent_record, e.name]);
+  const selected = rows.find((e) => detail?.kind === "file" && detail.id === id(e));
   const enter = (e: FileEntry) => (e.is_directory ? onEnter([...trail, { record: e.mft_record, name: e.name }]) : open("file", id(e)));
 
   if (list.isPending) {
@@ -226,18 +233,18 @@ function Listing({
     return <ErrorState title="Folder could not be read." reason={list.error.message} />;
   }
   if (rows.length === 0) {
-    return <EmptyState title="This folder is empty." />;
+    return <EmptyState title={searching ? "No matching files in this volume." : "This folder is empty."} />;
   }
   return (
     <>
       <DataTable
-        label="Folder content"
+        label={searching ? "Files matching catalog filters" : "Folder content"}
         data={rows}
-        columns={columns}
-        rowId={id}
+        columns={searching ? [...columns, h.accessor("path", { header: "Path", size: 320, cell: (c) => <span className="mono">{c.getValue()}</span> })] : columns}
+        rowId={rowId}
         grow={["name"]}
         numeric={["size"]}
-        selected={detail?.kind === "file" ? detail.id : null}
+        selected={selected ? rowId(selected) : null}
         onSelect={(e) => open("file", id(e))}
         onOpen={enter}
         onEndReached={loadMore}
@@ -288,6 +295,11 @@ export function ExplorerPage({ number }: { number: string }) {
   const volumes = useVolumes(evidence);
   const volume = params.get("vol") !== null ? Number(params.get("vol")) : volumes.data?.[0]?.volume_offset;
   const trail = parseTrail(params.get("pfad"));
+  const filter = { suche: params.get("q") ?? "", endung: params.get("ext") ?? "", format: params.get("fmt") ?? "" };
+  const [searchText, setSearchText] = useState(filter.suche);
+  useEffect(() => setSearchText(filter.suche), [filter.suche]);
+  const { can } = useSession();
+  const changeFilter = (k: string, v: string) => setParams((p) => { const n = new URLSearchParams(p); if (v) n.set(k, v); else n.delete(k); n.delete("detail"); return n; });
   const dir = trail.length > 0 ? trail[trail.length - 1]!.record : ROOT;
 
   const go = (t: Crumb[], changes: Record<string, string | null> = {}) =>
@@ -362,6 +374,17 @@ export function ExplorerPage({ number }: { number: string }) {
           ))}
         </nav>
       </div>
+      {can("search.run") && <form className="filter-bar" onSubmit={(e) => { e.preventDefault(); changeFilter("q", searchText.trim()); }}>
+        <Input aria-label="Find file path in the whole volume" placeholder="Find file name or path across this volume" value={searchText} onChange={(e) => setSearchText(e.target.value)} />
+        <Button type="submit" size="sm">Find files</Button>
+        <Input aria-label="File extension" placeholder="Extension, e.g. png" value={filter.endung} onChange={(e) => changeFilter("ext", e.target.value.trim())} />
+        <Select aria-label="Detected format" value={filter.format} onChange={(e) => changeFilter("fmt", e.target.value)}>
+          <option value="">All detected formats</option>
+          {["png", "jpeg", "gif", "pdf", "pe", "elf", "zip", "sqlite3"].map((f) => <option key={f} value={f}>{f.toUpperCase()} (signature)</option>)}
+        </Select>
+        {(filter.suche || filter.endung || filter.format) && <Button size="sm" variant="ghost" onClick={() => { setSearchText(""); setParams((p) => { const n = new URLSearchParams(p); for (const k of ["q", "ext", "fmt"]) n.delete(k); return n; }); }}>Clear filters</Button>}
+        <span className="muted">Search scope: whole volume. Detected formats require content identification during analysis.</span>
+      </form>}
       {volumes.isPending && evidence && <Skeleton lines={6} />}
       {volumes.data && volumes.data.length === 0 && (
         <div className="page">
@@ -386,7 +409,7 @@ export function ExplorerPage({ number }: { number: string }) {
             left={<Tree evidence={evidence} volume={volume} current={dir} label={volLabel(volume)} onOpen={(t) => go(t)} />}
             right={
               <div className="explorer-list">
-                <Listing key={`${evidence}-${volume}-${dir}`} evidence={evidence} volume={volume} dir={dir} trail={trail} onEnter={(t) => go(t)} base={`/cases/${encodeURIComponent(number)}`} />
+                <Listing key={`${evidence}-${volume}-${dir}`} evidence={evidence} volume={volume} dir={dir} filter={filter} trail={trail} onEnter={(t) => go(t)} base={`/cases/${encodeURIComponent(number)}`} />
               </div>
             }
           />

@@ -29,6 +29,32 @@ pub struct Verzeichnis {
     pub anzahl: i64,
 }
 
+/// Suche im gesamten Volume-Katalog, getrennt nach Endung und erkanntem Format.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct DateiFilter {
+    /// Volume-Offset.
+    pub volume: i64,
+    /// Wörtlicher Teil des Pfads.
+    pub suche: Option<String>,
+    /// Endung ohne Punkt, zum Beispiel png.
+    pub endung: Option<String>,
+    /// Signaturtyp, nur für bereits geprüfte Inhalte.
+    pub format: Option<String>,
+    /// Seitenmarke.
+    pub nach: Option<String>,
+    /// Seitengröße, höchstens 1000.
+    pub anzahl: Option<i64>,
+}
+
+fn suchmuster(s: &str) -> String {
+    format!(
+        "%{}%",
+        s.replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    )
+}
+
 /// Marke `d|datensatz|name`: d ist 0 für Verzeichnisse, 1 für Dateien.
 fn marke_lesen(m: &str) -> Result<(bool, i64, String), StoreError> {
     let falsch = || StoreError::Eingabe("Seitenmarke ungültig".into());
@@ -173,6 +199,77 @@ impl Datenbank {
         Ok(zeilen.into_iter().map(|j| j.0).collect())
     }
 
+    /// Durchsucht Metadaten, ohne Dateiinhalt zu lesen. Seitenmarken enthalten
+    /// den vollständigen Sortierschlüssel, auch für mehrere Hardlinks.
+    pub async fn dateien_suchen(
+        &self,
+        akteur: ActorId,
+        evidence: EvidenceId,
+        f: &DateiFilter,
+    ) -> Result<Seite, StoreError> {
+        let mut e = self
+            .datei_lesen_erlaubt(akteur, evidence, json!({"art": "katalogsuche"}))
+            .await?;
+        e.aktion = AuditAction::SearchRun;
+        self.verlangen(akteur, Permission::SearchRun, e.clone())
+            .await?;
+        for text in [&f.suche, &f.endung, &f.format].into_iter().flatten() {
+            if text.len() > 1024 {
+                return Err(StoreError::Eingabe("Filter zu lang".into()));
+            }
+        }
+        let nach: Option<(i64, i64, String)> = f
+            .nach
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|_| StoreError::Eingabe("Seitenmarke ungültig".into()))?;
+        let (rec, parent, name) = match nach {
+            Some((r, d, n)) => (Some(r), Some(d), Some(n)),
+            None => (None, None, None),
+        };
+        let anzahl = f.anzahl.unwrap_or(500).clamp(1, 1000);
+        let sql = concat!(
+            "SELECT ",
+            datei_json!(),
+            ", f.mft_record, f.parent_record, f.name FROM file f
+            WHERE f.evidence_id = $1 AND f.volume_offset = $2 AND NOT f.is_directory
+            AND ($3::text IS NULL OR f.path ILIKE $3 ESCAPE E'\\\\')
+            AND ($4::text IS NULL OR lower(right(f.name, length($4) + 1)) = '.' || lower($4))
+            AND ($5::text IS NULL OR f.file_type = $5)
+            AND ($6::bigint IS NULL OR (f.mft_record, f.parent_record, f.name) > ($6, $7, $8))
+            ORDER BY f.mft_record, f.parent_record, f.name LIMIT $9"
+        );
+        let zeilen: Vec<(Json<Value>, i64, i64, String)> = sqlx::query_as(sql)
+            .bind(evidence.0)
+            .bind(f.volume)
+            .bind(f.suche.as_deref().map(suchmuster))
+            .bind(f.endung.as_deref().map(|s| s.trim_start_matches('.')))
+            .bind(&f.format)
+            .bind(rec)
+            .bind(parent)
+            .bind(name)
+            .bind(anzahl + 1)
+            .fetch_all(&self.pool)
+            .await?;
+        let mehr = zeilen.len() as i64 > anzahl;
+        let mut eintraege = Vec::new();
+        let mut naechste = None;
+        for (i, (v, r, d, n)) in zeilen.into_iter().take(anzahl as usize).enumerate() {
+            if mehr && i as i64 == anzahl - 1 {
+                naechste = Some(serde_json::to_string(&(r, d, n))?);
+            }
+            eintraege.push(v.0);
+        }
+        e.details = json!({"art": "katalogsuche", "volume": f.volume, "suche": f.suche,
+            "endung": f.endung, "format": f.format, "anzahl": eintraege.len()});
+        self.audit(&e).await?;
+        Ok(Seite {
+            eintraege,
+            naechste,
+        })
+    }
+
     /// Inhalt eines Verzeichnisses: erst Unterverzeichnisse, dann Dateien,
     /// je nach Name. `hat_kinder` sagt, ob ein Unterverzeichnis Einträge hat.
     pub async fn verzeichnis(
@@ -235,6 +332,8 @@ impl Datenbank {
 pub enum Zugriff {
     /// Ausschnitt ansehen (Hex-Ansicht).
     Ansehen,
+    /// Wörtliche Inhaltssuche.
+    Suchen,
     /// Vollständig lesen und hashen.
     Hashen,
     /// Inhalt herunterladen.
@@ -283,6 +382,7 @@ impl Datenbank {
             ev.ok_or_else(|| StoreError::NichtGefunden(format!("keine Evidence {evidence}")))?;
         let fall = CaseId(fall);
         let (aktion, recht) = match zugriff {
+            Zugriff::Suchen => (AuditAction::SearchRun, Permission::SearchRun),
             Zugriff::Exportieren => (AuditAction::FileExtract, Permission::FileExtract),
             _ => (AuditAction::FileView, Permission::FileView),
         };
@@ -298,6 +398,10 @@ impl Datenbank {
         self.verlangen(akteur, Permission::CaseView, e.clone())
             .await?;
         self.verlangen(akteur, recht, e.clone()).await?;
+        if zugriff == Zugriff::Suchen {
+            self.verlangen(akteur, Permission::FileView, e.clone())
+                .await?;
+        }
         let datei: Option<(String, String, Option<i64>, bool)> = sqlx::query_as(
             "SELECT name, path, size, is_directory FROM file \
              WHERE evidence_id = $1 AND volume_offset = $2 AND mft_record = $3 LIMIT 1",
@@ -331,6 +435,58 @@ impl Datenbank {
             groesse,
             audit,
         })
+    }
+
+    /// Abschluss einer Inhaltssuche, mit Suchtext-Hash statt möglichem Geheimtext.
+    /// Audit und War Room werden gemeinsam geschrieben.
+    pub async fn dateisuche_protokollieren(
+        &self,
+        akteur: ActorId,
+        q: &DateiQuelle,
+        wort: &str,
+        ergebnis: Value,
+        erfolgreich: bool,
+    ) -> Result<(), StoreError> {
+        use sha2::{Digest, Sha256};
+        let hash: String = Sha256::digest(wort.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let details = json!({"art": "dateiinhalt", "pfad": q.pfad, "suchtext_sha256": hash,
+            "zugriff_audit": q.audit, "ergebnis": ergebnis});
+        let mut tx = self.pool.begin().await?;
+        let audit = crate::audit::schreiben(
+            &mut tx,
+            &AuditEintrag {
+                akteur,
+                case_id: Some(q.fall),
+                aktion: AuditAction::SearchRun,
+                objekt_typ: "evidence",
+                objekt_id: Some(q.evidence.to_string()),
+                ergebnis: if erfolgreich {
+                    AuditResult::Success
+                } else {
+                    AuditResult::Failure
+                },
+                details: details.clone(),
+            },
+        )
+        .await?;
+        crate::war_room::anhaengen(
+            &mut tx,
+            crate::war_room::Neu {
+                fall: q.fall,
+                akteur,
+                art: stratum_model::WarRoomEntryKind::Search,
+                refs: &[stratum_model::ObjectRef::Evidence(q.evidence)],
+                payload: details,
+                parent: None,
+                audit: Some(audit),
+            },
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Vermerkt den berechneten SHA-256 im Katalog, falls dort noch keiner
