@@ -86,6 +86,7 @@ export const CASE_NAV: NavGroup[] = [
     items: [
       { id: "search", label: "Search", icon: <FileSearch />, key: "s", path: "search" },
       { id: "timeline", label: "Timeline", icon: <Activity />, path: "timeline", key: "t" },
+      { id: "correlation", label: "Correlation", icon: <Waypoints />, path: "correlation" },
       { id: "graph", label: "Graph", icon: <Waypoints />, key: "g", path: "graph" },
       { id: "entities", label: "Entities", icon: <Users />, path: "entities", key: "n" },
       { id: "bookmarks", label: "Investigation selection", icon: <Bookmark />, path: "bookmarks" },

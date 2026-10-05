@@ -729,6 +729,42 @@ dem nächsten Schritt bzw. Analyzer; der Analyselauf endet dann als
 Firefox-Passwörter); solche Analysen laufen weiter direkt über die
 Kommandozeile.
 
+### Korrelation
+
+Im Fall verbindet **Correlation** unterstützte, bereits gespeicherte Ereignisse.
+**Run correlation** führt drei versionierte Kontextregeln aus:
+
+- Zwei verschiedene Parser melden Ausführung derselben normalisierten Datei
+  oder Anwendung innerhalb von zwei Sekunden.
+- Anlage und Aktivität desselben Dienstes oder derselben geplanten Aufgabe
+  liegen höchstens 24 Stunden auseinander.
+- Ein Prozessstart geht Netzwerkaktivität desselben normalisierten Prozesses
+  um höchstens fünf Minuten voraus.
+
+Gemeinsame Entität, Host, Evidence und Live-/VSS-Stand sind Voraussetzung.
+Dateiname oder PID allein genügen nicht. Quellzeit, Parser und Byte-Anker
+müssen vorhanden sein; unklare Quellen werden ausgeschlossen. Name-only
+Prefetch-Anwendungen werden nicht mit pfadbasierten Datei-Entitäten gleichgesetzt.
+Die Regeln ergänzen keine fehlenden Parser oder PCAP-Ereignisse.
+
+Treffer tragen `correlated` und beweisen weder Kausalität noch schädliche oder
+erfolgreiche Persistenz. Details zeigen beide Quellen; Graph und Timeline öffnen
+den gemeinsamen Kontext. **Create finding from both events** übernimmt die Belege
+in eine manuelle Bewertung. Es entstehen keine Findings automatisch.
+
+Jede Auswertung speichert ihre Regelversionen, Quellen und Schutzgrenzen.
+Höchstens 10.000 Eingabeverweise, 200.000 Paarvergleiche und 500 Treffer werden
+verarbeitet. Erreichte Grenzen werden als unvollständige Auswertung angezeigt.
+Leere Ergebnisse schließen Aktivitäten außerhalb dieser Abdeckung nicht aus.
+Die Auswertung liest keine Images, erzeugt keine Image-Hashes und fragt keine
+externen Dienste ab. Ergebnisse lassen sich ohne erneute Auswertung öffnen.
+
+Migration 0017 legt Auswertungen und Treffer an. Lesen braucht `case.view` und
+`file.view`, Ausführen zusätzlich `analysis.start`. Start, Abschluss und Fehler
+stehen im Audit; erfolgreiche Auswertungen erhalten einen War-Room-Rücklink.
+Die API bietet GET/POST `/api/v1/faelle/{nummer}/correlation`, Ergebnis-Seiten
+unter `/{id}` und gespeicherte Metadaten unter `/{id}/info`.
+
 ### Artefakte und Fall-Suche
 
 Im Explorer bezeichnet jeder Suchtreffer einen Quellpfad. Hardlinks können

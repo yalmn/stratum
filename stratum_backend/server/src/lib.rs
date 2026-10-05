@@ -221,6 +221,18 @@ pub fn router(db: Datenbank) -> Router {
         .route("/api/v1/faelle/{nummer}/artefakte/{id}", get(artefakt))
         .route("/api/v1/faelle/{nummer}/entitaeten", get(entitaeten))
         .route("/api/v1/entitaeten/{id}", get(entitaet))
+        .route(
+            "/api/v1/faelle/{nummer}/correlation",
+            get(correlation_runs).post(correlation_start),
+        )
+        .route(
+            "/api/v1/faelle/{nummer}/correlation/{id}",
+            get(correlation_results),
+        )
+        .route(
+            "/api/v1/faelle/{nummer}/correlation/{id}/info",
+            get(correlation_info),
+        )
         .route("/api/v1/faelle/{nummer}/graph/{id}", get(graph))
         .route("/api/v1/faelle/{nummer}/beziehungen/{id}", get(beziehung))
         .route("/api/v1/ereignisse/{id}", get(ereignis))
@@ -1805,4 +1817,45 @@ async fn finding_aendern(
 ) -> Antwort<Json<Value>> {
     let fall = fall_id(&z, &nummer).await?;
     Ok(Json(z.db.finding_aendern(u.id, fall, id, input).await?))
+}
+
+async fn correlation_start(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(number): Path<String>,
+) -> Result<Json<Value>, ApiFehler> {
+    let case = fall_id(&z, &number).await?;
+    Ok(Json(z.db.korrelation_starten(u.id, case).await?))
+}
+async fn correlation_runs(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(number): Path<String>,
+) -> Result<Json<Value>, ApiFehler> {
+    let case = fall_id(&z, &number).await?;
+    Ok(Json(z.db.korrelation_läufe(u.id, case).await?))
+}
+#[derive(serde::Deserialize)]
+struct CorrelationPage {
+    nach: Option<uuid::Uuid>,
+}
+async fn correlation_results(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((number, id)): Path<(String, uuid::Uuid)>,
+    Query(q): Query<CorrelationPage>,
+) -> Result<Json<stratum_store::daten::Seite>, ApiFehler> {
+    let case = fall_id(&z, &number).await?;
+    Ok(Json(
+        z.db.korrelation_ergebnisse(u.id, case, id, q.nach).await?,
+    ))
+}
+
+async fn correlation_info(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((number, id)): Path<(String, uuid::Uuid)>,
+) -> Result<Json<Value>, ApiFehler> {
+    let case = fall_id(&z, &number).await?;
+    Ok(Json(z.db.korrelation_lauf(u.id, case, id).await?))
 }

@@ -520,3 +520,18 @@ export function useSaveFinding(number: string, id?: string) {
     onSuccess: (saved) => { client.setQueryData(["findings",number,saved.id], saved); void client.invalidateQueries({queryKey:["findings",number]}); void client.invalidateQueries({queryKey:["war-room",number]}); },
   });
 }
+
+export function useCorrelationRuns(number: string, enabled: boolean) {
+  return useQuery({queryKey:["correlation",number,"runs"],queryFn:()=>api<{runs:import("./types").CorrelationRun[];rules:import("./types").CorrelationRule[]}>(`/faelle/${enc(number)}/correlation`),enabled,refetchOnWindowFocus:false});
+}
+export function useCorrelations(number: string, run: string) {
+  return useInfiniteQuery({queryKey:["correlation",number,"results",run],queryFn:({pageParam})=>api<Page<import("./types").CorrelationMatch>>(`/faelle/${enc(number)}/correlation/${enc(run)}${pageParam?`?nach=${enc(pageParam)}`:""}`),initialPageParam:"",getNextPageParam:p=>p.naechste??undefined,enabled:!!run,refetchOnWindowFocus:false});
+}
+export function useRunCorrelation(number: string) {
+  const client=useQueryClient();
+  return useMutation({mutationFn:()=>api<{id:string}>(`/faelle/${enc(number)}/correlation`,{method:"POST"}),onSuccess:()=>{void client.invalidateQueries({queryKey:["correlation",number,"runs"]});void client.invalidateQueries({queryKey:["war-room",number]});}});
+}
+
+export function useCorrelationRun(number:string, run:string) {
+  return useQuery({queryKey:["correlation",number,"run",run],queryFn:()=>api<import("./types").CorrelationRun>(`/faelle/${enc(number)}/correlation/${enc(run)}/info`),enabled:!!run,refetchOnWindowFocus:false});
+}

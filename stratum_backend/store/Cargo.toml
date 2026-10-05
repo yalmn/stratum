@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+stratum-correlation = { path = "../correlation" }
 stratum-model = { path = "../../stratum_model" }
 stratum-normalize = { path = "../normalize" }
 stratum-core.workspace = true

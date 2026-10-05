@@ -14,6 +14,7 @@ members = [
     "stratum_backend/creds",
     "stratum_backend/analysis",
     "stratum_backend/normalize",
+    "stratum_backend/correlation",
     "stratum_backend/store",
     "stratum_backend/lauf",
     "stratum_backend/jobs",

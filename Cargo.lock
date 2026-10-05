@@ -2718,6 +2718,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "stratum-correlation"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "stratum-model",
+ "uuid",
+]
+
+[[package]]
 name = "stratum-creds"
 version = "0.1.0"
 dependencies = [
@@ -2898,6 +2908,7 @@ dependencies = [
  "sqlx",
  "stratum-analysis",
  "stratum-core",
+ "stratum-correlation",
  "stratum-model",
  "stratum-normalize",
  "thiserror 2.0.21",

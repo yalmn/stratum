@@ -25,6 +25,7 @@ pub mod artefakte;
 pub mod audit;
 pub mod benutzer;
 pub mod bookmarks;
+pub mod correlation;
 pub mod dateien;
 pub mod daten;
 pub mod faelle;

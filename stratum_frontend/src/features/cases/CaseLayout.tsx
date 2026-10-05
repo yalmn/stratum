@@ -15,6 +15,7 @@ import { useWorkspace } from "../../app/store";
 import { EvidencePage } from "../evidence/EvidencePage";
 import { OverviewPage } from "../overview/OverviewPage";
 import { PlannedView } from "./PlannedView";
+import { CorrelationPage } from "../correlation/CorrelationPage";
 import { FindingsPage } from "../findings/FindingsPage";
 import { ArtifactsPage } from "../artifacts/ArtifactsPage";
 import { EntitiesPage } from "../entities/EntitiesPage";
@@ -194,6 +195,7 @@ export function CaseLayout() {
           <Route path="explorer" element={<ExplorerPage number={number} />} />
           <Route path="timeline" element={<TimelinePage number={number} />} />
           <Route path="network" element={<NetworkPage key={number} number={number} />} />
+          <Route path="correlation" element={<CorrelationPage key={number} number={number} />} />
           <Route path="graph" element={<GraphPage key={number} number={number} />} />
           <Route path="reconstruction" element={<HttpLabPage key={number} number={number} />} />
           <Route path="bookmarks" element={<BookmarksPage number={number} />} />

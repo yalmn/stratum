@@ -26,16 +26,16 @@ type Ref={kind:"artifact"|"event"|"entity";target:string;title:string};
 function bookmarkRef(b:CaseBookmark):Ref[] {
   return b.kind==="artifact"||b.kind==="event"||b.kind==="entity" ? [{kind:b.kind,target:b.target,title:b.title}] : [];
 }
-function Editor({number,finding,initialRef,onSaved,onCancel}:{number:string;finding?:Finding;initialRef?:Ref;onSaved:(f:Finding)=>void;onCancel:()=>void}) {
+function Editor({number,finding,initialRef,initialEvents,onSaved,onCancel}:{number:string;finding?:Finding;initialRef?:Ref;initialEvents?:Ref[];onSaved:(f:Finding)=>void;onCancel:()=>void}) {
   const {can}=useSession(); const {open}=useDetail();
   const save=useSaveFinding(number,finding?.id); const bookmarks=useBookmarks(number);
   const [expectedVersion]=useState(finding?.updated_at);
   const [title,setTitle]=useState(finding?.title??""); const [description,setDescription]=useState(finding?.description??"");
   const [category,setCategory]=useState(finding?.category??"other"); const [priority,setPriority]=useState(finding?.priority??"medium");
   const [disposition,setDisposition]=useState(finding?.disposition??"unknown"); const [status,setStatus]=useState(finding?.status??"new");
-  const [selected,setSelected]=useState<Ref[]>(initialRef?[initialRef]:[]);
+  const [selected,setSelected]=useState<Ref[]>(initialEvents??(initialRef?[initialRef]:[]));
   const existing:Ref[]=finding ? (["artifact","event","entity"] as const).flatMap(kind=>finding[`${kind}_refs`].map(target=>({kind,target,title:`${label(kind)} ${target}`}))) : [];
-  const options=[...(initialRef?[initialRef]:[]),...(bookmarks.data?.pages.flatMap(p=>p.eintraege.flatMap(bookmarkRef))??[])].filter((r,i,all)=>all.findIndex(o=>o.kind===r.kind&&o.target===r.target)===i);
+  const options=[...(initialEvents??[]),...(initialRef?[initialRef]:[]),...(bookmarks.data?.pages.flatMap(p=>p.eintraege.flatMap(bookmarkRef))??[])].filter((r,i,all)=>all.findIndex(o=>o.kind===r.kind&&o.target===r.target)===i);
   const editable=can(finding?"finding.edit":"finding.create"); const refs=finding?existing:selected;
   const submit=()=>save.mutate(finding ? {title,description:description||null,category,priority,disposition,status,expected_updated_at:expectedVersion!} : {title,description:description||null,category,priority,disposition,entity_refs:selected.filter(r=>r.kind==="entity").map(r=>r.target),event_refs:selected.filter(r=>r.kind==="event").map(r=>r.target),artifact_refs:selected.filter(r=>r.kind==="artifact").map(r=>r.target)},{onSuccess:onSaved});
   return <section className="bookmark-entry">
@@ -71,8 +71,9 @@ export function FindingsPage({number}:{number:string}) {
   const [filter,setFilter]=useState(""); const [search,setSearch]=useState(""); const [editorVersion,setEditorVersion]=useState(0);
   const creating=params.get("create")==="1";
   const sourceKind=params.get("source_kind");const sourceId=params.get("source_id");
+  const initialEvents:Ref[]|undefined=params.get("event_ids")?.split(",").filter(v=>/^[0-9a-f-]{36}$/i.test(v)).slice(0,2).map(target=>({kind:"event",target,title:`Event ${target}`}));
   const initialRef:Ref|undefined=sourceId&&(sourceKind==="artifact"||sourceKind==="event"||sourceKind==="entity") ? {kind:sourceKind,target:sourceId,title:`${label(sourceKind)} ${sourceId}`} : undefined;
-  const choose=(id:string|null,create=false)=>setParams(p=>{const n=new URLSearchParams(p);for(const k of ["finding","create","source_kind","source_id"])n.delete(k);if(id)n.set("finding",id);if(create)n.set("create","1");return n;});
+  const choose=(id:string|null,create=false)=>setParams(p=>{const n=new URLSearchParams(p);for(const k of ["finding","create","source_kind","source_id","event_ids"])n.delete(k);if(id)n.set("finding",id);if(create)n.set("create","1");return n;});
   const loaded=list.data?.pages.flatMap(p=>p.eintraege)??[];const rows=loaded.filter(f=>(!filter||f.status===filter)&&`${f.title} ${f.description??""}`.toLowerCase().includes(search.toLowerCase()));
   return <div className="page bookmarks-page">
     <div className="row"><h2>Findings</h2><span className="spacer"/>{can("finding.create")&&<Button variant="primary" onClick={()=>choose(null,true)}>Create finding</Button>}</div>
@@ -84,7 +85,7 @@ export function FindingsPage({number}:{number:string}) {
     {rows.length>0&&<DataTable label="Findings review list" height={Math.min(rows.length*36+40,300)} data={rows} columns={columns} rowId={f=>f.id} selected={id} grow={["title"]} onSelect={f=>choose(f.id)}/>}
     {!list.isPending&&!list.error&&!rows.length&&<EmptyState title="No matching findings" text="Create an assessment from the objects in Investigation selection."/>}
     {list.hasNextPage&&<Button disabled={list.isFetching} onClick={()=>list.fetchNextPage({cancelRefetch:false})}>Load more findings</Button>}
-    {creating&&<Editor key={`new:${initialRef?.kind}:${initialRef?.target}`} number={number} initialRef={initialRef} onSaved={f=>choose(f.id)} onCancel={()=>choose(null)}/>}
+    {creating&&<Editor key={`new:${initialRef?.kind}:${initialRef?.target}:${params.get("event_ids")}`} number={number} initialRef={initialRef} initialEvents={initialEvents} onSaved={f=>choose(f.id)} onCancel={()=>choose(null)}/>}
     {id&&finding.error&&<ErrorState title="Finding unavailable" reason={finding.error.message}/>}
     {id&&finding.data&&<><Editor key={`${id}:${editorVersion}`} number={number} finding={finding.data} onSaved={()=>setEditorVersion(v=>v+1)} onCancel={()=>choose(null)}/><Button onClick={()=>{void finding.refetch().then(()=>setEditorVersion(v=>v+1));}}>Load latest assessment</Button></>}
   </div>;

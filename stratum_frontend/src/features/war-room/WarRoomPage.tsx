@@ -30,6 +30,10 @@ function SystemBody({ e }: { e: WarRoomItem }) {
   if (e.kind === "finding_created" || e.kind === "finding_updated") {
     return <div className="wr-body"><strong>{String(p.title ?? "Finding")}</strong><span className="muted">{e.kind === "finding_created" ? "Created" : `Updated from ${label(String(p.vorher ?? ""))}`} · {label(String(p.status ?? ""))}</span><Button size="sm" onClick={() => navigate(`../findings?finding=${encodeURIComponent(String(p.id))}`)}>Open finding</Button></div>;
   }
+  if (p.event === "correlation_completed") {
+    const summary=p.summary as {matches:number;limited:boolean};
+    return <div className="wr-body"><strong>Correlation completed</strong><span className="muted">{summary.matches} contextual matches{summary.limited ? " · Limit reached" : ""}</span><Button size="sm" onClick={()=>navigate(`../correlation?run=${encodeURIComponent(String(p.run_id))}`)}>Open evaluation</Button></div>;
+  }
   if (e.kind === "search") {
     return <div className="wr-body">
       <span>Artifact search: <span className="mono">{String(p.suche ?? "")}</span></span>

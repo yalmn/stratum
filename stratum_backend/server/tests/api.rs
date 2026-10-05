@@ -2271,3 +2271,209 @@ async fn artefaktsuche_upgrade_pruefen(url: &str) {
     tx.rollback().await.unwrap();
     db.pool().close().await;
 }
+
+#[tokio::test]
+async fn korrelation_quellen_und_rechte() {
+    let Ok(url) = std::env::var("STRATUM_DB_URL") else {
+        eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
+        return;
+    };
+    let name = format!("stratum_correlation_{}", uuid::Uuid::now_v7().simple());
+    sql(&url, format!("CREATE DATABASE {name}")).await;
+    let (base, _) = url.rsplit_once('/').unwrap();
+    let db = Datenbank::verbinden_mit(&format!("{base}/{name}"), passwort().as_deref())
+        .await
+        .unwrap();
+    let result = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        korrelation_prüfen(db.clone()),
+    ))
+    .await;
+    db.pool().close().await;
+    sql(&url, format!("DROP DATABASE {name} WITH (FORCE)")).await;
+    if let Err(p) = result {
+        std::panic::resume_unwind(p);
+    }
+}
+async fn korrelation_prüfen(db: Datenbank) {
+    let admin = db
+        .superadmin_einrichten(ActorId::cli(), "chef", "Chef", "fixture-passwort-123")
+        .await
+        .unwrap();
+    for (name, role) in [("leser", "Read Only"), ("intel", "Threat Intel Analyst")] {
+        let user = db
+            .registrieren(name, name, "fixture-passwort-123")
+            .await
+            .unwrap();
+        db.freigeben(admin.id, user.id, &[RoleId::template(role)])
+            .await
+            .unwrap();
+    }
+    sqlx::raw_sql(r#"
+      INSERT INTO case_file(id,case_number,title,status,classification,created_at) VALUES
+        ('01900000-0000-7000-8000-000000000001','CORR','Fixture','active','internal',now()),
+        ('01900000-0000-7000-8000-000000000009','OTHER','Other','active','internal',now());
+      INSERT INTO evidence(id,case_id,kind,name,source_uri,sha256,imported_at,support) VALUES
+        ('01900000-0000-7000-8000-000000000002','01900000-0000-7000-8000-000000000001','raw_disk_image','Fixture','synthetic://fixture',repeat('a',64),now(),'analyzed');
+      INSERT INTO entity(id,case_id,kind,canonical_key,display_name,attributes,created_at) VALUES
+        ('01900000-0000-7000-8000-000000000010','01900000-0000-7000-8000-000000000001','file','path:c:\fixture.exe','fixture.exe','{}',now()),
+        ('01900000-0000-7000-8000-000000000020','01900000-0000-7000-8000-000000000001','host','fixture-host','Fixture host','{}',now());
+      INSERT INTO artifact(id,case_id,evidence_id,kind,source_locator,parser,raw_metadata,created_at) SELECT
+        ('01900000-0000-7000-8000-'||lpad(n::text,12,'0'))::uuid,'01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000002',
+        'unknown',jsonb_build_object('type','byte_range','offset',n*16,'length',16),
+        jsonb_build_object('name','fixture-parser-'||n,'version','1','stratum_version','test','config_hash',NULL),'{"domain":"fixture"}',now()
+        FROM generate_series(101,102) n;
+      INSERT INTO event(id,case_id,kind,occurred_utc,occurred_at,attributes,derivation,created_at) SELECT
+        ('01900000-0000-7000-8000-'||lpad(n::text,12,'0'))::uuid,'01900000-0000-7000-8000-000000000001','process_start',
+        '2026-01-01T12:00:00Z'::timestamptz+(n-201)*interval '1 second',
+        jsonb_build_object('utc','2026-01-01T12:00:00Z'::timestamptz+(n-201)*interval '1 second','original',NULL,'timezone',NULL,'precision','second','semantics','event_time'),
+        '{"secret":"DoNotCopyEventAttributes"}','parsed',now() FROM generate_series(201,202) n;
+      INSERT INTO event_participant SELECT id,'01900000-0000-7000-8000-000000000010','executable' FROM event;
+      INSERT INTO event_participant SELECT id,'01900000-0000-7000-8000-000000000020','host' FROM event;
+      INSERT INTO provenance(object_type,object_id,role,evidence_id,artifact_id) SELECT 'event',id,'primary',
+        '01900000-0000-7000-8000-000000000002',('01900000-0000-7000-8000-'||lpad((right(id::text,12)::int-100)::text,12,'0'))::uuid FROM event;
+    "#).execute(db.pool()).await.unwrap();
+    let app = stratum_server::router(db.clone());
+    let chief = anmelden(&app, "chef", "fixture-passwort-123").await;
+    let reader = anmelden(&app, "leser", "fixture-passwort-123").await;
+    let intel = anmelden(&app, "intel", "fixture-passwort-123").await;
+    let path = "/api/v1/faelle/CORR/correlation";
+    for (token, method, expected) in [
+        (None, "GET", StatusCode::UNAUTHORIZED),
+        (Some(reader.as_str()), "POST", StatusCode::FORBIDDEN),
+        (Some(intel.as_str()), "GET", StatusCode::FORBIDDEN),
+        (Some(intel.as_str()), "POST", StatusCode::FORBIDDEN),
+    ] {
+        assert_eq!(anfrage(&app, method, path, token, None).await.0, expected);
+    }
+    let (status, _, first) = anfrage(&app, "POST", path, Some(&chief), None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    assert_eq!(first["summary"]["matches"], 1);
+    assert_eq!(first["summary"]["limited"], false);
+    let run = first["id"].as_str().unwrap();
+    let detail = format!("{path}/{run}");
+    let (status, _, rows) = anfrage(&app, "GET", &detail, Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK, "{rows}");
+    let hit = &rows["eintraege"][0];
+    assert_eq!(hit["derivation"], "correlated");
+    assert_eq!(hit["rule_id"], "execution-sources");
+    assert_eq!(hit["rule_version"], "1");
+    assert_eq!(hit["traces"][0]["source"]["source_locator"]["offset"], 1616);
+    assert_eq!(hit["traces"][1]["source"]["source_locator"]["offset"], 1632);
+    assert!(!rows.to_string().contains("DoNotCopyEventAttributes"));
+    let (status, _, info) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/CORR/correlation/{run}/info"),
+        Some(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(info["rules"][0]["version"], "1");
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/OTHER/correlation/{run}/info"),
+        Some(&chief),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    assert_eq!(rows["naechste"], Value::Null);
+    assert_eq!(
+        anfrage(
+            &app,
+            "GET",
+            &format!("/api/v1/faelle/OTHER/correlation/{run}"),
+            Some(&chief),
+            None
+        )
+        .await
+        .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        anfrage(
+            &app,
+            "GET",
+            &format!("{detail}?nach=broken"),
+            Some(&reader),
+            None
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    let (_, _, second) = anfrage(&app, "POST", path, Some(&chief), None).await;
+    let (_, _, repeat) = anfrage(
+        &app,
+        "GET",
+        &format!("{path}/{}", second["id"].as_str().unwrap()),
+        Some(&chief),
+        None,
+    )
+    .await;
+    assert_eq!(repeat["eintraege"][0]["id"], hit["id"]);
+    assert_ne!(second["id"], first["id"]);
+    let (status, _, runs) = anfrage(&app, "GET", path, Some(&reader), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(runs["runs"].as_array().unwrap().len(), 2);
+    let findings: i64 = sqlx::query_scalar("SELECT count(*) FROM finding")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(findings, 0);
+    let audit:i64=sqlx::query_scalar("SELECT count(*) FROM audit_event WHERE object_type='correlation' AND action='ANALYSIS_COMPLETE'").fetch_one(db.pool()).await.unwrap();
+    assert_eq!(audit, 2);
+    let war:i64=sqlx::query_scalar("SELECT count(*) FROM war_room_entry WHERE payload->>'event'='correlation_completed' AND audit_event_id IS NOT NULL").fetch_one(db.pool()).await.unwrap();
+    assert_eq!(war, 2);
+    assert!(db.audit_pruefen(admin.id).await.unwrap().intakt());
+    // Mehr als eine Seite, getrennte Fixture-Auswertung ohne fachlichen Regellauf.
+    let page_run = uuid::Uuid::now_v7();
+    sqlx::query("INSERT INTO correlation_run(id,case_id,created_by,rules,summary) SELECT $1,case_id,created_by,rules,summary FROM correlation_run WHERE id=$2")
+        .bind(page_run).bind(uuid::Uuid::parse_str(run).unwrap()).execute(db.pool()).await.unwrap();
+    sqlx::query("INSERT INTO correlation_result(run_id,case_id,id,payload) SELECT $1,case_id,('01900000-0000-7000-8000-'||lpad(n::text,12,'0'))::uuid, payload || jsonb_build_object('id','01900000-0000-7000-8000-'||lpad(n::text,12,'0')) FROM correlation_result CROSS JOIN generate_series(1,101) n WHERE run_id=$2")
+        .bind(page_run).bind(uuid::Uuid::parse_str(run).unwrap()).execute(db.pool()).await.unwrap();
+    let (_, _, page_one) = anfrage(
+        &app,
+        "GET",
+        &format!("{path}/{page_run}"),
+        Some(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(page_one["eintraege"].as_array().unwrap().len(), 100);
+    let next = page_one["naechste"].as_str().unwrap();
+    let (_, _, page_two) = anfrage(
+        &app,
+        "GET",
+        &format!("{path}/{page_run}?nach={next}"),
+        Some(&reader),
+        None,
+    )
+    .await;
+    assert_eq!(page_two["eintraege"].as_array().unwrap().len(), 1);
+    assert_eq!(page_two["naechste"], Value::Null);
+    assert!(!page_one["eintraege"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| r["id"] == page_two["eintraege"][0]["id"]));
+    sqlx::query("UPDATE event SET occurred_at='{}'")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        anfrage(&app, "POST", path, Some(&chief), None).await.0,
+        StatusCode::INTERNAL_SERVER_ERROR
+    );
+    let failures:i64=sqlx::query_scalar("SELECT count(*) FROM audit_event WHERE object_type='correlation' AND action='ANALYSIS_FAIL' AND result='failure'").fetch_one(db.pool()).await.unwrap();
+    assert_eq!(failures, 1);
+    let (_, _, saved) = anfrage(&app, "GET", &detail, Some(&reader), None).await;
+    assert_eq!(saved["eintraege"][0]["traces"], hit["traces"]);
+    assert!(sqlx::query("UPDATE correlation_result SET payload='{}'")
+        .execute(db.pool())
+        .await
+        .is_err());
+}

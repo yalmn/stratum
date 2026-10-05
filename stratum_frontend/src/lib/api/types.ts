@@ -314,3 +314,14 @@ export interface Finding {
 }
 export type FindingInput = Pick<Finding, "title" | "description" | "category" | "priority" | "disposition" | "entity_refs" | "event_refs" | "artifact_refs">;
 export type FindingChange = Pick<Finding, "title" | "description" | "category" | "priority" | "disposition" | "status"> & { expected_updated_at: string };
+
+/** Gespeicherte Kontextregeln, getrennt von Finding und Ereigniszeitachse. */
+export interface CorrelationRule { id: string; version: string; title: string; window_seconds: number; limitation: string }
+export interface CorrelationSummary { input_count: number; excluded_count: number; comparisons: number; matches: number; limited: boolean }
+export interface CorrelationRun { id: string; created_at: string; rules: CorrelationRule[]; summary: CorrelationSummary }
+export interface CorrelationTrace {
+  event_id: string; kind: string; entity_id: string; host_id: string;
+  time: { utc: string; precision: string; semantics: string }; derivation: DerivationKind;
+  source: { evidence_id: string; artifact_id: string; observation_id: string | null; source_locator: Record<string, unknown>; parser: { name: string; version: string }; analysis_run_id: string | null };
+}
+export interface CorrelationMatch { id: string; entity_name: string; host_name: string; rule_id: string; rule_version: string; derivation: DerivationKind; traces: [CorrelationTrace, CorrelationTrace] }
