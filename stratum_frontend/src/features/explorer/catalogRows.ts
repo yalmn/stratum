@@ -13,3 +13,8 @@ export function catalogRows(pages: { eintraege: FileEntry[] }[]): FileEntry[] {
   }
   return [...rows.values()];
 }
+
+/** Wählt genau den angeklickten Quellpfad; unbekannte Pfade werden nicht ersetzt. */
+export function catalogEntry(entries: FileEntry[], path: string | null): FileEntry | undefined {
+  return path === null ? entries[0] : entries.find(entry => entry.path === path);
+}

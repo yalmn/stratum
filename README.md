@@ -731,6 +731,12 @@ Kommandozeile.
 
 ### Artefakte und Fall-Suche
 
+Im Explorer bezeichnet jeder Suchtreffer einen Quellpfad. Hardlinks können
+dieselbe MFT-Nummer an mehreren Pfaden haben; verschiedene Dateien können
+denselben Namen tragen. Die Suche zeigt Pfad und MFT-Nummer direkt beim
+Dateinamen. Beim Öffnen bleibt der gewählte Pfad im Drawer erhalten; weitere
+Namen desselben Datensatzes stehen unter Other names.
+
 **Findings** zeigt die Bewertungen der Analysten mit Status, Priorität und Quellen.
 Neue Bewertungen entstehen über **Create finding** aus Artefakten, Ereignissen
 und Entitäten der **Investigation selection**, oder direkt aus dem Artefakt-Drawer.

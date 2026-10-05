@@ -1,3 +1,4 @@
+import { catalogEntry } from "../explorer/catalogRows";
 import { BookmarkButton } from "../bookmarks/BookmarkButton";
 // Datei im Context Drawer: Überblick, Zeitstempel (SI und FN), NTFS,
 // Hashes, Inhalt als Hex und Strings. Lesen des Inhalts steht im Audit.
@@ -26,6 +27,7 @@ function parse(id: string): [string, number, number] | null {
 }
 
 export function FileDrawer({ id, caseNumber, onClose }: { id: string; caseNumber: string; onClose: () => void }) {
+  const [params] = useSearchParams();
   const p = parse(id);
   if (!p) {
     return (
@@ -34,7 +36,7 @@ export function FileDrawer({ id, caseNumber, onClose }: { id: string; caseNumber
       </DrawerFrame>
     );
   }
-  return <FileView key={id} evidence={p[0]} volume={p[1]} record={p[2]} caseNumber={caseNumber} onClose={onClose} />;
+  return <FileView key={`${id}:${params.get("file_path") ?? ""}`} evidence={p[0]} volume={p[1]} record={p[2]} caseNumber={caseNumber} onClose={onClose} />;
 }
 
 function FileView({
@@ -71,15 +73,15 @@ function FileView({
       </DrawerFrame>
     );
   }
-  const f = entry.data?.[0];
+  const f = catalogEntry(entry.data ?? [], params.get("file_path"));
   if (!f) {
     return (
       <DrawerFrame kind="File" title="Not found" onClose={onClose}>
-        <ErrorState title="Not in the file catalog." reason={entry.error?.message} />
+        <ErrorState title={entry.data?.length ? "Selected source path was not returned by the file catalog." : "Not in the file catalog."} reason={entry.error?.message} />
       </DrawerFrame>
     );
   }
-  const others = (entry.data ?? []).slice(1);
+  const others = (entry.data ?? []).filter(e => e.parent_record !== f.parent_record || e.name !== f.name);
   const size = f.size ?? 0;
   const ads = (f.streams ?? []).filter((s) => s.name);
   const hashes = hash.data;

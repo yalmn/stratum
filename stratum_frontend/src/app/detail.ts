@@ -27,11 +27,13 @@ export function useDetail() {
   const [params, setParams] = useSearchParams();
   const detail = parseDetail(params.get("detail"));
   const open = useCallback(
-    (kind: DetailKind, id: string) =>
+    (kind: DetailKind, id: string, filePath?: string) =>
       setParams(
         (p) => {
           const n = new URLSearchParams(p);
           n.set("detail", `${kind}:${id}`);
+          if (kind === "file" && filePath !== undefined) n.set("file_path", filePath);
+          else n.delete("file_path");
           return n;
         },
         { replace: false },
@@ -43,6 +45,7 @@ export function useDetail() {
       setParams((p) => {
         const n = new URLSearchParams(p);
         n.delete("detail");
+        n.delete("file_path");
         return n;
       }),
     [setParams],

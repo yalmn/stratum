@@ -42,6 +42,7 @@ export function DataTable<T extends RowData>({
   grow = [],
   numeric = [],
   height,
+  rowHeight = ROW,
   footer,
   label,
   onEndReached,
@@ -58,6 +59,8 @@ export function DataTable<T extends RowData>({
   /** Rechtsbündige Zahlenspalten. */
   numeric?: string[];
   height?: number | string;
+  /** Feste Zeilenhöhe, auch für die virtuelle Scrollposition. */
+  rowHeight?: number;
   footer?: ReactNode;
   label: string;
   /** Kurz vor dem Ende der geladenen Zeilen (zum Nachladen). */
@@ -74,10 +77,11 @@ export function DataTable<T extends RowData>({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => scroll.current,
-    estimateSize: () => ROW,
+    estimateSize: () => rowHeight,
     getItemKey: (i) => rows[i]?.id ?? i,
     overscan: 12,
   });
+  useEffect(() => { virtualizer.measure(); }, [rowHeight, virtualizer]);
   const [cursor, setCursor] = useState<number>(-1);
 
   // Auswahl von außen (etwa aus dem Drawer per Deep Link) übernehmen.
@@ -176,6 +180,7 @@ export function DataTable<T extends RowData>({
                   .filter(Boolean)
                   .join(" ")}
                 style={{
+                  height: rowHeight,
                   gridTemplateColumns: template,
                   position: "absolute",
                   top: 0,

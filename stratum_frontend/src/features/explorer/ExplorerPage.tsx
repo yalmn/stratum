@@ -58,23 +58,29 @@ export function fileDetailId(evidence: string, volume: number, record: number): 
 }
 
 const h = columnHelper<FileEntry>();
-const columns = [
+const nameColumn = (showSource = false) =>
   h.accessor("name", {
-    header: "Name",
-    size: 280,
+    header: showSource ? "Name / source path" : "Name",
+    size: showSource ? 480 : 280,
     cell: (c) => {
       const e = c.row.original;
       const ads = (e.streams ?? []).filter((s) => s.name && s.name !== "WofCompressedData").length;
       return (
-        <span className="file-name">
-          {e.is_directory ? <Folder className="ico-dir" /> : <File className="ico-file" />}
-          <span>{e.name}</span>
-          {ads > 0 && <Badge tone="warning">ADS {ads}</Badge>}
-          {e.error && <Badge tone="danger">Error</Badge>}
+        <span className={showSource ? "file-source" : undefined}>
+          <span className="file-name">
+            {e.is_directory ? <Folder className="ico-dir" /> : <File className="ico-file" />}
+            <span>{e.name}</span>
+            {showSource && <span className="file-record mono">MFT {e.mft_record}</span>}
+            {ads > 0 && <Badge tone="warning">ADS {ads}</Badge>}
+            {e.error && <Badge tone="danger">Error</Badge>}
+          </span>
+          {showSource && <span className="file-source-path mono" title={e.path}>{e.path}</span>}
         </span>
       );
     },
-  }),
+  });
+const columns = [
+  nameColumn(),
   h.accessor("size", {
     header: "Size",
     size: 110,
@@ -90,6 +96,8 @@ const columns = [
     cell: (c) => <span className="muted">{fileAttributes(c.getValue())}</span>,
   }),
 ];
+
+const searchColumns = [nameColumn(true), ...columns.slice(1)];
 
 function DirNode({
   evidence,
@@ -213,6 +221,7 @@ function Listing({
   const found = useCatalogSearch(evidence, volume, filter, searching);
   const list = searching ? found : directory;
   const { detail, open } = useDetail();
+  const [params] = useSearchParams();
   const { can } = useSession();
   const navigate = useNavigate();
   const menu = useContextMenu();
@@ -224,8 +233,8 @@ function Listing({
   }, [list]);
   const id = (e: FileEntry) => fileDetailId(evidence, volume, e.mft_record);
   const rowId = catalogRowId;
-  const selected = rows.find((e) => detail?.kind === "file" && detail.id === id(e));
-  const enter = (e: FileEntry) => (e.is_directory ? onEnter([...trail, { record: e.mft_record, name: e.name }]) : open("file", id(e)));
+  const selected = rows.find((e) => detail?.kind === "file" && detail.id === id(e) && (!params.get("file_path") || params.get("file_path") === e.path));
+  const enter = (e: FileEntry) => (e.is_directory ? onEnter([...trail, { record: e.mft_record, name: e.name }]) : open("file", id(e), e.path));
 
   if (list.isPending) {
     return <Skeleton lines={10} />;
@@ -241,22 +250,23 @@ function Listing({
       <DataTable
         label={searching ? "Files matching catalog filters" : "Folder content"}
         data={rows}
-        columns={searching ? [...columns, h.accessor("path", { header: "Path", size: 320, cell: (c) => <span className="mono">{c.getValue()}</span> })] : columns}
+        columns={searching ? searchColumns : columns}
+        rowHeight={searching ? 64 : 36}
         rowId={rowId}
         grow={["name"]}
         numeric={["size"]}
         selected={selected ? rowId(selected) : null}
-        onSelect={(e) => open("file", id(e))}
+        onSelect={(e) => open("file", id(e), e.path)}
         onOpen={enter}
         onEndReached={loadMore}
         onContextMenu={(ev, e) =>
           menu.open(ev, [
             ...(e.is_directory ? [{ label: "Open folder", icon: <FolderOpen />, onSelect: () => enter(e) }] : []),
-            { label: "Open details", icon: <Info />, onSelect: () => open("file", id(e)) },
+            { label: "Open details", icon: <Info />, onSelect: () => open("file", id(e), e.path) },
             ...(e.is_directory
               ? []
               : [
-                  { label: "View hex and strings", icon: <Fingerprint />, onSelect: () => open("file", id(e)) },
+                  { label: "View hex and strings", icon: <Fingerprint />, onSelect: () => open("file", id(e), e.path) },
                   {
                     label: "Export file",
                     icon: <Download />,
@@ -276,9 +286,9 @@ function Listing({
         }
         footer={
           <>
-            {count(rows.length)} entries{list.hasNextPage ? " loaded, scroll for more" : ""}
+            {count(rows.length)} {searching ? "source paths" : "entries"}{list.hasNextPage ? " loaded, scroll for more" : ""}
             <span className="spacer" />
-            Double-click or Enter opens a folder · J/K to move
+            {searching ? "Several paths can refer to the same MFT record (hardlinks)." : "Double-click or Enter opens a folder · J/K to move"}
           </>
         }
       />

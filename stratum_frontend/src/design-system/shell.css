@@ -1327,3 +1327,33 @@ a.btn {
 .timeline-event-summary { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .timeline-load { padding: 10px 16px; border-top: 1px solid var(--border); }
 @media (max-width: 1200px) { .timeline-time { flex-basis: 170px; font-size: 11px; } }
+
+.file-source {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.file-source .file-name {
+  display: flex;
+}
+
+.file-source .file-record {
+  flex: none;
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+}
+
+.file-source-path {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: normal;
+  color: var(--text-muted);
+  font-size: var(--fs-xs);
+  line-height: 1.3;
+}
