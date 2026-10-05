@@ -29,6 +29,7 @@ import type { Evidence, FileEntry } from "../../lib/api/types";
 import { bytes, count, fileAttributes } from "../../lib/format";
 import { useSession } from "../../lib/permissions";
 import { useDetail } from "../../app/detail";
+import { catalogRows, catalogRowId } from "./catalogRows";
 
 const ROOT = 5;
 
@@ -215,14 +216,14 @@ function Listing({
   const { can } = useSession();
   const navigate = useNavigate();
   const menu = useContextMenu();
-  const rows = useMemo(() => list.data?.pages.flatMap((p) => p.eintraege) ?? [], [list.data]);
+  const rows = useMemo(() => catalogRows(list.data?.pages ?? []), [list.data]);
   const loadMore = useCallback(() => {
-    if (list.hasNextPage && !list.isFetchingNextPage) {
-      void list.fetchNextPage();
+    if (list.hasNextPage && !list.isFetching) {
+      void list.fetchNextPage({ cancelRefetch: false });
     }
   }, [list]);
   const id = (e: FileEntry) => fileDetailId(evidence, volume, e.mft_record);
-  const rowId = (e: FileEntry) => JSON.stringify([e.mft_record, e.parent_record, e.name]);
+  const rowId = catalogRowId;
   const selected = rows.find((e) => detail?.kind === "file" && detail.id === id(e));
   const enter = (e: FileEntry) => (e.is_directory ? onEnter([...trail, { record: e.mft_record, name: e.name }]) : open("file", id(e)));
 

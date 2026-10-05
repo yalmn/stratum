@@ -70,7 +70,9 @@ impl IntoResponse for ApiFehler {
             ApiFehler::Store(s) => match s {
                 StoreError::Verweigert(_) => StatusCode::FORBIDDEN,
                 StoreError::NichtGefunden(_) => StatusCode::NOT_FOUND,
-                StoreError::Eingabe(_) | StoreError::Passwort(_) => StatusCode::BAD_REQUEST,
+                StoreError::Eingabe(_) | StoreError::Passwort(_) | StoreError::FindingBeleg(_) => {
+                    StatusCode::BAD_REQUEST
+                }
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             },
         };
@@ -206,6 +208,14 @@ pub fn router(db: Datenbank) -> Router {
         .route(
             "/api/v1/faelle/{nummer}/zeitachse/arten",
             get(zeitachse_arten),
+        )
+        .route(
+            "/api/v1/faelle/{nummer}/findings",
+            get(findings).post(finding_anlegen),
+        )
+        .route(
+            "/api/v1/faelle/{nummer}/findings/{id}",
+            get(finding).put(finding_aendern),
         )
         .route("/api/v1/faelle/{nummer}/artefakte", get(artefakte))
         .route("/api/v1/faelle/{nummer}/artefakte/{id}", get(artefakt))
@@ -1748,4 +1758,51 @@ async fn artefakt(
 ) -> Antwort<Json<Value>> {
     let fall = fall_id(&z, &nummer).await?;
     Ok(Json(z.db.artefakt(u.id, fall, id).await?))
+}
+
+#[derive(Deserialize)]
+struct FindingsAnfrage {
+    nach: Option<uuid::Uuid>,
+    anzahl: Option<i64>,
+}
+async fn findings(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<FindingsAnfrage>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(
+        serde_json::to_value(
+            z.db.findings(u.id, fall, q.nach, q.anzahl.unwrap_or(100))
+                .await?,
+        )
+        .map_err(StoreError::from)?,
+    ))
+}
+async fn finding(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((nummer, id)): Path<(String, stratum_model::FindingId)>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(z.db.finding(u.id, fall, id).await?))
+}
+async fn finding_anlegen(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Koerper(input): Koerper<stratum_store::findings::NeuesFinding>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(z.db.finding_anlegen(u.id, fall, input).await?))
+}
+async fn finding_aendern(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((nummer, id)): Path<(String, stratum_model::FindingId)>,
+    Koerper(input): Koerper<stratum_store::findings::FindingAenderung>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(z.db.finding_aendern(u.id, fall, id, input).await?))
 }

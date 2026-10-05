@@ -6,6 +6,7 @@ import { DrawerFrame, DrawerSection } from "../../components/ui/Layout";
 import { useArtifact, useRawFinding } from "../../lib/api/queries";
 import { label } from "../../lib/format";
 import { useDetail } from "../../app/detail";
+import { useSession } from "../../lib/permissions";
 import { BookmarkButton } from "../bookmarks/BookmarkButton";
 
 const SOURCE_LABELS: Record<string, string> = {
@@ -29,6 +30,7 @@ function valueText(value: unknown): string {
 
 export function ArtifactDrawer({ id, caseNumber, onClose }: { id: string; caseNumber: string; onClose: () => void }) {
   const navigate = useNavigate();
+  const { can } = useSession();
   const { open } = useDetail();
   const [raw, setRaw] = useState(false);
   useEffect(() => setRaw(false), [id]);
@@ -42,6 +44,7 @@ export function ArtifactDrawer({ id, caseNumber, onClose }: { id: string; caseNu
       {query.error && <ErrorState title="Source artifact unavailable" reason={query.error.message} />}
       {a && <>
         <BookmarkButton number={caseNumber} kind="artifact" target={id} />
+        {can("finding.create") && <Button size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/findings?create=1&source_kind=artifact&source_id=${id}`)}>Create finding</Button>}
         <Button size="sm" onClick={() => navigate(`/cases/${encodeURIComponent(caseNumber)}/reconstruction?source_kind=artifact&source_id=${id}`)}>
           Reconstruct HTTP request
         </Button>

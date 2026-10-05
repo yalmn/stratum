@@ -1957,6 +1957,96 @@ async fn ablauf(db: Datenbank) {
     .unwrap();
     assert_eq!(count, 2);
 
+    // Findings sind explizite Analystenbewertungen mit fallgebundenen Quellen.
+    let findings = "/api/v1/faelle/API-1/findings";
+    let input = json!({"title":"Verdächtiger Dienst", "description":"Synthetische Bewertung für den API-Test", "category":"persistence", "priority":"high", "disposition":"suspicious", "artifact_refs":[artifact_id]});
+    let (status, _, _) = anfrage(&app, "POST", findings, Some(&t_leser), Some(input.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = anfrage(&app, "GET", findings, Some(&t_intel), None).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let mut empty = input.clone();
+    empty["artifact_refs"] = json!([]);
+    let (status, _, _) = anfrage(&app, "POST", findings, Some(&t_tom), Some(empty)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, _) = anfrage(
+        &app,
+        "POST",
+        "/api/v1/faelle/API-2/findings",
+        Some(&t_tom),
+        Some(input.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _, v) = anfrage(&app, "POST", findings, Some(&t_tom), Some(input.clone())).await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert_eq!(v["status"], "new");
+    assert_eq!(v["derivation"], "analyst_asserted");
+    assert_eq!(v["analyst"], "tom");
+    assert_eq!(v["artifact_refs"], input["artifact_refs"]);
+    let finding_id = v["id"].as_str().unwrap();
+    let path = format!("{findings}/{finding_id}");
+    let (status, _, _) = anfrage(&app, "GET", &path, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-2/findings/{finding_id}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let mut change = json!({"title":"Dienst geprüft","description":"Belege geprüft","category":"persistence","priority":"high","disposition":"suspicious","status":"in_review","expected_updated_at":v["updated_at"]});
+    let (status, _, _) = anfrage(&app, "PUT", &path, Some(&t_leser), Some(change.clone())).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = anfrage(
+        &app,
+        "PUT",
+        &format!("/api/v1/faelle/API-2/findings/{finding_id}"),
+        Some(&t_tom),
+        Some(change.clone()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (first, second) = tokio::join!(
+        anfrage(&app, "PUT", &path, Some(&t_tom), Some(change.clone())),
+        anfrage(&app, "PUT", &path, Some(&t_tom), Some(change.clone()))
+    );
+    assert!(
+        (first.0 == StatusCode::OK && second.0 == StatusCode::BAD_REQUEST)
+            || (second.0 == StatusCode::OK && first.0 == StatusCode::BAD_REQUEST)
+    );
+    let (_, _, mut current) = anfrage(&app, "GET", &path, Some(&t_leser), None).await;
+    for state in ["confirmed", "rejected", "resolved"] {
+        change["status"] = json!(state);
+        change["expected_updated_at"] = current["updated_at"].clone();
+        let (status, _, saved) =
+            anfrage(&app, "PUT", &path, Some(&t_tom), Some(change.clone())).await;
+        assert_eq!(status, StatusCode::OK, "{saved}");
+        assert_eq!(saved["status"], state);
+        assert_eq!(saved["artifact_refs"], input["artifact_refs"]);
+        assert_eq!(saved["created_by"], v["created_by"]);
+        assert_eq!(saved["created_at"], v["created_at"]);
+        assert_eq!(saved["derivation"], "analyst_asserted");
+        current = saved;
+    }
+    let (status, _, page) = anfrage(
+        &app,
+        "GET",
+        &format!("{findings}?anzahl=1"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(page["eintraege"].as_array().unwrap().len(), 1);
+    let count:i64=sqlx::query_scalar("SELECT count(*) FROM war_room_entry WHERE kind IN ('finding_created','finding_updated') AND payload->>'id'=$1 AND audit_event_id IS NOT NULL").bind(finding_id).fetch_one(db.pool()).await.unwrap();
+    assert_eq!(count, 5);
+    let mut spoof = input.clone();
+    spoof["derivation"] = json!("observed");
+    let (status, _, _) = anfrage(&app, "POST", findings, Some(&t_tom), Some(spoof)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
     // Registrierung über die API, Freigabe und Passwortpflicht.
     let lea = json!({"name": "lea", "anzeigename": "Lea L.", "passwort": "lea-passwort-1234"});
     let (s, _, v) = anfrage(&app, "POST", "/api/v1/registrierung", None, Some(lea)).await;

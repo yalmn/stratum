@@ -282,6 +282,8 @@ export function useCatalogSearch(evidence: string, volume: number, filter: { suc
     initialPageParam: "",
     getNextPageParam: (last) => last.naechste ?? undefined,
     enabled,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -498,5 +500,23 @@ export function useArtifact(number: string, id: string) {
   return useQuery({
     queryKey: ["artifact", number, id],
     queryFn: () => api<ArtifactDetail>(`/faelle/${enc(number)}/artefakte/${enc(id)}`),
+  });
+}
+
+export function useFindings(number: string) {
+  return useInfiniteQuery({
+    queryKey: ["findings", number, "list"],
+    queryFn: ({ pageParam }) => api<Page<import("./types").Finding>>(`/faelle/${enc(number)}/findings?anzahl=100${pageParam ? `&nach=${enc(pageParam)}` : ""}`),
+    initialPageParam: "", getNextPageParam: (p) => p.naechste ?? undefined,
+  });
+}
+export function useFinding(number: string, id: string | null) {
+  return useQuery({queryKey:["findings",number,id],queryFn:()=>api<import("./types").Finding>(`/faelle/${enc(number)}/findings/${id}`),enabled:!!id});
+}
+export function useSaveFinding(number: string, id?: string) {
+  const client=useQueryClient();
+  return useMutation({
+    mutationFn: (body: import("./types").FindingInput | import("./types").FindingChange) => api<import("./types").Finding>(`/faelle/${enc(number)}/findings${id ? `/${id}` : ""}`,{method:id?"PUT":"POST",body}),
+    onSuccess: (saved) => { client.setQueryData(["findings",number,saved.id], saved); void client.invalidateQueries({queryKey:["findings",number]}); void client.invalidateQueries({queryKey:["war-room",number]}); },
   });
 }

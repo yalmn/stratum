@@ -2,6 +2,7 @@
 // oben, neueste unten, Eingabe darunter. Getrennt von Timeline (was auf dem
 // System geschah) und Audit (was Benutzer in stratum taten).
 
+import { useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { CornerDownRight, Download, MessageSquare, Server } from "lucide-react";
 import { Button } from "../../components/ui/Button";
@@ -11,7 +12,7 @@ import { Kbd, MOD } from "../../components/ui/Kbd";
 import { JobStatusBadge } from "../../components/forensic/Badges";
 import { usePostNote, useWarRoom } from "../../lib/api/queries";
 import type { JobStatus, WarRoomItem } from "../../lib/api/types";
-import { count } from "../../lib/format";
+import { count, label } from "../../lib/format";
 import { useDetail } from "../../app/detail";
 
 type Filter = "all" | "analyst" | "system";
@@ -22,9 +23,13 @@ const kindOf = (e: WarRoomItem): Filter =>
 function SystemBody({ e }: { e: WarRoomItem }) {
   const p = e.payload as Record<string, unknown>;
   const { open } = useDetail();
+  const navigate = useNavigate();
   const job = typeof p.job_id === "string" ? p.job_id : null;
   const what = p.job_kind === "network_enrichment" ? "DNS / WHOIS" : p.job_kind === "yara_scan" ? "YARA scan" : p.job_kind === "evidence_import" ? "Evidence import" : "Analysis";
   const evidence = e.object_refs.find((r) => r.type === "evidence");
+  if (e.kind === "finding_created" || e.kind === "finding_updated") {
+    return <div className="wr-body"><strong>{String(p.title ?? "Finding")}</strong><span className="muted">{e.kind === "finding_created" ? "Created" : `Updated from ${label(String(p.vorher ?? ""))}`} · {label(String(p.status ?? ""))}</span><Button size="sm" onClick={() => navigate(`../findings?finding=${encodeURIComponent(String(p.id))}`)}>Open finding</Button></div>;
+  }
   if (e.kind === "search") {
     return <div className="wr-body">
       <span>Artifact search: <span className="mono">{String(p.suche ?? "")}</span></span>

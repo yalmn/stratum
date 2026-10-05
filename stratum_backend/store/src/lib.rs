@@ -28,6 +28,7 @@ pub mod bookmarks;
 pub mod dateien;
 pub mod daten;
 pub mod faelle;
+pub mod findings;
 pub mod jobs;
 pub mod sitzung;
 pub mod war_room;
@@ -608,7 +609,7 @@ impl Datenbank {
                 return Err(StoreError::FindingBeleg(fehlend));
             }
         }
-        audit::schreiben(
+        let audit = audit::schreiben(
             &mut tx,
             &AuditEintrag {
                 akteur,
@@ -625,6 +626,12 @@ impl Datenbank {
             },
         )
         .await?;
+        war_room::anhaengen(&mut tx, war_room::Neu {
+            fall: f.case_id, akteur, art: stratum_model::WarRoomEntryKind::FindingCreated,
+            refs: &[stratum_model::ObjectRef::Finding(f.id)],
+            payload: json!({"id":f.id,"title":f.title,"status":f.status,"derivation":f.derivation}),
+            parent: None, audit: Some(audit),
+        }).await?;
         tx.commit().await?;
         Ok(())
     }

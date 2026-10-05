@@ -731,6 +731,17 @@ Kommandozeile.
 
 ### Artefakte und Fall-Suche
 
+**Findings** zeigt die Bewertungen der Analysten mit Status, Priorität und Quellen.
+Neue Bewertungen entstehen über **Create finding** aus Artefakten, Ereignissen
+und Entitäten der **Investigation selection**, oder direkt aus dem Artefakt-Drawer.
+Sie beginnen als **New** und tragen `analyst_asserted`; die Bewertung ist von
+der Quelle getrennt. Beim Bearbeiten bleiben Belege, Autor und Anlegezeit erhalten.
+`expected_updated_at` verhindert das Überschreiben eines neueren Standes.
+Erstellung und Änderung stehen atomar in Audit und War Room. Die Statusliste
+umfasst New, In Review, Confirmed, Rejected und Resolved; jede Bewertung bleibt
+auch nach einer Ablehnung gespeichert. Dateien und Beziehungen können noch
+nicht unmittelbar als Finding-Belege verwendet werden.
+
 Im Fall öffnen **Artifacts** und **Search** die gespeicherten Artefakte.
 Suchtext wird wörtlich und unabhängig von Groß- und Kleinschreibung in
 Artefakt- und Observation-Feldern sowie Fundstellen gesucht. Evidence und
@@ -791,6 +802,10 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/jobs/{id}/fortschritt` | Fortschritt als Server-Sent Events |
 | `GET /api/v1/faelle/{nummer}/zeitachse?von=&bis=&art=&entitaet=&evidence=&suche=&nach=&anzahl=` | Ereignisse nach Zeit |
 | `GET /api/v1/faelle/{nummer}/zeitachse/arten` | Ereignisarten mit Anzahl |
+| `GET /api/v1/faelle/{nummer}/findings?nach=&anzahl=` | Analystenbewertungen mit Quellenverweisen |
+| `POST /api/v1/faelle/{nummer}/findings` | Bewertung im Status New anlegen, 1 bis 100 Belege |
+| `GET /api/v1/faelle/{nummer}/findings/{id}` | Einzelne Bewertung im Fall |
+| `PUT /api/v1/faelle/{nummer}/findings/{id}` | Bewertung und Status ändern, expected_updated_at erforderlich |
 | `GET /api/v1/faelle/{nummer}/artefakte?art=&evidence=&suche=&nach=&anzahl=` | Gespeicherte Artefakte und maskierte Feldsuche |
 | `GET /api/v1/faelle/{nummer}/artefakte/{id}` | Quelle, Parser, maskierte Observationen und Herkunftsverweise |
 | `GET /api/v1/faelle/{nummer}/entitaeten?art=&suche=&nach=&anzahl=` | Entitäten |
@@ -996,7 +1011,7 @@ Details öffnen im Drawer, ohne die Ansicht zu verlassen; der Drawer steht
 in der Adresse (`?detail=evidence:<id>`), Ansichten sind damit teilbar.
 Formulare wie Analyse und Import erscheinen im Workspace statt in
 Dialogen. Beschriftungen sind englisch, Zeiten immer UTC. Ansichten, die
-noch kein Backend haben (Findings, Playbooks, Threat Intelligence …), stehen
+noch kein Backend haben (Playbooks, Threat Intelligence …), stehen
 gesperrt in der Navigation und nennen ihre Ausbaustufe.
 
 | Taste | Wirkung |

@@ -84,7 +84,7 @@ export function OverviewPage({ number }: { number: string }) {
           value={running.length > 0 ? `${running.length} running` : `${completed} completed`}
           lines={[`${analyses.length} analysis ${analyses.length === 1 ? "run" : "runs"}`, ...(failed ? [`${failed} failed`] : [])]}
         />
-        <Summary title="Findings" value="—" lines={["Planned: Investigation Core"]} />
+        <Summary title="Findings" value="Review" lines={["Analyst assessments and supporting sources"]} onOpen={() => navigate(`${base}/findings`)} />
         <Summary title="Threat Intel" value="—" lines={["Planned: Intelligence"]} />
       </div>
 

@@ -294,3 +294,23 @@ export interface ArtifactDetail extends Omit<ArtifactRow, "preview"> {
   felder: { id: string; kind: string; fields: unknown }[];
   herkunft: { object_type: string; object_id: string; role: string; analysis_run_id: string | null; observation_id: string | null; source_locator: Record<string, unknown> | null; parser: Record<string, unknown> | null }[];
 }
+
+export interface Finding {
+  id: string;
+  title: string;
+  description: string | null;
+  category: string;
+  priority: string;
+  disposition: string;
+  status: string;
+  derivation: string;
+  created_at: string;
+  updated_at: string;
+  created_by: string;
+  analyst: string | null;
+  entity_refs: string[];
+  event_refs: string[];
+  artifact_refs: string[];
+}
+export type FindingInput = Pick<Finding, "title" | "description" | "category" | "priority" | "disposition" | "entity_refs" | "event_refs" | "artifact_refs">;
+export type FindingChange = Pick<Finding, "title" | "description" | "category" | "priority" | "disposition" | "status"> & { expected_updated_at: string };
