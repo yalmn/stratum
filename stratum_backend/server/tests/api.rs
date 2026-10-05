@@ -210,6 +210,8 @@ async fn ablauf(db: Datenbank) {
     for (n, pw, rolle) in [
         ("mia", "mia-passwort-456", "Forensic Examiner"),
         ("tom", "tom-passwort-789", "Analyst"),
+        ("leser", "leser-passwort-2026", "Read Only"),
+        ("intel", "intel-passwort-2026", "Threat Intel Analyst"),
     ] {
         let u = db.registrieren(n, n, pw).await.unwrap();
         db.freigeben(chef.id, u.id, &[RoleId::template(rolle)])
@@ -792,6 +794,181 @@ async fn ablauf(db: Datenbank) {
         .unwrap()
         .contains(&json!({"art": "user_logon", "anzahl": 2})));
 
+    // Artefakte: stabile Seiten, wörtliche Suche und keine Geheimwerte im Index.
+    let (status, _, artifacts) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/artefakte",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{artifacts}");
+    assert_eq!(artifacts["eintraege"].as_array().unwrap().len(), 3);
+    assert!(!artifacts.to_string().contains("Dienstkennwort1"));
+    let (status, _, first) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/artefakte?anzahl=1",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let cursor = first["naechste"].as_str().unwrap();
+    let (_, _, next) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-1/artefakte?anzahl=1&nach={cursor}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_ne!(first["eintraege"][0]["id"], next["eintraege"][0]["id"]);
+    for (query, expected) in [
+        ("vBoX", 1),
+        ("ich", 2),
+        ("69632", 2),
+        ("Secrets%5C_SC_VBoxService", 1),
+        ("Dienstkennwort1", 0),
+        ("%25", 0),
+    ] {
+        let (status, _, result) = anfrage(
+            &app,
+            "GET",
+            &format!("/api/v1/faelle/API-1/artefakte?suche={query}"),
+            Some(&t_tom),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{result}");
+        assert_eq!(
+            result["eintraege"].as_array().unwrap().len(),
+            expected,
+            "{query}: {result}"
+        );
+        assert!(!result.to_string().contains("Dienstkennwort1"));
+    }
+    let (_, _, result) = anfrage(
+        &app,
+        "GET",
+        &format!(
+            "/api/v1/faelle/API-1/artefakte?evidence={}&art=evtx_record",
+            ev.id
+        ),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(result["eintraege"].as_array().unwrap().len(), 2);
+    let (_, _, result) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/artefakte?suche=vbox",
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    let artifact_id = result["eintraege"][0]["id"].as_str().unwrap();
+    let detail_path = format!("/api/v1/faelle/API-1/artefakte/{artifact_id}");
+    let (status, _, detail) = anfrage(&app, "GET", &detail_path, Some(&t_tom), None).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["felder"][0]["fields"]["wert"], "[maskiert]");
+    assert!(!detail.to_string().contains("Dienstkennwort1"));
+    assert!(!detail["herkunft"].as_array().unwrap().is_empty());
+    let (status, _, _) = anfrage(
+        &app,
+        "GET",
+        &format!("/api/v1/faelle/API-2/artefakte/{artifact_id}"),
+        Some(&t_tom),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = anfrage(&app, "GET", &detail_path, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    for suffix in [
+        "nach=falsch".to_string(),
+        format!("suche={}", "x".repeat(513)),
+    ] {
+        let (status, _, _) = anfrage(
+            &app,
+            "GET",
+            &format!("/api/v1/faelle/API-1/artefakte?{suffix}"),
+            Some(&t_tom),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+    let secret_index: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM artifact_search WHERE document ILIKE '%Dienstkennwort1%'",
+    )
+    .fetch_one(db.pool())
+    .await
+    .unwrap();
+    assert_eq!(secret_index, 0);
+    // Die Maskierung gilt auch für verschachtelte Felder; normale Registry-Werte bleiben suchbar.
+    let safe: sqlx::types::Json<Value> = sqlx::query_scalar("SELECT stratum_suchfelder($1, false)")
+        .bind(sqlx::types::Json(json!({"wert":"normal","nested":{"sensibel":true,"wert":"geheim","passwort":"verborgen"}})))
+        .fetch_one(db.pool()).await.unwrap();
+    assert_eq!(safe.0["wert"], "normal");
+    assert_eq!(safe.0["nested"]["wert"], "[maskiert]");
+    assert_eq!(safe.0["nested"]["passwort"], "[maskiert]");
+
+    let t_leser = anmelden(&app, "leser", "leser-passwort-2026").await;
+    let t_intel = anmelden(&app, "intel", "intel-passwort-2026").await;
+    for (token, path, expected) in [
+        (&t_leser, "/api/v1/faelle/API-1/artefakte", StatusCode::OK),
+        (
+            &t_leser,
+            "/api/v1/faelle/API-1/artefakte?suche=vbox",
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            &t_intel,
+            "/api/v1/faelle/API-1/artefakte",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let (status, _, v) = anfrage(&app, "GET", path, Some(token), None).await;
+        assert_eq!(status, expected, "{v}");
+    }
+    let (status, _, v) = anfrage(
+        &app,
+        "GET",
+        "/api/v1/faelle/API-1/artefakte?suche=Dienstkennwort1",
+        Some(&t_mia),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{v}");
+    assert!(v["eintraege"].as_array().unwrap().is_empty());
+
+    let fields: serde_json::Map<String, Value> = stratum_normalize::GEHEIME_FELDER
+        .iter()
+        .map(|key| ((*key).into(), json!("GeheimwertNurImTest")))
+        .collect();
+    let safe: sqlx::types::Json<Value> =
+        sqlx::query_scalar("SELECT stratum_suchdatensatz($1,true)")
+            .bind(sqlx::types::Json(Value::Object(fields)))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert!(safe
+        .0
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|v| v == "[maskiert]"));
+    let safe: sqlx::types::Json<Value> =
+        sqlx::query_scalar("SELECT stratum_suchdatensatz($1,true)")
+            .bind(sqlx::types::Json(json!("SkalarerGeheimwert")))
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+    assert_eq!(safe.0, "[maskiert]");
+
     // Entitäten: das Dienstpasswort ist maskiert.
     let (_, _, v) = anfrage(
         &app,
@@ -1165,11 +1342,24 @@ async fn ablauf(db: Datenbank) {
         .as_array()
         .unwrap()
         .iter()
-        .map(|e| e["payload"]["event"].as_str().unwrap_or_default())
+        .filter_map(|e| e["payload"]["event"].as_str())
         .collect();
     assert_eq!(ereignisse, ["job_finished", "job_queued"]);
-    assert_eq!(v["eintraege"][0]["payload"]["status"], "completed");
-    assert_eq!(v["eintraege"][0]["object_refs"][0]["type"], "evidence");
+    let jobs: Vec<_> = v["eintraege"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["payload"]["event"].is_string())
+        .collect();
+    assert_eq!(jobs[0]["payload"]["status"], "completed");
+    assert_eq!(jobs[0]["object_refs"][0]["type"], "evidence");
+    assert!(v["eintraege"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["kind"] == "search"
+            && e["payload"]["suche"] == "vbox"
+            && e["audit_event_id"].is_string()));
     let (s, _, v) = anfrage(
         &app,
         "POST",
@@ -1921,4 +2111,73 @@ async fn ablauf(db: Datenbank) {
             .await
             .unwrap();
     assert_eq!(logout, 1);
+}
+
+/// Eine bestehende Datenbank braucht weder erneuten Import noch erneute Analyse.
+#[tokio::test]
+async fn artefaktsuche_upgrade() {
+    let Ok(url) = std::env::var("STRATUM_DB_URL") else {
+        eprintln!("STRATUM_DB_URL nicht gesetzt, Test übersprungen");
+        return;
+    };
+    let name = format!("stratum_upgrade_{}", uuid::Uuid::now_v7().simple());
+    sql(&url, format!("CREATE DATABASE {name}")).await;
+    let (basis, _) = url.rsplit_once('/').unwrap();
+    let ziel = format!("{basis}/{name}");
+    let r = futures_util::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(
+        artefaktsuche_upgrade_pruefen(&ziel),
+    ))
+    .await;
+    sql(&url, format!("DROP DATABASE {name} WITH (FORCE)")).await;
+    if let Err(p) = r {
+        std::panic::resume_unwind(p);
+    }
+}
+
+async fn artefaktsuche_upgrade_pruefen(url: &str) {
+    let mut options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+    if let Some(p) = passwort() {
+        options = options.password(&p);
+    }
+    let mut c = sqlx::PgConnection::connect_with(&options).await.unwrap();
+    sqlx::migrate!("../store/migrations")
+        .run_to(15, &mut c)
+        .await
+        .unwrap();
+    c.execute(sqlx::raw_sql(sqlx::AssertSqlSafe(r#"
+      INSERT INTO case_file(id,case_number,title,status,classification,created_at)
+        VALUES ('01900000-0000-7000-8000-000000000001','UPGRADE','Test','active','internal',now());
+      INSERT INTO evidence(id,case_id,kind,name,source_uri,sha256,imported_at,support)
+        VALUES ('01900000-0000-7000-8000-000000000002','01900000-0000-7000-8000-000000000001','registry_hive','fixture','synthetic://fixture',repeat('a',64),now(),'analyzed');
+      INSERT INTO artifact VALUES ('01900000-0000-7000-8000-000000000003','01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000002','registry_value','{"type":"registry","hive":"SECURITY","key_path":"Secrets\\Test","cell_offset":8100}','{"name":"stratum.lsa","version":"test"}','{"domain":"lsa"}',now());
+      INSERT INTO observation VALUES ('01900000-0000-7000-8000-000000000004','01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000003','lsa_secret','{"wert":"UpgradeSecretOnly","name":"TestService"}','{"name":"stratum.lsa","version":"test"}',now());
+      INSERT INTO artifact VALUES ('01900000-0000-7000-8000-000000000005','01900000-0000-7000-8000-000000000001','01900000-0000-7000-8000-000000000002','unknown','{"type":"byte_range","offset":0}','{}','null',now());
+    "#))).await.unwrap();
+    c.close().await.unwrap();
+    let db = Datenbank::verbinden_mit(url, passwort().as_deref())
+        .await
+        .unwrap();
+    let doc: String = sqlx::query_scalar("SELECT document FROM artifact_search WHERE artifact_id='01900000-0000-7000-8000-000000000003'")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM artifact_search")
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert_eq!(count, 2);
+    assert!(doc.contains("TestService"));
+    assert!(doc.contains(r"Secrets\Test"));
+    assert!(!doc.contains("UpgradeSecretOnly"));
+    assert!(doc.contains("[maskiert]"));
+    let mut tx = db.pool().begin().await.unwrap();
+    sqlx::query("UPDATE observation SET fields=fields || '{\"url\":\"https://example.invalid/changed\"}'::jsonb").execute(&mut *tx).await.unwrap();
+    let updated: String = sqlx::query_scalar("SELECT document FROM artifact_search WHERE artifact_id='01900000-0000-7000-8000-000000000003'")
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+    assert!(updated.contains("https://example.invalid/changed"));
+    assert!(!updated.contains("UpgradeSecretOnly"));
+    tx.rollback().await.unwrap();
+    db.pool().close().await;
 }

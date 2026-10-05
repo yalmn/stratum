@@ -207,6 +207,8 @@ pub fn router(db: Datenbank) -> Router {
             "/api/v1/faelle/{nummer}/zeitachse/arten",
             get(zeitachse_arten),
         )
+        .route("/api/v1/faelle/{nummer}/artefakte", get(artefakte))
+        .route("/api/v1/faelle/{nummer}/artefakte/{id}", get(artefakt))
         .route("/api/v1/faelle/{nummer}/entitaeten", get(entitaeten))
         .route("/api/v1/entitaeten/{id}", get(entitaet))
         .route("/api/v1/faelle/{nummer}/graph/{id}", get(graph))
@@ -1726,4 +1728,24 @@ async fn bookmark_status(
     Ok(Json(
         z.db.bookmark_status(u.id, case, q.kind, &q.target).await?,
     ))
+}
+
+async fn artefakte(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path(nummer): Path<String>,
+    Query(q): Query<stratum_store::artefakte::ArtefaktFilter>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(
+        serde_json::to_value(z.db.artefakte(u.id, fall, &q).await?).map_err(StoreError::from)?,
+    ))
+}
+async fn artefakt(
+    State(z): State<Zustand>,
+    Angemeldet(u): Angemeldet,
+    Path((nummer, id)): Path<(String, stratum_model::ArtifactId)>,
+) -> Antwort<Json<Value>> {
+    let fall = fall_id(&z, &nummer).await?;
+    Ok(Json(z.db.artefakt(u.id, fall, id).await?))
 }

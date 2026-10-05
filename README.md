@@ -729,6 +729,30 @@ dem nächsten Schritt bzw. Analyzer; der Analyselauf endet dann als
 Firefox-Passwörter); solche Analysen laufen weiter direkt über die
 Kommandozeile.
 
+### Artefakte und Fall-Suche
+
+Im Fall öffnen **Artifacts** und **Search** die gespeicherten Artefakte.
+Suchtext wird wörtlich und unabhängig von Groß- und Kleinschreibung in
+Artefakt- und Observation-Feldern sowie Fundstellen gesucht. Evidence und
+Artefaktart lassen sich zusätzlich filtern. Das ist keine Volltextsuche
+über das gesamte Image; einzelne Dateiinhalte werden im Explorer gesucht.
+
+Ein Treffer öffnet Quelle, Parser, maskierte Beobachtungen und verknüpfte
+Objekte. **Add to investigation** übernimmt ihn in die Fallmerkliste.
+Der ursprüngliche Rohfund wird erst mit **Load raw finding** gelesen.
+Artefaktarten sind Parser-Datensätze, keine Dateiformate.
+
+Die Liste braucht `case.view` und `file.view`, Textsuche zusätzlich
+`search.run`. Lesezugriffe und Suchseiten werden auditiert; die erste
+Suchseite erhält auch einen War-Room-Eintrag. Geheimwerte werden vor dem
+Indexieren maskiert, auch für Konten mit Klartextrecht. Die Detailansicht
+zeigt höchstens 100 Observationen und 100 Herkunftsverweise.
+
+Migration 0016 nutzt PostgreSQL `pg_trgm` für die Feldsuche und indexiert
+vorhandene Artefakte beim ersten Start. Dazu ist kein erneuter Import oder
+Analyselauf nötig. Je nach Datenmenge dauert dieser erste Start länger;
+spätere Suchanfragen lesen weder Image noch Report.
+
 ### HTTP-API
 
 `stratum server` stellt die API unter `/api/v1` bereit (Axum), standardmäßig
@@ -767,6 +791,8 @@ Anfrage. Rechte und Audit gelten wie bei der Kommandozeile.
 | `GET /api/v1/jobs/{id}/fortschritt` | Fortschritt als Server-Sent Events |
 | `GET /api/v1/faelle/{nummer}/zeitachse?von=&bis=&art=&entitaet=&evidence=&suche=&nach=&anzahl=` | Ereignisse nach Zeit |
 | `GET /api/v1/faelle/{nummer}/zeitachse/arten` | Ereignisarten mit Anzahl |
+| `GET /api/v1/faelle/{nummer}/artefakte?art=&evidence=&suche=&nach=&anzahl=` | Gespeicherte Artefakte und maskierte Feldsuche |
+| `GET /api/v1/faelle/{nummer}/artefakte/{id}` | Quelle, Parser, maskierte Observationen und Herkunftsverweise |
 | `GET /api/v1/faelle/{nummer}/entitaeten?art=&suche=&nach=&anzahl=` | Entitäten |
 | `GET /api/v1/entitaeten/{id}?klartext=` | Entität mit Beziehungen und Ereignissen |
 | `GET /api/v1/evidence/{id}/volumes` | Volumes im Dateikatalog |

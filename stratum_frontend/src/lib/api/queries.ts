@@ -6,6 +6,8 @@ import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClie
 import { api, apiBytes } from "./client";
 import {
   isFinished,
+  type ArtifactRow,
+  type ArtifactDetail,
   type AnalysisOptions,
   type Case,
   type CaseDetail,
@@ -475,4 +477,26 @@ export function useSaveBookmark(number:string) {
 export function useHttpReplay(number:string) {
   const client=useQueryClient();
   return useMutation({mutationFn:(body:import("./types").HttpReplayRequest)=>api<{job_id:string;network_policy:"none";mode:"offline_simulation"}>(`/faelle/${enc(number)}/http-lab`,{method:"POST",body}),onSuccess:()=>{client.invalidateQueries({queryKey:["jobs"]});client.invalidateQueries({queryKey:["war-room",number]});}});
+}
+
+export function useArtifacts(number: string, kind: string, evidence: string, search: string, enabled = true) {
+  const q = new URLSearchParams({ anzahl: "100" });
+  if (kind) q.set("art", kind);
+  if (evidence) q.set("evidence", evidence);
+  if (search) q.set("suche", search);
+  const base = `/faelle/${enc(number)}/artefakte?${q.toString()}`;
+  return useInfiniteQuery({
+    queryKey: ["artifacts", number, base],
+    refetchOnWindowFocus: false,
+    queryFn: ({ pageParam }) => api<Page<ArtifactRow>>(pageParam ? `${base}&nach=${enc(pageParam)}` : base),
+    initialPageParam: "",
+    getNextPageParam: (last) => last.naechste ?? undefined,
+    enabled,
+  });
+}
+export function useArtifact(number: string, id: string) {
+  return useQuery({
+    queryKey: ["artifact", number, id],
+    queryFn: () => api<ArtifactDetail>(`/faelle/${enc(number)}/artefakte/${enc(id)}`),
+  });
 }

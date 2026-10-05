@@ -278,3 +278,19 @@ export interface HttpReplayRequest {
   direction:"incoming"|"outgoing"; url:string; method:string; headers:[string,string][]; body:string;
   simulated_status:number; simulated_body:string; hypothesis:string; source:{kind:"artifact"|"entity";id:string}|null;
 }
+
+/** Stored source artifact; timestamps belong to linked events. */
+export interface ArtifactRow {
+  id: string;
+  kind: string;
+  evidence_id: string;
+  evidence_name: string | null;
+  source_locator: Record<string, unknown>;
+  parser: Record<string, unknown>;
+  observations: number;
+  preview: string;
+}
+export interface ArtifactDetail extends Omit<ArtifactRow, "preview"> {
+  felder: { id: string; kind: string; fields: unknown }[];
+  herkunft: { object_type: string; object_id: string; role: string; analysis_run_id: string | null; observation_id: string | null; source_locator: Record<string, unknown> | null; parser: Record<string, unknown> | null }[];
+}

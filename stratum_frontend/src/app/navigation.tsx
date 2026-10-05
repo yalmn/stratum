@@ -77,14 +77,14 @@ export const CASE_NAV: NavGroup[] = [
     items: [
       { id: "evidence", label: "Evidence", icon: <HardDrive />, path: "evidence", key: "e" },
       { id: "explorer", label: "Explorer", icon: <FolderTree />, path: "explorer", key: "x" },
-      { id: "artifacts", label: "Artifacts", icon: <Boxes />, planned: INVESTIGATION },
+      { id: "artifacts", label: "Artifacts", icon: <Boxes />, path: "artifacts" },
     ],
   },
   {
     id: "investigation",
     label: "Investigation",
     items: [
-      { id: "search", label: "Search", icon: <FileSearch />, key: "s", planned: INVESTIGATION },
+      { id: "search", label: "Search", icon: <FileSearch />, key: "s", path: "search" },
       { id: "timeline", label: "Timeline", icon: <Activity />, path: "timeline", key: "t" },
       { id: "graph", label: "Graph", icon: <Waypoints />, key: "g", path: "graph" },
       { id: "entities", label: "Entities", icon: <Users />, path: "entities", key: "n" },

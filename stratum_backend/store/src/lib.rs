@@ -21,6 +21,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod artefakte;
 pub mod audit;
 pub mod benutzer;
 pub mod bookmarks;

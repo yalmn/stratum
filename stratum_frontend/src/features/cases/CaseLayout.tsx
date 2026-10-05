@@ -15,6 +15,7 @@ import { useWorkspace } from "../../app/store";
 import { EvidencePage } from "../evidence/EvidencePage";
 import { OverviewPage } from "../overview/OverviewPage";
 import { PlannedView } from "./PlannedView";
+import { ArtifactsPage } from "../artifacts/ArtifactsPage";
 import { EntitiesPage } from "../entities/EntitiesPage";
 import { ExplorerPage } from "../explorer/ExplorerPage";
 import { TimelinePage } from "../timeline/TimelinePage";
@@ -196,6 +197,8 @@ export function CaseLayout() {
           <Route path="reconstruction" element={<HttpLabPage key={number} number={number} />} />
           <Route path="bookmarks" element={<BookmarksPage number={number} />} />
           <Route path="audit" element={<AuditPage key={number} number={number} />} />
+          <Route path="artifacts" element={<ArtifactsPage key={number} number={number} />} />
+          <Route path="search" element={<ArtifactsPage key={`${number}-search`} number={number} searchMode />} />
           <Route path="entities" element={<EntitiesPage number={number} />} />
           <Route path="war-room" element={<WarRoomPage number={number} />} />
           <Route path=":view" element={<PlannedView />} />

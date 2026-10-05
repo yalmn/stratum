@@ -277,7 +277,7 @@ impl Datenbank {
         )
     }
 
-    async fn lesen_erlaubt(
+    pub(crate) async fn lesen_erlaubt(
         &self,
         akteur: ActorId,
         fall: Option<CaseId>,
