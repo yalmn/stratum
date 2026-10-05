@@ -75,7 +75,7 @@ impl Datenbank {
             .collect::<Result<Vec<_>, _>>()?;
         let evaluated = stratum_correlation::evaluate(case, traces);
         let id = Uuid::now_v7();
-        let summary = json!({"input_count":evaluated.input_count,"excluded_count":evaluated.excluded_count, 
+        let summary = json!({"input_count":evaluated.input_count,"excluded_count":evaluated.excluded_count,
             "comparisons":evaluated.comparisons,"matches":evaluated.matches.len(),"limited":input_limited||evaluated.limited,
             "input_limit":10000,"comparison_limit":200000,"match_limit":500,
             "scope":"same case, normalized entity, host, evidence and source snapshot",
