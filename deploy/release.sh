@@ -43,7 +43,12 @@ cp "$BIN" "$AUS/$NAME/bin/stratum"
 cp -R stratum_frontend/dist "$AUS/$NAME/oberflaeche"
 cp LICENSE "$AUS/$NAME/LICENSE"
 printf '%s (%s)\n' "$VERSION" "$COMMIT" >"$AUS/$NAME/VERSION"
-tar -C "$AUS" -czf "$AUS/$NAME.tar.gz" "$NAME"
+# bsdtar (macOS) ohne Apple-Metadaten, sonst warnt GNU tar beim Entpacken.
+TAR_OPT=()
+if tar --version 2>/dev/null | grep -q bsdtar; then
+    TAR_OPT=(--no-xattrs --no-mac-metadata)
+fi
+COPYFILE_DISABLE=1 tar "${TAR_OPT[@]}" -C "$AUS" -czf "$AUS/$NAME.tar.gz" "$NAME"
 rm -rf "${AUS:?}/$NAME"
 SUMME="$(shasum -a 256 "$AUS/$NAME.tar.gz" | awk '{print $1}')"
 
