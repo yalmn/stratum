@@ -47,13 +47,15 @@ case "$VERSION" in @*) abbruch "Dieses install.sh stammt nicht aus einem Release
 # shellcheck disable=SC1091
 . /etc/os-release
 DISTRO="${ID:-unbekannt}"
-CODENAME="${VERSION_CODENAME:-}"
+# Abgeleitete Distributionen (Linux Mint, LMDE) haben eigene Codenamen; die
+# Paketquelle von PostgreSQL kennt nur die von Ubuntu und Debian.
+CODENAME="${UBUNTU_CODENAME:-${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}}"
 case " $DISTRO ${ID_LIKE:-} " in
     *" ubuntu "* | *" debian "*) ;;
     *) abbruch "Distribution \"${PRETTY_NAME:-$DISTRO}\" wird nicht unterstützt. Unter Windows in PowerShell: wsl --install -d Ubuntu-24.04" ;;
 esac
 [ -n "$CODENAME" ] || abbruch "Codename der Distribution fehlt in /etc/os-release."
-echo "Distribution: ${PRETTY_NAME:-$DISTRO}"
+echo "Distribution: ${PRETTY_NAME:-$DISTRO} (Paketbasis ${CODENAME})"
 
 if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
     echo "WSL: ja (${WSL_DISTRO_NAME:-Name unbekannt})"
@@ -87,11 +89,21 @@ trap 'kill "$SUDO_WACH" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 schritt "Grundpakete"
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -q
-sudo apt-get install -y -q ca-certificates curl gnupg openssl tar util-linux bind9-dnsutils whois postgresql-common
+sudo apt-get install -y -q ca-certificates curl gnupg openssl tar util-linux bind9-dnsutils whois iproute2 postgresql-common
 
 # ------------------------------------------------------------- PostgreSQL
 
 schritt "PostgreSQL ${PG_VERSION}"
+port_belegt() { ss -Hltn "sport = :$1" 2>/dev/null | grep -q .; }
+# Belegt schon etwas anderes 5432 (etwa PostgreSQL in Docker), bekommt der
+# neue Cluster einen freien Port.
+NEUER_CLUSTER=nein
+if [ -z "$(pg_lsclusters -h 2>/dev/null)" ]; then
+    NEUER_CLUSTER=ja
+    port_belegt 5432 && echo "Port 5432 ist bereits belegt, PostgreSQL bekommt einen anderen Port."
+fi
+VORHER_BELEGT=nein
+port_belegt 5432 && VORHER_BELEGT=ja
 pg_mit_pgdg() {
     sudo install -d /usr/share/postgresql-common/pgdg
     sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
@@ -113,6 +125,15 @@ PG_MAJOR="$(ls /usr/lib/postgresql | sort -V | tail -1)"
 
 if ! pg_lsclusters -h | awk -v v="$PG_MAJOR" '$1 == v && $2 == "main"' | grep -q .; then
     sudo pg_createcluster "$PG_MAJOR" main
+fi
+PG_PORT="$(pg_lsclusters -h | awk -v v="$PG_MAJOR" '$1 == v && $2 == "main" {print $3}')"
+if [ "$NEUER_CLUSTER" = ja ] && [ "$VORHER_BELEGT" = ja ] && [ "$PG_PORT" = 5432 ]; then
+    sudo pg_ctlcluster "$PG_MAJOR" main stop 2>/dev/null || true
+    for p in $(seq 5433 5499); do
+        port_belegt "$p" || { PG_PORT="$p"; break; }
+    done
+    [ "$PG_PORT" != 5432 ] || abbruch "Kein freier Port für PostgreSQL gefunden."
+    sudo pg_conftool "$PG_MAJOR" main set port "$PG_PORT"
 fi
 sudo service postgresql start >/dev/null 2>&1 || true
 sudo pg_ctlcluster "$PG_MAJOR" main start 2>/dev/null || true
