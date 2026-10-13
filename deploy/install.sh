@@ -13,10 +13,10 @@
 
 set -euo pipefail
 
-VERSION="@VERSION@"
+STRATUM_VERSION="@VERSION@"
 ARCHIV_SHA256="@ARCHIV_SHA256@"
 REPO="yalmn/stratum-releases"
-ARCHIV="stratum-${VERSION}-linux-x86_64.tar.gz"
+ARCHIV="stratum-${STRATUM_VERSION}-linux-x86_64.tar.gz"
 PG_VERSION=17
 PG_MINDESTENS=15
 YARA_VERSION=4.5.5
@@ -41,21 +41,28 @@ abbruch() {
 schritt "Vorprüfung"
 [ "$(id -u)" -ne 0 ] || abbruch "Bitte als normaler Benutzer starten, nicht als root (sudo wird bei Bedarf abgefragt)."
 [ "$(uname -m)" = "x86_64" ] || abbruch "Nur x86_64 wird unterstützt, gefunden: $(uname -m)."
-case "$VERSION" in @*) abbruch "Dieses install.sh stammt nicht aus einem Release (Version fehlt)." ;; esac
+case "$STRATUM_VERSION" in @*) abbruch "Dieses install.sh stammt nicht aus einem Release (Version fehlt)." ;; esac
 
 [ -r /etc/os-release ] || abbruch "/etc/os-release fehlt, Distribution nicht erkennbar."
-# shellcheck disable=SC1091
-. /etc/os-release
-DISTRO="${ID:-unbekannt}"
+# In einer Subshell lesen: os-release setzt unter anderem VERSION und NAME.
+os_feld() {
+    # shellcheck disable=SC1091
+    (. /etc/os-release && eval "printf '%s' \"\${$1:-}\"")
+}
+DISTRO="$(os_feld ID)"
+DISTRO_LIKE="$(os_feld ID_LIKE)"
+DISTRO_NAME="$(os_feld PRETTY_NAME)"
 # Abgeleitete Distributionen (Linux Mint, LMDE) haben eigene Codenamen; die
 # Paketquelle von PostgreSQL kennt nur die von Ubuntu und Debian.
-CODENAME="${UBUNTU_CODENAME:-${DEBIAN_CODENAME:-${VERSION_CODENAME:-}}}"
-case " $DISTRO ${ID_LIKE:-} " in
+CODENAME="$(os_feld UBUNTU_CODENAME)"
+[ -n "$CODENAME" ] || CODENAME="$(os_feld DEBIAN_CODENAME)"
+[ -n "$CODENAME" ] || CODENAME="$(os_feld VERSION_CODENAME)"
+case " $DISTRO $DISTRO_LIKE " in
     *" ubuntu "* | *" debian "*) ;;
-    *) abbruch "Distribution \"${PRETTY_NAME:-$DISTRO}\" wird nicht unterstützt. Unter Windows in PowerShell: wsl --install -d Ubuntu-24.04" ;;
+    *) abbruch "Distribution \"${DISTRO_NAME:-$DISTRO}\" wird nicht unterstützt. Unter Windows in PowerShell: wsl --install -d Ubuntu-24.04" ;;
 esac
 [ -n "$CODENAME" ] || abbruch "Codename der Distribution fehlt in /etc/os-release."
-echo "Distribution: ${PRETTY_NAME:-$DISTRO} (Paketbasis ${CODENAME})"
+echo "Distribution: ${DISTRO_NAME:-$DISTRO} (Paketbasis ${CODENAME})"
 
 if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null; then
     echo "WSL: ja (${WSL_DISTRO_NAME:-Name unbekannt})"
@@ -205,14 +212,14 @@ echo "YARA $(/usr/bin/yara --version)"
 
 # ---------------------------------------------------------------- stratum
 
-schritt "stratum ${VERSION}"
+schritt "stratum ${STRATUM_VERSION}"
 HIER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$HIER/$ARCHIV" ]; then
     echo "nutze vorhandenes Archiv $HIER/$ARCHIV"
     cp "$HIER/$ARCHIV" "$TMP/$ARCHIV"
 else
     curl -fL --progress-bar -o "$TMP/$ARCHIV" \
-        "https://github.com/${REPO}/releases/download/v${VERSION}/${ARCHIV}"
+        "https://github.com/${REPO}/releases/download/v${STRATUM_VERSION}/${ARCHIV}"
 fi
 echo "${ARCHIV_SHA256}  $TMP/$ARCHIV" | sha256sum -c --quiet - ||
     abbruch "Prüfsumme des stratum-Archivs stimmt nicht."
@@ -221,16 +228,16 @@ echo "${ARCHIV_SHA256}  $TMP/$ARCHIV" | sha256sum -c --quiet - ||
 if command -v stratum-demo >/dev/null 2>&1; then
     stratum-demo stop >/dev/null 2>&1 || true
 fi
-sudo rm -rf "$ZIEL/$VERSION"
-sudo install -d "$ZIEL/$VERSION"
-sudo tar -xzf "$TMP/$ARCHIV" -C "$ZIEL/$VERSION" --strip-components=1 --no-same-owner
-sudo ln -sfn "$ZIEL/$VERSION" "$ZIEL/aktuell"
+sudo rm -rf "$ZIEL/$STRATUM_VERSION"
+sudo install -d "$ZIEL/$STRATUM_VERSION"
+sudo tar -xzf "$TMP/$ARCHIV" -C "$ZIEL/$STRATUM_VERSION" --strip-components=1 --no-same-owner
+sudo ln -sfn "$ZIEL/$STRATUM_VERSION" "$ZIEL/aktuell"
 sudo ln -sfn "$ZIEL/aktuell/bin/stratum" /usr/local/bin/stratum
 [ -f "$ZIEL/aktuell/oberflaeche/index.html" ] || abbruch "Weboberfläche fehlt im Archiv."
 
 install -d -m 700 "$DATEN" "$DATEN/faelle" "$DATEN/faelle/DEMO-001" "$DATEN/jobs" "$DATEN/log"
 sudo tee "$KONFIG_DIR/stratum.toml" >/dev/null <<EOF
-# stratum, Demo-Installation (install.sh ${VERSION})
+# stratum, Demo-Installation (install.sh ${STRATUM_VERSION})
 [datenbank]
 url = "postgres://stratum@127.0.0.1:${PG_PORT}/stratum"
 passwort_datei = "${KONFIG_DIR}/db_passwort"
@@ -351,8 +358,8 @@ pruefe "nslookup (DNS)" /usr/bin/nslookup -version
 pruefe "whois" /usr/bin/whois --version
 pruefe "prlimit" /usr/bin/prlimit --version
 
-DISTRO_NAME="${WSL_DISTRO_NAME:-<Distribution>}"
-WIN_PFAD="\\\\wsl.localhost\\${DISTRO_NAME}${DATEN//\//\\}\\faelle"
+WSL_NAME="${WSL_DISTRO_NAME:-<Distribution>}"
+WIN_PFAD="\\\\wsl.localhost\\${WSL_NAME}${DATEN//\//\\}\\faelle"
 
 echo
 if [ "$FEHLER" -eq 0 ]; then
@@ -363,7 +370,7 @@ fi
 cat <<EOF
 
   ==============================================================
-    STRATUM ${VERSION}  DEMO-BETRIEB
+    STRATUM ${STRATUM_VERSION}  DEMO-BETRIEB
     Nur zur Vorführung, nicht für echte Fallarbeit.
   ==============================================================
 
