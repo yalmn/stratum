@@ -255,6 +255,9 @@ sudo tee /usr/local/bin/stratum-demo >/dev/null <<EOF
 #!/usr/bin/env bash
 # Startet und stoppt stratum im Demo-Betrieb (angelegt von install.sh).
 set -uo pipefail
+# Nur die Demo-Konfiguration gilt; Variablen aus einer Entwicklungsumgebung
+# gingen sonst der Datei vor.
+unset STRATUM_DB_URL STRATUM_DB_PASSWORT_DATEI STRATUM_JOB_AUSGABE STRATUM_OBERFLAECHE STRATUM_KONTO STRATUM_DEBUG
 export STRATUM_KONFIG=${KONFIG_DIR}/stratum.toml
 PORT=${PORT}
 PG_MAJOR=${PG_MAJOR}
