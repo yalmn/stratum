@@ -326,6 +326,18 @@ impl Datenbank {
     /// gibt. Das Passwort muss bei der ersten Anmeldung ersetzt werden.
     /// Liefert das Konto, wenn es neu angelegt wurde.
     pub async fn superadmin_startkonto(&self) -> Result<Option<User>, StoreError> {
+        self.startkonto_anlegen(true).await
+    }
+
+    /// Wie [`Self::superadmin_startkonto`], aber für den Demo-Betrieb: das
+    /// bekannte Startpasswort bleibt gültig, es gibt keinen Pflichtwechsel.
+    /// Nur für Vorführungen auf einem lokal gebundenen Server gedacht; der
+    /// Audit-Eintrag hält `demo: true` fest.
+    pub async fn superadmin_demokonto(&self) -> Result<Option<User>, StoreError> {
+        self.startkonto_anlegen(false).await
+    }
+
+    async fn startkonto_anlegen(&self, pflichtwechsel: bool) -> Result<Option<User>, StoreError> {
         if self.superadmins().await? > 0 {
             return Ok(None);
         }
@@ -338,7 +350,7 @@ impl Datenbank {
             superadmin: true,
             created_at: Utc::now(),
             roles: Vec::new(),
-            password_change_required: true,
+            password_change_required: pflichtwechsel,
         };
         // Bewusst ohne Mindestlänge: das Startpasswort ist bekannt und nur
         // bis zur ersten Anmeldung gültig.
@@ -348,8 +360,9 @@ impl Datenbank {
             .to_string();
         let mut tx = self.pool.begin().await?;
         konto_einfuegen(&mut tx, &u, Some(hash), Some(ActorId::cli())).await?;
-        sqlx::query("UPDATE app_user SET password_change_required = true WHERE id = $1")
+        sqlx::query("UPDATE app_user SET password_change_required = $2 WHERE id = $1")
             .bind(u.id.0)
+            .bind(pflichtwechsel)
             .execute(&mut *tx)
             .await?;
         audit::schreiben(
@@ -360,7 +373,12 @@ impl Datenbank {
                 "user",
                 u.id,
                 AuditResult::Success,
-                json!({"username": STARTKONTO, "superadmin": true, "startkonto": true}),
+                json!({
+                    "username": STARTKONTO,
+                    "superadmin": true,
+                    "startkonto": true,
+                    "demo": !pflichtwechsel,
+                }),
             ),
         )
         .await?;

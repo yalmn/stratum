@@ -11,6 +11,7 @@ import "./design-system/shell.css";
 import { ApiError, isUnauthorized } from "./lib/api/client";
 import { keys } from "./lib/api/queries";
 import { AppShell } from "./app/layouts/AppShell";
+import { DemoBanner } from "./features/auth/DemoBanner";
 import { SessionGate } from "./features/auth/SessionGate";
 import { CaseLayout } from "./features/cases/CaseLayout";
 import { CasesPage } from "./features/cases/CasesPage";
@@ -43,6 +44,7 @@ if (root) {
     <StrictMode>
       <QueryClientProvider client={client}>
         <BrowserRouter>
+          <DemoBanner />
           <SessionGate>
             <AppShell>
               <Routes>

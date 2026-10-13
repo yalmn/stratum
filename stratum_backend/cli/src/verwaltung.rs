@@ -73,6 +73,12 @@ pub enum Befehl {
         /// STRATUM_OBERFLAECHE, sonst stratum_frontend/dist, falls gebaut).
         #[arg(long, value_name = "ORDNER")]
         oberflaeche: Option<PathBuf>,
+        /// Demo-Betrieb für Vorführungen: der Superadmin `superadmin` mit
+        /// Passwort `superadmin` wird ohne Pflichtwechsel angelegt, die
+        /// Oberfläche zeigt den Demo-Betrieb an. Nur mit Loopback-Adresse,
+        /// nie für echte Fallarbeit.
+        #[arg(long, conflicts_with = "nicht_nur_lokal")]
+        demo: bool,
     },
     /// Katalog aller Berechtigungen ausgeben.
     Rechte,
@@ -532,7 +538,8 @@ pub fn ausfuehren(b: Befehl) -> Result<()> {
             worker,
             ausgabe,
             oberflaeche,
-        } => return server(adresse, nicht_nur_lokal, worker, ausgabe, oberflaeche),
+            demo,
+        } => return server(adresse, nicht_nur_lokal, worker, ausgabe, oberflaeche, demo),
         _ => {}
     }
     let (rt, db) = datenbank::verbinden()?;
@@ -1130,7 +1137,11 @@ fn server(
     mit_worker: bool,
     ausgabe: Option<PathBuf>,
     oberflaeche: Option<PathBuf>,
+    demo: bool,
 ) -> Result<()> {
+    if demo && !adresse.ip().is_loopback() {
+        anyhow::bail!("--demo nur mit einer Loopback-Adresse ({adresse} ist keine)");
+    }
     if !adresse.ip().is_loopback() && !nicht_nur_lokal {
         anyhow::bail!(
             "{adresse} ist keine Loopback-Adresse; die API läuft ohne TLS. \
@@ -1138,8 +1149,21 @@ fn server(
         );
     }
     let (rt, db) = datenbank::verbinden_mit(4)?;
-    // Erster Start: genau einen Superadmin mit Startpasswort anlegen.
-    if rt.block_on(db.superadmin_startkonto())?.is_some() {
+    // Erster Start: genau einen Superadmin mit Startpasswort anlegen, im
+    // Demo-Betrieb ohne Pflichtwechsel.
+    if demo {
+        eprintln!(
+            "[!] DEMO-BETRIEB: nur zur Vorführung, nicht für echte Fallarbeit. \
+             Anmeldung {0} / {0} ohne Pflichtwechsel.",
+            stratum_store::benutzer::STARTKONTO
+        );
+        if rt.block_on(db.superadmin_demokonto())?.is_some() {
+            eprintln!(
+                "[!] Erster Start: Demo-Superadmin \"{}\" angelegt.",
+                stratum_store::benutzer::STARTKONTO
+            );
+        }
+    } else if rt.block_on(db.superadmin_startkonto())?.is_some() {
         eprintln!(
             "[!] Erster Start: Superadmin \"{0}\" mit Startpasswort \"{0}\" angelegt. \
              Bei der ersten Anmeldung muss es ersetzt werden.",
@@ -1200,6 +1224,7 @@ fn server(
         db,
         listener,
         oberflaeche.as_deref(),
+        demo,
         async move {
             let _ = tokio::signal::ctrl_c().await;
             s2.store(true, std::sync::atomic::Ordering::Relaxed);

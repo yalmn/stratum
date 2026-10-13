@@ -1112,6 +1112,22 @@ async fn rollen_registrierung_freigabe() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn demokonto_ohne_passwortpflicht() {
+    let Some(db) = verbinden().await else {
+        return;
+    };
+    let u = db.superadmin_demokonto().await.unwrap().unwrap();
+    assert!(u.superadmin && !u.password_change_required);
+    // Auch im Demo-Betrieb nur einmal, und kein zweiter Superadmin über das
+    // normale Startkonto.
+    assert!(db.superadmin_demokonto().await.unwrap().is_none());
+    assert!(db.superadmin_startkonto().await.unwrap().is_none());
+    let s = db.anmelden("superadmin", "superadmin").await.unwrap();
+    assert!(!s.password_change_required);
+    assert!(db.audit_pruefen(a()).await.unwrap().intakt());
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn startkonto_einmal_mit_passwortpflicht() {
     let Some(db) = verbinden().await else {
         return;

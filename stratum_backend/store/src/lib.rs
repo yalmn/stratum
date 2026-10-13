@@ -909,6 +909,12 @@ impl Datenbank {
         Ok(out)
     }
 
+    /// Prüft, ob die Datenbank antwortet (für den Betriebsstatus).
+    pub async fn erreichbar(&self) -> Result<(), StoreError> {
+        sqlx::query("SELECT 1").execute(&self.pool).await?;
+        Ok(())
+    }
+
     /// Verbindungspool, etwa für eigene Abfragen in Tests.
     pub fn pool(&self) -> &PgPool {
         &self.pool

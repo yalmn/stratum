@@ -34,6 +34,7 @@ pub const COOKIE: &str = "stratum_sitzung";
 #[derive(Clone)]
 pub struct Zustand {
     db: Datenbank,
+    demo: bool,
 }
 
 /// Fehler einer Anfrage.
@@ -173,7 +174,14 @@ impl FromRequestParts<Zustand> for AuchMitPasswortpflicht {
 
 /// Router mit allen Endpunkten.
 pub fn router(db: Datenbank) -> Router {
+    router_mit(db, false)
+}
+
+/// Wie [`router`]; `demo` meldet `GET /api/v1/status` den Demo-Betrieb, damit
+/// die Oberfläche ihn deutlich kennzeichnet.
+pub fn router_mit(db: Datenbank, demo: bool) -> Router {
     Router::new()
+        .route("/api/v1/status", get(status))
         .route("/api/v1/sitzung", post(anmelden).delete(abmelden))
         .route("/api/v1/ich", get(ich))
         .route("/api/v1/ich/passwort", post(eigenes_passwort))
@@ -288,7 +296,7 @@ pub fn router(db: Datenbank) -> Router {
         )
         .route("/api/v1/audit", get(audit))
         .route("/api/v1/audit/pruefen", post(audit_pruefen))
-        .with_state(Zustand { db })
+        .with_state(Zustand { db, demo })
 }
 
 /// Wie [`router`], dazu die Weboberfläche aus `oberflaeche` (der gebaute
@@ -297,8 +305,12 @@ pub fn router(db: Datenbank) -> Router {
 /// Oberfläche auch beim Neuladen funktionieren. Unbekannte API-Pfade
 /// bleiben 404 im gewohnten Format. Jede Antwort trägt
 /// Sicherheits-Kopfzeilen (CSP nur eigene Quellen, kein Einbetten).
-pub fn router_mit_oberflaeche(db: Datenbank, oberflaeche: Option<&std::path::Path>) -> Router {
-    let r = router(db).route("/api/{*rest}", any(api_unbekannt));
+pub fn router_mit_oberflaeche(
+    db: Datenbank,
+    oberflaeche: Option<&std::path::Path>,
+    demo: bool,
+) -> Router {
+    let r = router_mit(db, demo).route("/api/{*rest}", any(api_unbekannt));
     let r = match oberflaeche {
         Some(d) => r.fallback_service(
             tower_http::services::ServeDir::new(d)
@@ -335,16 +347,29 @@ async fn sicherheitskoepfe(mut r: Response) -> Response {
 
 /// Startet den Server auf einer schon gebundenen Adresse und läuft, bis
 /// `stopp` endet. Erst binden, dann starten: so steht vor allem anderen
-/// fest, ob die Adresse frei ist. Mit `oberflaeche` auch die Weboberfläche.
+/// fest, ob die Adresse frei ist. Mit `oberflaeche` auch die Weboberfläche,
+/// `demo` kennzeichnet den Demo-Betrieb.
 pub async fn starten(
     db: Datenbank,
     listener: tokio::net::TcpListener,
     oberflaeche: Option<&std::path::Path>,
+    demo: bool,
     stopp: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router_mit_oberflaeche(db, oberflaeche))
+    axum::serve(listener, router_mit_oberflaeche(db, oberflaeche, demo))
         .with_graceful_shutdown(stopp)
         .await
+}
+
+/// Betriebszustand ohne Anmeldung: Version und ob ein Demo-Betrieb läuft.
+/// Prüft dabei die Datenbankverbindung; ohne sie antwortet der Server 500.
+async fn status(State(z): State<Zustand>) -> Antwort<Json<Value>> {
+    z.db.erreichbar().await?;
+    Ok(Json(json!({
+        "dienst": "stratum",
+        "version": env!("CARGO_PKG_VERSION"),
+        "demo": z.demo,
+    })))
 }
 
 #[derive(Deserialize)]

@@ -45,6 +45,16 @@ export const keys = {
   eventKinds: (n: string) => ["event-kinds", n] as const,
 };
 
+/** Betriebsstatus ohne Anmeldung, etwa ob ein Demo-Betrieb läuft. */
+export function useServerStatus() {
+  return useQuery({
+    queryKey: ["server-status"],
+    queryFn: () => api<{ dienst: string; version: string; demo: boolean }>("/status"),
+    retry: false,
+    staleTime: Infinity,
+  });
+}
+
 export function useMe() {
   return useQuery({ queryKey: keys.me, queryFn: () => api<Me>("/ich"), retry: false, staleTime: 60_000 });
 }

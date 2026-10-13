@@ -1357,3 +1357,20 @@ a.btn {
   font-size: var(--fs-xs);
   line-height: 1.3;
 }
+
+/* Über allem, ohne die Höhe der Arbeitsfläche (100vh) zu verändern. */
+.demo-banner {
+  position: fixed;
+  right: var(--sp-3);
+  bottom: var(--sp-3);
+  z-index: 1000;
+  padding: var(--sp-1) var(--sp-3);
+  background: var(--bg-elevated);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-lg);
+  color: var(--warning);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  pointer-events: none;
+}

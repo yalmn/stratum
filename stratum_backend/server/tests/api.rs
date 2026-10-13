@@ -2160,7 +2160,7 @@ async fn ablauf(db: Datenbank) {
     )
     .unwrap();
     std::fs::write(gui.join("assets/a.js"), "export {};").unwrap();
-    let mit_gui = stratum_server::router_mit_oberflaeche(db.clone(), Some(&gui));
+    let mit_gui = stratum_server::router_mit_oberflaeche(db.clone(), Some(&gui), false);
     for (pfad, status, art) in [
         ("/", StatusCode::OK, "text/html"),
         ("/faelle/API-1", StatusCode::OK, "text/html"),
@@ -2185,6 +2185,16 @@ async fn ablauf(db: Datenbank) {
             .unwrap()
             .contains("frame-ancestors 'none'"));
     }
+
+    // Betriebsstatus ohne Anmeldung, Demo-Betrieb nur auf Wunsch.
+    let (s, _, w) = anfrage(&app, "GET", "/api/v1/status", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(w["dienst"], "stratum");
+    assert_eq!(w["demo"], false);
+    let demo = stratum_server::router_mit(db.clone(), true);
+    let (s, _, w) = anfrage(&demo, "GET", "/api/v1/status", None, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(w["demo"], true);
 
     // Abmelden beendet die Sitzung.
     let (s, kopf, _) = anfrage(&app, "DELETE", "/api/v1/sitzung", Some(&t_mia), None).await;
